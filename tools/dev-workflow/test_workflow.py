@@ -10,7 +10,7 @@ from desktop_review_request import (
     review_key, validate, worker,
 )
 from release import REHEARSAL_CHECKS, verify_isolated, verify_release
-from workflow import WORKFLOW, Workflow, decision_note, inside_scope, scan
+from workflow import CI_STEPS, WORKFLOW, Workflow, ci_review_record, compact_lock_evidence, decision_note, inside_scope, scan
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -73,6 +73,39 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(WorkflowError, "尚未通过"):
                 self.flow.successful_ci(HEAD)
         self.assertEqual(self.flow.successful_ci(HEAD), CI)
+
+    def test_review_ci_record_includes_outcomes_only_from_the_required_steps(self):
+        job = {"id": 20, "name": "Desktop checks", "conclusion": "success", "html_url": CI["url"] + "/job/20",
+               "steps": [{"name": name, "conclusion": "success"} for name in CI_STEPS]}
+        desktop, workflow = CI_STEPS[1:]
+        lines = [
+            ("Desktop checks", desktop, "✔ packaged description (2.4ms)"),
+            ("Desktop checks", desktop, "ℹ skipped 1"),
+            ("Desktop checks", desktop, "ignored debug output"),
+            ("Another job", desktop, "✔ separate task (1ms)"),
+            ("Desktop checks", workflow, "test_note (test_workflow.WorkflowTests.test_note) ... ok"),
+            ("Desktop checks", workflow, "Ran 1 test in 0.007s"),
+        ]
+        log = "\n".join(f"{name}\t{step}\t2026-11-15T10:00:00Z {line}" for name, step, line in lines)
+        actual = ci_review_record(CI, job, log)
+        self.assertEqual(actual["run"], CI)
+        self.assertEqual(actual["steps"], {name: "success" for name in CI_STEPS})
+        self.assertEqual(actual["desktop_results"], [row[2] for row in lines[:2]])
+        self.assertEqual(actual["workflow_results"], [row[2] for row in lines[-2:]])
+
+    def test_review_lock_record_has_a_comparison_for_each_unchanged_dependency(self):
+        entries = {"node_modules/outer": {"version": "1.0.0", "integrity": "sha512-outer"},
+                   "node_modules/outer/node_modules/inner": {"version": "2.0.0", "integrity": "sha512-inner"}}
+        old = json.dumps({"packages": {"": {"version": "0.4.0"}, **entries}}).encode()
+        new = json.dumps({"packages": {"": {"version": "0.4.1"}, **entries}}).encode()
+        files = compact_lock_evidence(old, new)
+        summary = json.loads(files["review/lock-summary.json"])
+        self.assertEqual(summary["entries_compared"], 2)
+        self.assertEqual((summary["base_sha256"], summary["sha256"]), (digest(old), digest(new)))
+        rows = [line.split("\t") for line in files["review/lock-entry-comparison.tsv"].splitlines()[1:]]
+        self.assertEqual(rows, [[name, entry["version"], entry["integrity"], digest(entry), digest(entry)]
+                                for name, entry in entries.items()])
+        self.assertEqual(compact_lock_evidence(old, new.replace(b"sha512-inner", b"sha512-other")), {})
 
     def test_base_advancing_refuses_pair(self):
         self.repo.main.return_value = OTHER
