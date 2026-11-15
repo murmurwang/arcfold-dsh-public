@@ -123,7 +123,7 @@ Open Plugins, choose Add plugin, and enter \`@arcfold/dsh\`. Enable Arcfold and 
 
 To update, open the installed Arcfold entry in Plugins, choose a compatible version, and confirm. Back up your Desktop data before replacing the installed version.
 
-The Desktop plugin currently supports DeepSeek Pro and Flash.
+Arcfold supports DeepSeek V4 Pro and Flash. On first setup, Arcfold selects DeepSeek V4 Pro if the DSH default model is unset.
 `);
 }
 

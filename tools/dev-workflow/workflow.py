@@ -14,6 +14,11 @@ from common import Repository, WorkflowError, canonical, command, digest, git, g
 
 HERE = Path(__file__).resolve().parent
 WORKFLOW = ".github/workflows/desktop-checks.yml"
+CI_STEPS = ("核对检查使用的提交", "在独立副本运行 Desktop 模拟检查", "运行工作流检查")
+DESKTOP_RESULT = re.compile(r"^(?:[✔✖﹣] .+ \([0-9.]+ms\)|ℹ (?:tests|pass|fail|cancelled|skipped|todo) [0-9]+)$")
+WORKFLOW_RESULT = re.compile(
+    r"^(?:test_\w+ \([\w.]+\) \.\.\. (?:ok|FAIL|ERROR|skipped .+)|Ran [0-9]+ tests? in [0-9.]+s|OK(?: \(.+\))?)$"
+)
 COMPATIBLE_DSH = "0.2.2-rc.1"
 ID = r"[a-z0-9][a-z0-9-]{2,63}"
 SHA = r"[a-f0-9]{40}"
@@ -110,6 +115,40 @@ def blob(path, sha, name):
 
 def changed(path, base, head):
     return git(path, "diff", "--no-renames", "--name-status", "-z", base, head).decode().split("\0")[:-1]
+
+
+def ci_review_record(ci, job, log):
+    desktop, workflow = [], []
+    for line in log.splitlines():
+        label, step, stamped = (line.split("\t", 2) + ["", ""])[:3]
+        if label != job["name"]:
+            continue
+        result = stamped.partition(" ")[2].strip()
+        if step == CI_STEPS[1] and DESKTOP_RESULT.fullmatch(result):
+            desktop.append(result)
+        elif step == CI_STEPS[2] and WORKFLOW_RESULT.fullmatch(result):
+            workflow.append(result)
+    steps = {row["name"]: row["conclusion"] for row in job["steps"] if row["name"] in CI_STEPS}
+    return {"run": ci, "job": {key: job[key] for key in ("id", "name", "conclusion", "html_url")}, "steps": steps,
+            "desktop_results": desktop, "workflow_results": workflow}
+
+
+def compact_lock_evidence(before_bytes, after_bytes):
+    before, after = map(json.loads, (before_bytes, after_bytes))
+    before_entries = {name: row for name, row in before["packages"].items() if name}
+    after_entries = {name: row for name, row in after["packages"].items() if name}
+    if before_entries != after_entries:
+        return {}
+    summary = {"path": "package-lock.json", "base_sha256": digest(before_bytes), "sha256": digest(after_bytes),
+               "dependencies_unchanged": True, "entries_compared": len(after_entries),
+               "before": before["packages"][""], "after": after["packages"][""]}
+    comparisons = ["path\tversion\tintegrity\tbase_entry_sha256\thead_entry_sha256"]
+    for name, row in sorted(after_entries.items()):
+        comparisons.append("\t".join([
+            name, row.get("version", ""), row.get("integrity", ""), digest(before_entries[name]), digest(row),
+        ]))
+    return {"review/lock-summary.json": json.dumps(summary, ensure_ascii=False, indent=2),
+            "review/lock-entry-comparison.tsv": "\n".join(comparisons)}
 
 
 def release_notes(path, head, base, paths, fields):
@@ -268,7 +307,7 @@ class Workflow:
                 "main 已前进，需重新组合。")
         return pr, head, base
 
-    def successful_ci(self, head):
+    def completed_ci(self, head):
         runs = self.repo.api(f"/actions/workflows/desktop-checks.yml/runs?head_sha={head}&per_page=5")
         rows = [row for row in runs["workflow_runs"] if row["head_sha"] == head and
                 row["path"].split("@", 1)[0] == WORKFLOW and row["event"] in ("pull_request", "workflow_dispatch")]
@@ -277,10 +316,13 @@ class Workflow:
         run = rows[0]
         jobs = self.repo.api(f"/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs")["jobs"]
         job = next((row for row in jobs if row["name"] == "Desktop checks" and row["conclusion"] == "success"), None)
-        required = {"核对检查使用的提交", "在独立副本运行 Desktop 模拟检查", "运行工作流检查"}
         completed = {row["name"] for row in job["steps"] if row["conclusion"] == "success"} if job else set()
-        require(required <= completed, "自动检查回执缺少确切提交、Desktop 检查或工作流检查。")
-        return {"id": run["id"], "attempt": run["run_attempt"], "head": head, "url": run["html_url"]}
+        require(set(CI_STEPS) <= completed, "自动检查回执缺少确切提交、Desktop 检查或工作流检查。")
+        return {"id": run["id"], "attempt": run["run_attempt"], "head": head, "url": run["html_url"]}, job
+
+    def successful_ci(self, head):
+        ci, _ = self.completed_ci(head)
+        return ci
 
     def material(self, checkout, task, head, base):
         require(git_line(checkout, "merge-base", base, head) == base, "候选须包含当前 main，先重新组合。")
@@ -302,22 +344,15 @@ class Workflow:
             source = blob(checkout, base if status == "D" else head, name)
             scan(name, source)
             require(b"\x00" not in source and len(source) <= 8_000_000, f"需先核对非文本材料 {name}。")
-            source = source.decode()
             if name == "package-lock.json" and status == "M":
-                before = json.loads(blob(checkout, base, name))
-                after = json.loads(source)
-                if before["packages"].keys() == after["packages"].keys() and all(
-                    before["packages"][key] == after["packages"][key] for key in before["packages"] if key
-                ):
-                    files["review/lock-summary.json"] = json.dumps({
-                        "path": name, "sha256": digest(source.encode()), "dependencies_unchanged": True,
-                        "before": before["packages"][""], "after": after["packages"][""],
-                    }, indent=2, ensure_ascii=False)
+                comparison = compact_lock_evidence(blob(checkout, base, name), source)
+                if comparison:
+                    files.update(comparison)
                     continue
-            files[name] = source
+            files[name] = source.decode()
         for name in ("package.json", "packages/method-ui/package.json", "cordis.patch.yml",
                      "src/desktop/bootstrap.mjs", "src/desktop/python-runtime.mjs", "scripts/package-release.mjs",
-                     "LICENSE", "THIRD_PARTY_NOTICES.md"):
+                     "LICENSE", "THIRD_PARTY_NOTICES.md", WORKFLOW):
             if name in files or name in paths:
                 continue
             present = git_line(checkout, "ls-tree", head, "--", name)
@@ -327,7 +362,7 @@ class Workflow:
                 files[name] = source.decode()
         changes_text = []
         for status, name in pairs:
-            if status in ("M", "D") and name in files:
+            if status in ("M", "D") and (name in files or name == "package-lock.json"):
                 before = blob(checkout, base, name)
                 scan(name, before)
                 patch = git(checkout, "diff", "--no-ext-diff", "--no-textconv", "--unified=2", base, head, "--", name)
@@ -338,7 +373,7 @@ class Workflow:
 
     def preflight(self, number):
         pr, head, base = self.pair(number)
-        ci = self.successful_ci(head)
+        ci, job = self.completed_ci(head)
         match = re.findall(rf"(?m)^Decision: docs/notes/({ID})\.md[ \t]*$", pr.get("body") or "")
         require(len(match) == 1, "PR 描述需指向唯一的 docs/notes 决策记录。")
         _, task = self.task(match[0])
@@ -358,6 +393,11 @@ class Workflow:
             {"target": target, "checks": {"exact_head_ci": True, "decision": True, "scope": True,
                                          "release_metadata": True, "secret_scan": True}, "changes": changes},
             ensure_ascii=False, indent=2)
+        log = self.repo.gh("run", "view", str(ci["id"]), "--repo", self.repo.name,
+                           "--attempt", str(ci["attempt"]), "--log", timeout=90)
+        evidence = json.dumps(ci_review_record(ci, job, log.decode()), ensure_ascii=False, indent=2)
+        scan("review/ci-results.json", evidence.encode())
+        files["review/ci-results.json"] = evidence
         return run_dir, target, files, note
 
     def status(self):
