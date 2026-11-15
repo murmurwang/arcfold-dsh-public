@@ -1,0 +1,61 @@
+{
+  "recipeVersion": "0.2.0",
+  "sourceCommit": "935817c66f5d6e64838f419692545f06787e485f",
+  "license": "MIT with bundled notices",
+  "assets": [
+    {
+      "name": "deepseek_recipe-0.2.0-cp310-abi3-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/67/04/c9c4dda8c4c9a004a356888c68543458237b07b72431edc7e33e0cab740b/deepseek_recipe-0.2.0-cp310-abi3-macosx_11_0_arm64.whl",
+      "sha256": "624bb4d0fb3ed541b9e34d2ef96ff66057026ded7d6708b0b9088cc6d6723999",
+      "bytes": 9549388
+    },
+    {
+      "name": "tokenizer.json",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-recipe/935817c66f5d6e64838f419692545f06787e485f/static/tokenizers/v41/tokenizer.json",
+      "sha256": "81f64d1248a68ce3663e07ab3ee48b851e5df0e32d27cb98e4c9a268151e8d99",
+      "bytes": 6367247
+    },
+    {
+      "name": "LICENSE",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-recipe/935817c66f5d6e64838f419692545f06787e485f/LICENSE",
+      "sha256": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
+      "bytes": 1065
+    },
+    {
+      "name": "tokenizer-NOTICE.md",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-recipe/935817c66f5d6e64838f419692545f06787e485f/static/tokenizers/v41/README.md",
+      "sha256": "711070ffbe350a07e30e81a40aed8ce0e37f444142aa42e25cab704fb06be269",
+      "bytes": 1158
+    },
+    {
+      "name": "native.pyi",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-recipe/935817c66f5d6e64838f419692545f06787e485f/deepseek-recipe-python/python/deepseek_recipe/_native.pyi",
+      "sha256": "e24cb343288b736a0cfadbada954fa0272f4393ae27222adee8ed080aa2b0e92",
+      "bytes": 40062
+    },
+    {
+      "name": "tokenizer-v4.json",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-recipe/935817c66f5d6e64838f419692545f06787e485f/static/tokenizers/v4/tokenizer.json",
+      "sha256": "97d2f31b020d18b5aee5c9b3d5b4efb10ea210f3fe3f7dffe3f1cd90542d6b19",
+      "bytes": 6367146
+    },
+    {
+      "name": "tokenizer-v4-NOTICE.md",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-recipe/935817c66f5d6e64838f419692545f06787e485f/static/tokenizers/v4/README.md",
+      "sha256": "b89168930f9e6f374ef704ec3adfcd19c9e1a6789704e213d9ba3ceae5e966ca",
+      "bytes": 1185
+    }
+  ],
+  "modelMappings": {
+    "deepseek-flash": {
+      "modelVersion": "DeepseekV41Flash",
+      "encoding": "DeepseekV41Encoding",
+      "tokenizer": "tokenizer.json"
+    },
+    "deepseek-v4-pro": {
+      "modelVersion": "DeepseekV4Pro",
+      "encoding": "DeepseekV4Encoding",
+      "tokenizer": "tokenizer-v4.json"
+    }
+  }
+}

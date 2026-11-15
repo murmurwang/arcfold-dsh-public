@@ -1,0 +1,97 @@
+{
+  "name": "@arcfold/dsh",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./agent": "./src/agent.mjs",
+    "./tree-host": "./src/tree/host.mjs",
+    "./learning": "./src/learning-plugin.mjs",
+    "./deepseek-budget": "./src/deepseek-budget-plugin.mjs",
+    "./deepseek": "./src/deepseek-provider.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./presets/*.patch.yml": "./presets/*.patch.yml",
+    "./package.json": "./package.json",
+    "./metered-budget": "./src/metered-provider-host.mjs",
+    "./openai": "./src/openai-provider.mjs",
+    "./preparation": "./src/preparation-plugin.mjs",
+    "./desktop-deepseek": "./src/desktop/provider.mjs",
+    "./desktop-configuration": "./src/desktop/configuration.mjs",
+    "./desktop-bootstrap": "./src/desktop/bootstrap.mjs"
+  },
+  "files": [
+    "src",
+    "bin",
+    "runtime",
+    "cordis.patch.yml",
+    "presets",
+    "scripts/patch-deepseek-transport.mjs",
+    "scripts/prepare-runtime-locks.mjs",
+    "patches",
+    "docs/release-bundle.md",
+    "docs/local-runtime.md",
+    "docs/method-adoption.md",
+    "docs/goal-link.md",
+    "docs/goal-control.md",
+    "docs/metered-provider.md",
+    "docs/provider-seam.md",
+    "scripts/patch-pi-ai-transport.mjs",
+    "docs/openai-metered-backend.md",
+    "scripts/exact-package-patch.mjs",
+    "scripts/patch-model-selection.mjs",
+    "docs/model-selection.md",
+    "docs/opportunity-preparation.md"
+  ],
+  "engines": {
+    "node": ">=24.15.0",
+    "dsh": "0.2.2-rc.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.1.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm-deepseek": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm-deepseek-api-key": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-launch-environment": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/node-addon-system": "0.1.2",
+    "eventsource-parser": "3.1.1",
+    "undici": "7.29.1",
+    "@deepseek-ai/dsh-llm-pi-ai": "0.2.2-rc.1",
+    "stream-json": "3.7.0",
+    "stream-chain": "4.2.5",
+    "@deepseek-ai/cosmokit": "1.9.0",
+    "@deepseek-ai/dsh-anonymous-user-id": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-atomic-write": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-attachment": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-home-paths": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-timeout": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-util-values": "0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "3.19.0",
+    "semver": "7.8.6"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.2.2-rc.1",
+    "esbuild": "0.28.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "jsdom": "29.1.1"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build:method-ui": "node packages/method-ui/build.mjs",
+    "package:release": "node scripts/package-release.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/arcfold.patch.yml"
+      ]
+    }
+  },
+  "license": "MIT"
+}

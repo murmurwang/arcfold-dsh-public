@@ -1,0 +1,99 @@
+.arcfold-methods {box-sizing:border-box;width:calc(100% - 4 * var(--dsh-composer-dock-inset, 8px));max-width:var(--dsh-composer-card-max-width, 800px);margin:0 auto 8px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md, 12px);background:var(--dsw-specific-menu);color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.5;}
+.arcfold-methods header,.arcfold-methods nav,.arcfold-methods .actions {display:flex;align-items:center;flex-wrap:wrap;gap:8px;}
+.arcfold-methods header strong {flex:1;}
+.arcfold-methods button {font:inherit;color:inherit;background:transparent;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:4px 8px;cursor:pointer;}
+.arcfold-methods button:disabled {opacity:.5;cursor:not-allowed;}
+.arcfold-methods button:focus-visible {outline:2px solid currentColor;outline-offset:2px;}
+.arcfold-methods ul {list-style:none;padding:0;margin:8px 0;}
+.arcfold-methods li {margin:8px 0;padding-block:4px;}
+.arcfold-methods p {margin:6px 0;}
+.arcfold-methods .detail {max-height:min(60vh,36rem);overflow:auto;overscroll-behavior:contain;margin-top:8px;border-top:1px solid var(--dsw-alias-border-l1);padding-top:8px;}
+.arcfold-methods .text {white-space:pre-wrap;overflow-wrap:anywhere;}
+.arcfold-methods .meta {font-size:12px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;}
+.arcfold-methods [role=alert] {color:var(--dsw-alias-state-error-primary);white-space:pre-wrap;}
+.arcfold-methods h3,.arcfold-methods h4 {font-size:13px;margin:12px 0 4px;}
+.arcfold-methods .source {border-left:2px solid var(--dsw-alias-border-l1);padding-left:8px;}
+.arcfold-goals textarea {display:block;box-sizing:border-box;width:100%;min-height:5rem;margin:6px 0;padding:8px;font:inherit;resize:vertical;color:inherit;background:transparent;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;}
+.arcfold-goals .goal-discussion {margin-top:12px;}
+.arcfold-goals .goal-work {margin:10px 0;padding-block:4px;}
+.arcfold-goals .goal-work button {margin:4px 8px 4px 0;}
+.arcfold-goals summary {cursor:pointer;}
+.arcfold-goals .goal-cards {display:grid;gap:14px;}
+.arcfold-goals .goal-card {min-width:0;padding:18px;border:1px solid var(--dsw-alias-border-l1);border-radius:12px;background:var(--dsw-alias-bg-layer-1);overflow-wrap:anywhere;}
+.arcfold-goals .goal-card-heading {align-items:flex-start;justify-content:space-between;gap:12px;}
+.arcfold-goals .goal-card-heading h3 {flex:1;min-width:0;margin:0;font-size:15px;line-height:1.6;}
+.arcfold-goals .goal-status-badge {display:inline-block;flex-shrink:0;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;padding:2px 8px;font-size:11px;color:var(--dsw-alias-label-secondary);}
+.arcfold-goals .goal-outcome {margin-top:12px;color:var(--dsw-alias-label-secondary);}
+.arcfold-goals .goal-card-section {margin-top:18px;}
+.arcfold-goals .goal-card-section h4 {margin:0 0 8px;font-size:12px;color:var(--dsw-alias-label-secondary);}
+.arcfold-goals .goal-work {margin:0;padding:0;}
+.arcfold-goals .goal-work + .goal-work {border-top:1px solid var(--dsw-alias-border-l1);margin-top:14px;padding-top:14px;}
+.arcfold-goals .goal-work-blocker {margin-top:10px;padding:10px 12px;border-left:3px solid var(--dsw-alias-border-l1);background:var(--dsw-specific-menu);border-radius:0 6px 6px 0;}
+.arcfold-goals .goal-work-blocker h5 {margin:0;font-size:12px;}
+.arcfold-goals .goal-work-details {margin-top:8px;font-size:12px;}
+.arcfold-goals .goal-card-evidence {border-top:1px solid var(--dsw-alias-border-l1);margin-top:18px;padding-top:12px;}
+.arcfold-goals .goal-card-evidence > summary,.arcfold-goals .goal-work-details > summary {color:var(--dsw-alias-label-secondary);}
+.arcfold-goals .goal-other-work {margin-top:16px;}
+.arcfold-goals summary:focus-visible {outline:2px solid currentColor;outline-offset:3px;}
+@media (max-width:480px) {.arcfold-goals .goal-card {padding:14px;}.arcfold-goals .goal-card-heading h3 {flex-basis:100%;}}
+
+.arcfold-model-settings {width:100%;max-width:52rem;margin:0;padding:16px;}
+.arcfold-model-settings header h2 {flex:1;font-size:16px;margin:0;}
+.arcfold-model-settings h3 {font-size:14px;margin-top:18px;}
+.arcfold-model-settings .model-card {border-top:1px solid var(--dsw-alias-border-l1);padding:8px 0;}
+.arcfold-model-settings label {display:flex;flex-direction:column;gap:4px;min-width:0;}
+.arcfold-model-settings input,.arcfold-model-settings select {box-sizing:border-box;min-width:0;max-width:100%;width:100%;padding:7px;font:inherit;color:inherit;background:var(--dsw-specific-menu);border:1px solid var(--dsw-alias-border-l1);border-radius:8px;}
+.arcfold-model-settings .model-fields {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:8px;margin:10px 0;}
+.arcfold-model-settings .actions {margin:8px 0;}
+.arcfold-model-settings dl {margin:8px 0;display:flex;flex-wrap:wrap;gap:8px 20px;}
+.arcfold-model-settings dt {font-size:12px;color:var(--dsw-alias-label-secondary);}
+.arcfold-model-settings dd {margin:0;overflow-wrap:anywhere;}
+
+.arcfold-understandings .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.arcfold-understandings textarea { display: block; box-sizing: border-box; width: 100%; min-height: 8rem; resize: vertical; }
+.arcfold-understandings summary { cursor: pointer; overflow-wrap: anywhere; }
+
+.arcfold-imports label { display:flex; flex-direction:column; gap:4px; margin:8px 0; }
+.arcfold-imports input,.arcfold-imports select { box-sizing:border-box; width:100%; max-width:100%; min-width:0; padding:7px; font:inherit; color:inherit; background:var(--dsw-specific-menu); border:1px solid var(--dsw-alias-border-l1); border-radius:8px; }
+.arcfold-imports .import-counts { display:flex; flex-wrap:wrap; gap:8px 20px; }
+.arcfold-imports dt { font-size:12px; color:var(--dsw-alias-label-secondary); }
+.arcfold-imports dd { margin:0; }
+.arcfold-imports .import-decision { border-top:1px solid var(--dsw-alias-border-l1); margin-top:12px; padding-top:8px; }
+.arcfold-imports summary { cursor:pointer; overflow-wrap:anywhere; }
+
+.arcfold-view {box-sizing:border-box;width:100%;max-width:60rem;margin:0 auto;padding:16px;min-width:0;color:var(--dsw-alias-label-primary);}
+.arcfold-toolbar {display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:16px;}
+.arcfold-toolbar h2 {font-size:16px;margin:0;}
+.arcfold-view-scope {display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px;}
+.arcfold-view-scope button {font:inherit;color:inherit;background:transparent;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:7px 12px;cursor:pointer;}
+.arcfold-view-scope button[aria-pressed="true"] {background:var(--dsw-alias-bg-layer-1);border-color:currentColor;}
+.arcfold-view-scope button:focus-visible {outline:2px solid currentColor;outline-offset:2px;}
+.arcfold-toolbar button,.arcfold-hero-entry button {font:inherit;color:inherit;background:transparent;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:7px 12px;cursor:pointer;}
+.arcfold-toolbar button:focus-visible,.arcfold-hero-entry button:focus-visible {outline:2px solid currentColor;outline-offset:2px;}
+.arcfold-view > .arcfold-methods,.arcfold-dialog > .arcfold-model-settings {width:100%;max-width:none;}
+.arcfold-view > .arcfold-methods {margin-bottom:16px;padding:18px;border-radius:14px;}
+.arcfold-view > .arcfold-methods > header {gap:10px;min-height:30px;}
+.arcfold-view > .arcfold-methods > header > strong {font-size:14px;}
+.arcfold-view > .arcfold-methods > .detail {max-height:none;overflow:visible;margin-top:16px;padding-top:16px;}
+.arcfold-view > .arcfold-methods > .detail > ul > li {padding:14px;margin:10px 0;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;overflow-wrap:anywhere;}
+.arcfold-opportunities .opportunity-overview {padding:0 0 16px;}
+.arcfold-opportunities .opportunity-overview > p:first-child {margin:0 0 10px;color:var(--dsw-alias-label-secondary);}
+.arcfold-opportunities .opportunity-status {display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;}
+.arcfold-opportunities .status-badge {display:inline-block;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;padding:2px 8px;font-size:11px;line-height:1.6;color:var(--dsw-alias-label-secondary);}
+.arcfold-opportunities ul.opportunity-list {display:grid;gap:12px;margin:0;}
+.arcfold-view > .arcfold-opportunities > .detail > ul.opportunity-list > li {min-width:0;margin:0;padding:18px;background:var(--dsw-alias-bg-layer-1);border-radius:12px;}
+.arcfold-opportunities .opportunity-card > h3 {margin:0;font-size:14px;font-weight:600;line-height:1.7;}
+.arcfold-opportunities .opportunity-field {margin-top:14px;}
+.arcfold-opportunities .opportunity-card h4 {margin:0 0 4px;font-size:11px;font-weight:500;color:var(--dsw-alias-label-secondary);}
+.arcfold-opportunities .opportunity-field p {margin:0;line-height:1.7;}
+.arcfold-opportunities .opportunity-draft,.arcfold-opportunities .opportunity-evidence {border-top:1px solid var(--dsw-alias-border-l1);margin-top:16px;padding-top:12px;}
+.arcfold-opportunities .opportunity-evidence summary {cursor:pointer;font-size:12px;color:var(--dsw-alias-label-secondary);}
+.arcfold-opportunities .opportunity-evidence summary:focus-visible {outline:2px solid currentColor;outline-offset:4px;}
+.arcfold-opportunities .opportunity-card pre {font:inherit;font-size:12px;line-height:1.7;max-width:100%;}
+.arcfold-opportunities .opportunity-pagination {margin-top:16px;justify-content:flex-end;}
+.arcfold-hero-entry {display:flex;flex-wrap:wrap;justify-content:center;gap:8px;color:var(--dsw-alias-label-primary);}
+.arcfold-dialog {box-sizing:border-box;width:min(56rem,calc(100vw - 24px));max-width:calc(100vw - 24px);max-height:calc(100dvh - 32px);overflow:auto;overscroll-behavior:contain;padding:16px;border:1px solid var(--dsw-alias-border-l1);border-radius:12px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);}
+.arcfold-dialog::backdrop {background:rgb(0 0 0 / .35);}
+.arcfold-dialog > .arcfold-view {padding:0;}
+@media (max-width:480px) {.arcfold-hero-entry {flex-direction:column;align-items:stretch;}.arcfold-view,.arcfold-dialog {padding:12px;}.arcfold-methods header {align-items:flex-start;}.arcfold-methods header strong {flex-basis:100%;}}
+@media (max-width:480px) {.arcfold-view > .arcfold-methods {padding:14px;margin-bottom:12px;}.arcfold-view > .arcfold-opportunities > .detail > ul.opportunity-list > li {padding:14px;}}

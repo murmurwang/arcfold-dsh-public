@@ -1,0 +1,110 @@
+# Native per-session composition. Only this main preset owns the Arcfold
+# preparation/tool hooks; Learn mounts an empty preset plus its existing setup.
+# This file does not change the host's approval or permission configuration.
+- insert:
+    - id: preset-arcfold-tree-reader
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: arcfold-tree-reader
+        name: Arcfold tree reader
+        description: 新版内部只读角色；输入、提示词和结果由持久任务拥有。
+        order: 110
+        plugins: []
+    - id: preset-arcfold-tree-writer
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: arcfold-tree-writer
+        name: Arcfold script writer
+        description: 专用脚本作者；六个受限工具由当前任务绑定，不取得普通文件或命令权限。
+        order: 111
+        plugins: []
+    - id: preset-arcfold-main
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: arcfold-main
+        name: Arcfold
+        description: 当前委托、原生工具、已完成学习与长期目标；工具仍受宿主审批约束。
+        order: 1
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: You are a coding agent powered by the {{model}} model.
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: arcfold-agent
+            name: '@arcfold/dsh/agent'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              read: true
+              readImage: false
+              write: true
+              edit: true
+              applyPatch: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+            config:
+              completionDelivery: quiet
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              search: false
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+
+    - id: preset-arcfold-learning
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: arcfold-learning
+        name: Arcfold learning
+        description: 内部冻结材料学习；不用于普通对话、不取得工具或用户控制权限。
+        order: 100
+        plugins: []
+
+    - id: preset-arcfold-preparation
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: arcfold-preparation
+        name: Arcfold preparation
+        description: 已授权范围内的一次机会准备，只写新稿并全文回读。
+        order: 101
+        plugins:
+          - id: tool-executor-native
+            name: '@deepseek-ai/dsh-tool-executor-native'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              read: true
+              readImage: false
+              write: true
+              edit: false
+              applyPatch: false
+              readLimit: 262144
+              readMaxLineLength: 262144
+              readMaxBytes: 262144

@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arcfold.tree.v3.1/learning",
+  "type": "object",
+  "properties": {
+    "categories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "not_understood",
+              "misread",
+              "restart",
+              "repeated",
+              "overdone",
+              "omitted",
+              "misreported",
+              "redo",
+              "proceeded",
+              "approved",
+              "adopted_proposal",
+              "confirmed_inference"
+            ]
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 2000
+          },
+          "sourceId": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 512,
+            "x-reference": "source"
+          },
+          "subjectIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 512,
+              "x-reference": "subject"
+            },
+            "minItems": 0,
+            "maxItems": 20
+          }
+        },
+        "required": [
+          "category",
+          "note",
+          "sourceId",
+          "subjectIds"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 20
+    },
+    "correction": {
+      "anyOf": [
+        {
+          "const": null
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "understanding",
+                "method"
+              ]
+            },
+            "content": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 2000
+            },
+            "quote": {
+              "type": "object",
+              "properties": {
+                "sourceId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 512,
+                  "x-reference": "source"
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 2000
+                }
+              },
+              "required": [
+                "sourceId",
+                "text"
+              ],
+              "additionalProperties": false
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "const": null
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "targetId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[^\\u0000]*$",
+                      "maxLength": 512,
+                      "x-reference": "item"
+                    },
+                    "targetVersion": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "mark": {
+                      "type": "string",
+                      "enum": [
+                        "changed",
+                        "invalid"
+                      ]
+                    },
+                    "scope": {
+                      "type": "string",
+                      "enum": [
+                        "local",
+                        "global"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "targetId",
+                    "targetVersion",
+                    "mark",
+                    "scope"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "expectedEffect": {
+              "anyOf": [
+                {
+                  "const": null
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "not_understood",
+                        "misread",
+                        "restart",
+                        "repeated",
+                        "overdone",
+                        "omitted",
+                        "misreported",
+                        "redo",
+                        "proceeded",
+                        "approved",
+                        "adopted_proposal",
+                        "confirmed_inference"
+                      ]
+                    },
+                    "change": {
+                      "type": "string",
+                      "enum": [
+                        "gone",
+                        "less",
+                        "more"
+                      ]
+                    },
+                    "text": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[^\\u0000]*$",
+                      "maxLength": 40
+                    }
+                  },
+                  "required": [
+                    "category",
+                    "change",
+                    "text"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "content",
+            "quote",
+            "target",
+            "expectedEffect"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "categories",
+    "correction"
+  ],
+  "additionalProperties": false
+}

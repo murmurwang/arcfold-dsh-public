@@ -1,0 +1,9 @@
+packages:
+  - .
+nodeLinker: hoisted
+autoInstallPeers: true
+ignoreScripts: true
+ignorePnpmfile: true
+packageImportMethod: copy
+overrides:
+  '@deepseek-ai/cordis': 4.1.0

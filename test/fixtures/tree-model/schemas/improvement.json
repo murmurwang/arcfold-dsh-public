@@ -1,0 +1,464 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arcfold.tree.v3.1/improvement",
+  "type": "object",
+  "properties": {
+    "same": {
+      "type": "boolean"
+    },
+    "diagnosis": {
+      "type": "string",
+      "minLength": 0,
+      "pattern": "^[^\\u0000]*$",
+      "maxLength": 2000
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "personal",
+        "universal",
+        "none"
+      ]
+    },
+    "supplements": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "op": {
+                "const": "add"
+              },
+              "target": {
+                "type": "string",
+                "enum": [
+                  "learning",
+                  "attribution",
+                  "consolidation"
+                ]
+              },
+              "scopeNodeId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "node"
+              },
+              "text": {
+                "type": "object",
+                "properties": {
+                  "situation": {
+                    "type": "string",
+                    "minLength": 0,
+                    "pattern": "^[^\\u0000]*$",
+                    "maxLength": 200
+                  },
+                  "action": {
+                    "type": "string",
+                    "minLength": 0,
+                    "pattern": "^[^\\u0000]*$",
+                    "maxLength": 200
+                  },
+                  "basis": {
+                    "type": "string",
+                    "minLength": 0,
+                    "pattern": "^[^\\u0000]*$",
+                    "maxLength": 200
+                  },
+                  "notApplicable": {
+                    "type": "string",
+                    "minLength": 0,
+                    "pattern": "^[^\\u0000]*$",
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "situation",
+                  "action",
+                  "basis",
+                  "notApplicable"
+                ],
+                "additionalProperties": false,
+                "x-combined-length": {
+                  "fields": [
+                    "situation",
+                    "action",
+                    "basis",
+                    "notApplicable"
+                  ],
+                  "maximum": 200
+                }
+              },
+              "traitEvidence": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 512,
+                  "x-reference": "source"
+                },
+                "minItems": 0,
+                "maxItems": 20
+              },
+              "universalStopgap": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "op",
+              "target",
+              "scopeNodeId",
+              "text",
+              "traitEvidence",
+              "universalStopgap"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "op": {
+                "const": "revise"
+              },
+              "targetId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "item"
+              },
+              "targetVersion": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "target": {
+                "type": "string",
+                "enum": [
+                  "learning",
+                  "attribution",
+                  "consolidation"
+                ]
+              },
+              "scopeNodeId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "node"
+              },
+              "text": {
+                "type": "object",
+                "properties": {
+                  "situation": {
+                    "type": "string",
+                    "minLength": 0,
+                    "pattern": "^[^\\u0000]*$",
+                    "maxLength": 200
+                  },
+                  "action": {
+                    "type": "string",
+                    "minLength": 0,
+                    "pattern": "^[^\\u0000]*$",
+                    "maxLength": 200
+                  },
+                  "basis": {
+                    "type": "string",
+                    "minLength": 0,
+                    "pattern": "^[^\\u0000]*$",
+                    "maxLength": 200
+                  },
+                  "notApplicable": {
+                    "type": "string",
+                    "minLength": 0,
+                    "pattern": "^[^\\u0000]*$",
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "situation",
+                  "action",
+                  "basis",
+                  "notApplicable"
+                ],
+                "additionalProperties": false,
+                "x-combined-length": {
+                  "fields": [
+                    "situation",
+                    "action",
+                    "basis",
+                    "notApplicable"
+                  ],
+                  "maximum": 200
+                }
+              },
+              "traitEvidence": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 512,
+                  "x-reference": "source"
+                },
+                "minItems": 0,
+                "maxItems": 20
+              },
+              "universalStopgap": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "op",
+              "targetId",
+              "targetVersion",
+              "target",
+              "scopeNodeId",
+              "text",
+              "traitEvidence",
+              "universalStopgap"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "op": {
+                "const": "withdraw"
+              },
+              "targetId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "item"
+              },
+              "targetVersion": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "target": {
+                "type": "string",
+                "enum": [
+                  "learning",
+                  "attribution",
+                  "consolidation"
+                ]
+              },
+              "scopeNodeId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "node"
+              },
+              "traitEvidence": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 512,
+                  "x-reference": "source"
+                },
+                "minItems": 0,
+                "maxItems": 20
+              },
+              "universalStopgap": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "op",
+              "targetId",
+              "targetVersion",
+              "target",
+              "scopeNodeId",
+              "traitEvidence",
+              "universalStopgap"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 10
+    },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "name": {
+                "const": "retentionDays"
+              },
+              "scopeNodeId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "node"
+              },
+              "value": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 2000
+              },
+              "sourceIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 512,
+                  "x-reference": "source"
+                },
+                "minItems": 1,
+                "maxItems": 20
+              }
+            },
+            "required": [
+              "name",
+              "scopeNodeId",
+              "value",
+              "reason",
+              "sourceIds"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "name": {
+                "const": "leaveTimeoutHours"
+              },
+              "scopeNodeId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "node"
+              },
+              "value": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 168
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 2000
+              },
+              "sourceIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 512,
+                  "x-reference": "source"
+                },
+                "minItems": 1,
+                "maxItems": 20
+              }
+            },
+            "required": [
+              "name",
+              "scopeNodeId",
+              "value",
+              "reason",
+              "sourceIds"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 20
+    },
+    "report": {
+      "anyOf": [
+        {
+          "const": null
+        },
+        {
+          "type": "object",
+          "properties": {
+            "step": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 200
+            },
+            "problem": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 2000
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "source"
+              },
+              "minItems": 1,
+              "maxItems": 20
+            },
+            "whyUniversal": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 2000
+            },
+            "stopgap": {
+              "type": "string",
+              "minLength": 0,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 2000
+            },
+            "suggestedFix": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 2000
+            }
+          },
+          "required": [
+            "step",
+            "problem",
+            "evidence",
+            "whyUniversal",
+            "stopgap",
+            "suggestedFix"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "same",
+    "diagnosis",
+    "kind",
+    "supplements",
+    "parameters",
+    "report"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arcfold.tree.v3.1/script_writer",
+  "type": "object",
+  "properties": {
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 512
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "name",
+          "purpose"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 16
+    },
+    "usage": {
+      "type": "string",
+      "minLength": 0,
+      "pattern": "^[^\\u0000]*$",
+      "maxLength": 2000
+    },
+    "stepsText": {
+      "type": "string",
+      "minLength": 0,
+      "pattern": "^[^\\u0000]*$",
+      "maxLength": 2000
+    },
+    "verified": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 0,
+        "pattern": "^[^\\u0000]*$",
+        "maxLength": 2000
+      },
+      "minItems": 0,
+      "maxItems": 20
+    },
+    "notVerified": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 0,
+        "pattern": "^[^\\u0000]*$",
+        "maxLength": 2000
+      },
+      "minItems": 0,
+      "maxItems": 20
+    },
+    "problems": {
+      "type": "string",
+      "minLength": 0,
+      "pattern": "^[^\\u0000]*$",
+      "maxLength": 2000
+    }
+  },
+  "required": [
+    "files",
+    "usage",
+    "stepsText",
+    "verified",
+    "notVerified",
+    "problems"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,142 @@
+# Arcfold's host layer, after the official dsh-base and dsh-web-app bundles.
+# A later profile/home/CLI patch provides every deployment-specific config.
+# Cordis replaces a row's WHOLE config; it does not deep-merge these values.
+# No personal paths, credentials, model prices, budget or new ledger live here.
+
+# Keep the native DSH mark and name; Arcfold remains a conversation view.
+- id: ui-brand-official
+  disabled: false
+
+# Remove the three alternative model routes, not the official LLM runtime.
+- id: llm-deepseek
+  disabled: true
+- id: llm-deepseek-account
+  disabled: true
+- id: llm-pi-ai
+  disabled: true
+
+# These request extensions are outside the metered Messages contract.
+# Native local persistence/query/observations remain enabled.
+- id: deepseek-llm-api-extensions
+  disabled: true
+- id: session-log-deepseek
+  disabled: true
+- id: plugin-package-inventory-deepseek
+  disabled: true
+
+# The current transport owns one main/native step or one frozen Learn call.
+# Do not expose unaccounted retries, purpose calls, child sessions or scheduling.
+- id: llm-retry
+  disabled: true
+- id: session-title-llm
+  disabled: true
+- id: goal-round-driver
+  # The native module identity is immutable in the official patch protocol.
+  # Wait for an explicit old-mode decision; new mode has no round driver.
+  disabled: false
+  inject: [arcfoldLegacyMode]
+- id: fs-sandbox
+  inject: [arcfoldLegacyMode]
+- id: bash-sandbox
+  inject: [arcfoldLegacyMode]
+- id: compaction-basic
+  inject: [arcfoldLegacyMode]
+- id: schedule
+  disabled: true
+- id: ui-schedule
+  disabled: true
+- id: subagent-spawn-in-process
+  disabled: true
+- id: subagent-fork-in-process
+  disabled: true
+
+# Preserve native no-clobber/version guards for main and preparation writes.
+- id: fs-observation-policy
+  disabled: false
+
+# Search has a separate paid HTTP path; plain public URL fetch stays native.
+- id: web-search-deepseek
+  disabled: true
+- id: web-deepseek-api
+  disabled: true
+
+# The official alternative presets lack Arcfold's main ownership hook.
+- id: preset-standard
+  disabled: true
+- id: preset-minimal
+  disabled: true
+- id: preset-ptc
+  disabled: true
+- id: preset-cordis
+  disabled: true
+
+# Launcher defaults belong below native user/home settings. Without a launcher,
+# the independent plugin still requires its explicit deployment configuration.
+- id: agent-default-model
+  # Fixed object paths let the official Loader update only volatile fields.
+  config:
+    provider: !!js "ctx.get('arcfoldRuntimeGuard')?.configuration.initialMain?.provider ?? ''"
+    model: !!js "ctx.get('arcfoldRuntimeGuard')?.configuration.initialMain?.model ?? ''"
+    reasoningEffort: !!js "ctx.get('arcfoldRuntimeGuard')?.configuration.initialMain?.reasoningEffort"
+
+- id: agent-preset-registry
+  config:
+    default: arcfold-main
+
+- insert:
+    - id: arcfold-tree-filesystem
+      name: '@arcfold/dsh/tree-host'
+      config:
+        component: filesystem
+    - id: arcfold-tree-shell
+      name: '@arcfold/dsh/tree-host'
+      config:
+        component: shell
+        timeoutMs: 60000
+    - id: arcfold-tree-compaction
+      name: '@arcfold/dsh/tree-host'
+      config:
+        component: compaction
+    - id: arcfold-desktop-bootstrap
+      name: '@arcfold/dsh/desktop-bootstrap'
+    - id: arcfold-business
+      name: '@arcfold/dsh'
+      inject: [arcfoldDesktopSetup]
+      config: {}
+
+    - id: arcfold-metered-budget
+      # Desktop tree mode supplies its own services after first-run setup.
+      disabled: !!js "Boolean(process.versions.electron && process.argv.some(value => value.includes('dsh-desktop-host')))"
+      name: '@arcfold/dsh/deepseek-budget'
+      config: {}
+
+    - id: arcfold-metered-provider
+      # Desktop tree mode supplies its own services after first-run setup.
+      disabled: !!js "Boolean(process.versions.electron && process.argv.some(value => value.includes('dsh-desktop-host')))"
+      name: '@arcfold/dsh/deepseek'
+      config: {}
+
+    - id: arcfold-shared-metered-host
+      name: '@arcfold/dsh/metered-budget'
+      disabled: true
+      config: {}
+
+    - id: arcfold-openai-provider
+      name: '@arcfold/dsh/openai'
+      disabled: true
+      config: {}
+
+    - id: arcfold-learning
+      # Desktop tree mode supplies its own services after first-run setup.
+      disabled: !!js "Boolean(process.versions.electron && process.argv.some(value => value.includes('dsh-desktop-host')))"
+      name: '@arcfold/dsh/learning'
+      config: {}
+
+    - id: arcfold-preparation
+      # Desktop tree mode supplies its own services after first-run setup.
+      disabled: !!js "Boolean(process.versions.electron && process.argv.some(value => value.includes('dsh-desktop-host')))"
+      name: '@arcfold/dsh/preparation'
+      config: {}
+
+    - id: arcfold-ui
+      name: '@arcfold/dsh-method-ui'

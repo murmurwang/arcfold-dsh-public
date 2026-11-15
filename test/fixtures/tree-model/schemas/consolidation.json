@@ -1,0 +1,1008 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arcfold.tree.v3.1/consolidation",
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "object",
+      "properties": {
+        "oneLine": {
+          "type": "string",
+          "minLength": 0,
+          "pattern": "^[^\\u0000]*$",
+          "maxLength": 60
+        },
+        "status": {
+          "type": "string",
+          "minLength": 0,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 0,
+            "pattern": "^[^\\u0000]*$"
+          },
+          "minItems": 0,
+          "maxItems": 2000
+        },
+        "decisions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "what": {
+                "type": "string",
+                "minLength": 0,
+                "pattern": "^[^\\u0000]*$"
+              },
+              "by": {
+                "type": "string",
+                "enum": [
+                  "user",
+                  "assistant"
+                ]
+              },
+              "when": {
+                "type": "string",
+                "minLength": 0,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512
+              },
+              "sourceIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 512,
+                  "x-reference": "source"
+                },
+                "minItems": 1,
+                "maxItems": 20
+              }
+            },
+            "required": [
+              "what",
+              "by",
+              "when",
+              "sourceIds"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 2000
+        },
+        "next": {
+          "type": "string",
+          "minLength": 0,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 0,
+            "pattern": "^[^\\u0000]*$"
+          },
+          "minItems": 0,
+          "maxItems": 2000
+        }
+      },
+      "required": [
+        "oneLine",
+        "status",
+        "outputs",
+        "decisions",
+        "next",
+        "pending"
+      ],
+      "additionalProperties": false
+    },
+    "broaden": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "understanding",
+              "method"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 512,
+            "x-reference": "item"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "toNodeId": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 512,
+            "x-reference": "node"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 2000
+          },
+          "sourceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 512,
+              "x-reference": "source"
+            },
+            "minItems": 1,
+            "maxItems": 20
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "version",
+          "toNodeId",
+          "reason",
+          "sourceIds"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 20
+    },
+    "retrospect": {
+      "type": "object",
+      "properties": {
+        "understandings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "content": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 2000
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "user_expressed",
+                  "assistant_inferred",
+                  "unknown"
+                ]
+              },
+              "sourceIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 512,
+                  "x-reference": "source"
+                },
+                "minItems": 1,
+                "maxItems": 20
+              }
+            },
+            "required": [
+              "content",
+              "source",
+              "sourceIds"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 20
+        },
+        "methods": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "collaboration",
+                  "technique"
+                ]
+              },
+              "short": {
+                "anyOf": [
+                  {
+                    "const": null
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "situation": {
+                        "type": "string",
+                        "minLength": 0,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 200
+                      },
+                      "action": {
+                        "type": "string",
+                        "minLength": 0,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 200
+                      },
+                      "basis": {
+                        "type": "string",
+                        "minLength": 0,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 200
+                      },
+                      "notApplicable": {
+                        "type": "string",
+                        "minLength": 0,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 200
+                      }
+                    },
+                    "required": [
+                      "situation",
+                      "action",
+                      "basis",
+                      "notApplicable"
+                    ],
+                    "additionalProperties": false,
+                    "x-combined-length": {
+                      "fields": [
+                        "situation",
+                        "action",
+                        "basis",
+                        "notApplicable"
+                      ],
+                      "maximum": 200
+                    }
+                  }
+                ]
+              },
+              "long": {
+                "anyOf": [
+                  {
+                    "const": null
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 80
+                      },
+                      "description": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 60
+                      },
+                      "whenToUse": {
+                        "type": "string",
+                        "minLength": 0,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 2000
+                      },
+                      "steps": {
+                        "type": "string",
+                        "minLength": 0,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 2000
+                      },
+                      "pitfalls": {
+                        "type": "string",
+                        "minLength": 0,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 2000
+                      },
+                      "verify": {
+                        "type": "string",
+                        "minLength": 0,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 2000
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "description",
+                      "whenToUse",
+                      "steps",
+                      "pitfalls",
+                      "verify"
+                    ],
+                    "additionalProperties": false,
+                    "x-combined-length": {
+                      "fields": [
+                        "whenToUse",
+                        "steps",
+                        "pitfalls",
+                        "verify"
+                      ],
+                      "maximum": 2000
+                    }
+                  }
+                ]
+              },
+              "hooks": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "moment": {
+                          "const": "user_message"
+                        },
+                        "conditions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "field": {
+                                "type": "string",
+                                "enum": [
+                                  "userMessage"
+                                ]
+                              },
+                              "op": {
+                                "type": "string",
+                                "enum": [
+                                  "equals",
+                                  "contains",
+                                  "not_contains",
+                                  "starts_with",
+                                  "ends_with"
+                                ]
+                              },
+                              "value": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "pattern": "^[^\\u0000]*$",
+                                    "maxLength": 512
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "op",
+                              "value"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "minItems": 0,
+                          "maxItems": 16
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "add_context"
+                          ]
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 80
+                        }
+                      },
+                      "required": [
+                        "moment",
+                        "conditions",
+                        "action",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "moment": {
+                          "const": "before_tool"
+                        },
+                        "conditions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "field": {
+                                "type": "string",
+                                "enum": [
+                                  "toolName",
+                                  "command",
+                                  "filePath",
+                                  "earlierToolsInTurn",
+                                  "earlierFilesInTurn"
+                                ]
+                              },
+                              "op": {
+                                "type": "string",
+                                "enum": [
+                                  "equals",
+                                  "contains",
+                                  "not_contains",
+                                  "starts_with",
+                                  "ends_with"
+                                ]
+                              },
+                              "value": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "pattern": "^[^\\u0000]*$",
+                                    "maxLength": 512
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "op",
+                              "value"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "minItems": 0,
+                          "maxItems": 16
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "block",
+                            "ask_user",
+                            "add_context"
+                          ]
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 80
+                        }
+                      },
+                      "required": [
+                        "moment",
+                        "conditions",
+                        "action",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "moment": {
+                          "const": "after_tool"
+                        },
+                        "conditions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "field": {
+                                "type": "string",
+                                "enum": [
+                                  "toolName",
+                                  "command",
+                                  "filePath",
+                                  "isError",
+                                  "output"
+                                ]
+                              },
+                              "op": {
+                                "type": "string",
+                                "enum": [
+                                  "equals",
+                                  "contains",
+                                  "not_contains",
+                                  "starts_with",
+                                  "ends_with"
+                                ]
+                              },
+                              "value": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "pattern": "^[^\\u0000]*$",
+                                    "maxLength": 512
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "op",
+                              "value"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "minItems": 0,
+                          "maxItems": 16
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "add_context"
+                          ]
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 80
+                        }
+                      },
+                      "required": [
+                        "moment",
+                        "conditions",
+                        "action",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "moment": {
+                          "const": "turn_end"
+                        },
+                        "conditions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "field": {
+                                "type": "string",
+                                "enum": [
+                                  "toolsCalled",
+                                  "filesWritten",
+                                  "earlierToolsInTurn",
+                                  "earlierFilesInTurn"
+                                ]
+                              },
+                              "op": {
+                                "type": "string",
+                                "enum": [
+                                  "equals",
+                                  "contains",
+                                  "not_contains",
+                                  "starts_with",
+                                  "ends_with"
+                                ]
+                              },
+                              "value": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "pattern": "^[^\\u0000]*$",
+                                    "maxLength": 512
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "op",
+                              "value"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "minItems": 0,
+                          "maxItems": 16
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "remind_user",
+                            "continue"
+                          ]
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 80
+                        }
+                      },
+                      "required": [
+                        "moment",
+                        "conditions",
+                        "action",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "moment": {
+                          "const": "node_enter"
+                        },
+                        "conditions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "field": {
+                                "type": "string",
+                                "enum": [
+                                  "nodeId",
+                                  "nodeName"
+                                ]
+                              },
+                              "op": {
+                                "type": "string",
+                                "enum": [
+                                  "equals",
+                                  "contains",
+                                  "not_contains",
+                                  "starts_with",
+                                  "ends_with"
+                                ]
+                              },
+                              "value": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "pattern": "^[^\\u0000]*$",
+                                    "maxLength": 512
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "op",
+                              "value"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "minItems": 0,
+                          "maxItems": 16
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "add_context"
+                          ]
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 80
+                        }
+                      },
+                      "required": [
+                        "moment",
+                        "conditions",
+                        "action",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "moment": {
+                          "const": "node_leave"
+                        },
+                        "conditions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "field": {
+                                "type": "string",
+                                "enum": [
+                                  "filesWrittenInNode"
+                                ]
+                              },
+                              "op": {
+                                "type": "string",
+                                "enum": [
+                                  "equals",
+                                  "contains",
+                                  "not_contains",
+                                  "starts_with",
+                                  "ends_with"
+                                ]
+                              },
+                              "value": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "pattern": "^[^\\u0000]*$",
+                                    "maxLength": 512
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "op",
+                              "value"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "minItems": 0,
+                          "maxItems": 16
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "remind_user",
+                            "leave_note"
+                          ]
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 80
+                        }
+                      },
+                      "required": [
+                        "moment",
+                        "conditions",
+                        "action",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "moment": {
+                          "const": "node_complete"
+                        },
+                        "conditions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "field": {
+                                "type": "string",
+                                "enum": [
+                                  "filesWrittenInNode",
+                                  "completedBy"
+                                ]
+                              },
+                              "op": {
+                                "type": "string",
+                                "enum": [
+                                  "equals",
+                                  "contains",
+                                  "not_contains",
+                                  "starts_with",
+                                  "ends_with"
+                                ]
+                              },
+                              "value": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "pattern": "^[^\\u0000]*$",
+                                    "maxLength": 512
+                                  },
+                                  {
+                                    "type": "boolean"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "op",
+                              "value"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "minItems": 0,
+                          "maxItems": 16
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": [
+                            "remind_user",
+                            "block"
+                          ]
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 80
+                        }
+                      },
+                      "required": [
+                        "moment",
+                        "conditions",
+                        "action",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "minItems": 0,
+                "maxItems": 8
+              },
+              "scriptRequests": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "purpose": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[^\\u0000]*$",
+                      "maxLength": 2000
+                    },
+                    "evidence": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 512,
+                        "x-reference": "source"
+                      },
+                      "minItems": 1,
+                      "maxItems": 20
+                    },
+                    "files": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 512,
+                        "x-reference": "file"
+                      },
+                      "minItems": 0,
+                      "maxItems": 20
+                    }
+                  },
+                  "required": [
+                    "purpose",
+                    "evidence",
+                    "files"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 0,
+                "maxItems": 8
+              },
+              "expectedEffect": {
+                "anyOf": [
+                  {
+                    "const": null
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "category": {
+                        "type": "string",
+                        "enum": [
+                          "not_understood",
+                          "misread",
+                          "restart",
+                          "repeated",
+                          "overdone",
+                          "omitted",
+                          "misreported",
+                          "redo",
+                          "proceeded",
+                          "approved",
+                          "adopted_proposal",
+                          "confirmed_inference"
+                        ]
+                      },
+                      "change": {
+                        "type": "string",
+                        "enum": [
+                          "gone",
+                          "less",
+                          "more"
+                        ]
+                      },
+                      "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^\\u0000]*$",
+                        "maxLength": 40
+                      }
+                    },
+                    "required": [
+                      "category",
+                      "change",
+                      "text"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "sourceIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 512,
+                  "x-reference": "source"
+                },
+                "minItems": 1,
+                "maxItems": 20
+              }
+            },
+            "required": [
+              "kind",
+              "short",
+              "long",
+              "hooks",
+              "scriptRequests",
+              "expectedEffect",
+              "sourceIds"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 10
+        }
+      },
+      "required": [
+        "understandings",
+        "methods"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "summary",
+    "broaden",
+    "retrospect"
+  ],
+  "additionalProperties": false
+}

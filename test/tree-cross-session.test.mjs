@@ -1,0 +1,37 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { setup } from './fixtures/tree-context/helpers.mjs';
+import { digest } from '../src/tree/contracts.mjs';
+
+test('another session receives prior same-goal turns, but not sibling content or corrected-away history', async t => {
+  const f = setup(t), firstNode = f.create('活动准备'), secondNode = f.create('独立相册');
+  const priorInput = f.begin('other-session', 1, '请列三步');
+  f.owner.targetNodeId = firstNode;
+  const prior = await f.attributed(priorInput);
+  f.finish(priorInput, { answer: '集合、慢行观察、结束收尾' });
+  f.settle(prior.id);
+  const unrelatedInput = f.begin('other-session', 2, '相册私有内容');
+  f.owner.targetNodeId = secondNode;
+  const unrelated = await f.attributed(unrelatedInput);
+  f.finish(unrelatedInput, { answer: '相册独有答复' });
+  f.settle(unrelated.id);
+  const currentInput = f.begin('current-session', 1, '保持三步');
+  f.owner.targetNodeId = firstNode;
+  const current = await f.attributed(currentInput);
+  await f.builder.activate(currentInput.sessionId, current.id);
+  const segment = f.builder.capture(currentInput.sessionId).segments.find(s => s.key.startsWith('cross-session:'));
+  assert.ok(segment.text.includes('集合、慢行观察、结束收尾'));
+  assert.ok(!segment.text.includes('相册私有内容'));
+  assert.ok(!segment.text.includes('PRIVATE_REASONING'));
+  assert.ok(!segment.text.includes('合成工具结果'));
+  assert.equal(f.builder.reusableComponent(segment), true);
+  f.revoked.add(digest(prior.userSourceRefs[0]));
+  assert.equal(f.builder.reusableComponent(segment), false);
+  assert.ok(!JSON.stringify(f.builder.capture(currentInput.sessionId).segments).includes('集合、慢行观察、结束收尾'));
+  f.revoked.delete(digest(prior.userSourceRefs[0]));
+  f.asUser();
+  f.tree.correctAssignment(f.cmd({ turnId: prior.id, nodeIds: [secondNode], sourceRefs: [] }, f.expected('tree_turns', prior.id)));
+  assert.equal(f.builder.reusableComponent(segment), false);
+  const updated = f.builder.capture(currentInput.sessionId);
+  assert.ok(!JSON.stringify(updated.segments).includes('集合、慢行观察、结束收尾'));
+});

@@ -1,0 +1,74 @@
+{
+  "id": "arcfold-pi-ai-0.2.2-rc.1-transport-v2",
+  "package": "@deepseek-ai/dsh-llm-pi-ai",
+  "version": "0.2.2-rc.1",
+  "upstreamCommit": "66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db",
+  "runtimeCapability": {
+    "export": "PiAiAdapter",
+    "property": "transportSeam",
+    "value": "pi-ai-create-transport-v2"
+  },
+  "files": [
+    {
+      "path": "lib/index.js",
+      "beforeSha256": "1a3ae58f9b4493e15459cc5000ec80f21b5d3f4a9dea6ffb6bc28e5b8817ae8a",
+      "edits": [
+        {
+          "before": "\t\t\tconst profile = this.profileOf(snapshot, options.provider);\n\t\t\tconst model = this.modelOf(snapshot, options.provider, options.model);",
+          "after": "\t\t\t// Optional per-call transport: resolve synchronously before credentials or attachments.\n\t\t\tconst transport = this.config.createTransport?.(options);\n\t\t\t// Consume a real Promise rejection without awaiting it or calling a custom then.\n\t\t\tlet promiseTransport = false;\n\t\t\tif (transport !== null && typeof transport === \"object\") {\n\t\t\t\ttry {\n\t\t\t\t\tPromise.prototype.then.call(transport, () => void 0, () => void 0);\n\t\t\t\t\tpromiseTransport = true;\n\t\t\t\t} catch {} // Non-Promise objects fail the native brand check.\n\t\t\t}\n\t\t\tif (transport !== void 0 && (promiseTransport || transport === null || typeof transport !== \"object\" || typeof transport.then === \"function\")) throw new TypeError(\"pi-ai createTransport must return undefined or an object with a fetch function synchronously\");\n\t\t\tconst transportFetch = transport?.fetch;\n\t\t\tif (transport !== void 0 && typeof transportFetch !== \"function\") throw new TypeError(\"pi-ai createTransport must return undefined or an object with a fetch function synchronously\");\n\t\t\tconst profile = this.profileOf(snapshot, options.provider);\n\t\t\tconst model = this.modelOf(snapshot, options.provider, options.model);"
+        },
+        {
+          "before": "\t\t\t\t\t...profileOptions(profile, reasoning, apiKey),",
+          "after": "\t\t\t\t\t...profileOptions(profile, reasoning, apiKey),\n\t\t\t\t\t...transportFetch === void 0 ? {} : { fetch: transportFetch },"
+        },
+        {
+          "before": "};\n//#endregion\n//#region lib/types/auth.js",
+          "after": "};\nObject.defineProperty(PiAiAdapter, \"transportSeam\", { value: \"pi-ai-create-transport-v2\", enumerable: true });\n//#endregion\n//#region lib/types/auth.js"
+        },
+        {
+          "before": "\t\tprepareHeaders: (request, headers) => ctx.waterfall(\"llm-pi-ai/request-headers\", request, headers, () => headers),",
+          "after": "\t\tcreateTransport: (options) => ctx.waterfall(\"llm-pi-ai/request-transport\", options, () => void 0),\n\t\tprepareHeaders: (request, headers) => ctx.waterfall(\"llm-pi-ai/request-headers\", request, headers, () => headers),"
+        }
+      ],
+      "afterSha256": "f4525e4f5591213569878a83fc5731712095cc11894c1b4dc962dd85f6cede49"
+    },
+    {
+      "path": "lib/types/adapter.d.ts",
+      "beforeSha256": "415ded408f8004cf74c2d66e043e63e9c468b3633345550675cda89e8d10e03e",
+      "edits": [
+        {
+          "before": "/** Constructor options for {@link PiAiAdapter}: the two resolution hooks the plugin owns. */",
+          "after": "/** One call-local fetch implementation; receives the SDK-serialized HTTP request. */\nexport interface PiAiRequestTransport {\n    /** Preserve the supplied signal; this function must not depend on a receiver. */\n    fetch: typeof globalThis.fetch;\n}\n/** Constructor options for {@link PiAiAdapter}: the resolution hooks the plugin owns. */"
+        },
+        {
+          "before": "export interface PiAiAdapterOptions {\n",
+          "after": "export interface PiAiAdapterOptions {\n    /**\n     * Optional synchronous factory, invoked once per consumed stream before any\n     * credential or attachment await. Receives the exact GenerateOptions object\n     * for that call; do not mutate or retain it beyond the call. Missing factory\n     * or undefined preserves pi-ai defaults; every other result must contain a\n     * fetch function. Promises/thenables and invalid results fail before I/O.\n     * Native Promise rejections are consumed before immediate rejection of the\n     * call; no asynchronous result is awaited or custom thenable executed.\n     * The returned fetch function is captured immediately for this stream.\n     * No accounting is provided: a metered host must separately require a hook,\n     * enforce its own route guard, and record every actual transport attempt.\n     * Throws propagate; diagnostics must never contain credentials or prompts.\n     */\n    createTransport?: (options: GenerateOptions) => PiAiRequestTransport | undefined;\n"
+        },
+        {
+          "before": "export declare class PiAiAdapter extends LlmAdapter {\n",
+          "after": "export declare class PiAiAdapter extends LlmAdapter {\n    /** Read-only capability of this loaded class, not evidence of host accounting. */\n    static readonly transportSeam: \"pi-ai-create-transport-v2\";\n"
+        }
+      ],
+      "afterSha256": "111b9890ecd103325aac2070eeeb225281d97e532d982e65b473e77a4587076f"
+    },
+    {
+      "path": "lib/types/index.d.ts",
+      "beforeSha256": "4e8df6019d6f1c7bb10639013f85ab3fcc65199a8a00e1f468cb739df3188018",
+      "edits": [
+        {
+          "before": "import type { Context } from '@deepseek-ai/cordis';",
+          "after": "import type { Context } from '@deepseek-ai/cordis';\nimport type { GenerateOptions } from '@deepseek-ai/dsh-llm';\nimport type { PiAiRequestTransport } from './adapter.ts';"
+        },
+        {
+          "before": "export type { PiAiAdapterOptions } from './adapter.ts';",
+          "after": "export type { PiAiAdapterOptions, PiAiRequestTransport } from './adapter.ts';"
+        },
+        {
+          "before": "    interface Events {\n",
+          "after": "    interface Events {\n        /**\n         * Select a call-local transport synchronously before credentials/attachments.\n         * Receives the exact call options. Return next() to defer; no listener\n         * defaults to undefined (official transport). A selected transport must\n         * supply fetch; promises and invalid values fail before inference I/O.\n         * Do not mutate options; errors must exclude prompts and credentials.\n         * @mode waterfall\n         */\n        'llm-pi-ai/request-transport'(options: GenerateOptions, next: () => PiAiRequestTransport | undefined): PiAiRequestTransport | undefined;\n"
+        }
+      ],
+      "afterSha256": "3e5de0e9f49a839092dbcfda87d67021d057e0f7548fab92ab61442e97adeba3"
+    }
+  ]
+}

@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arcfold.tree.v3.1/attribution",
+  "type": "object",
+  "properties": {
+    "actions": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "continue",
+                  "switch"
+                ]
+              },
+              "nodeId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "node"
+              }
+            },
+            "required": [
+              "action",
+              "nodeId"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "create"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 80
+              }
+            },
+            "required": [
+              "action",
+              "name"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "create_child"
+              },
+              "parentId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "node"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 80
+              }
+            },
+            "required": [
+              "action",
+              "parentId",
+              "name"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 8
+    },
+    "statusChanges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "nodeId": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 512,
+            "x-reference": "node"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "paused",
+              "completed",
+              "abandoned"
+            ]
+          },
+          "sourceId": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 512,
+            "x-reference": "source"
+          }
+        },
+        "required": [
+          "nodeId",
+          "status",
+          "sourceId"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 8
+    }
+  },
+  "required": [
+    "actions",
+    "statusChanges"
+  ],
+  "additionalProperties": false
+}

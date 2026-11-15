@@ -1,0 +1,94 @@
+{
+  "schema": "arcfold-initial-policy-v1",
+  "version": "2026-11-08-current-model-options",
+  "reviewedAt": "2026-11-08",
+  "initialMain": {
+    "provider": "deepseek-official",
+    "model": "deepseek-v4-pro",
+    "reasoningEffort": "high"
+  },
+  "requestMaxTokens": 128000,
+  "sources": [
+    "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+    "https://api-docs.deepseek.com/api/list-models/",
+    "https://developers.openai.com/api/docs/models/gpt-6-astra",
+    "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+  ],
+  "boundaries": {
+    "deepseekPrices": "Peak prices are a conservative local CNY estimate, not exact off-peak billing.",
+    "openai": "Token accounting only; context bound preserves pinned pi-ai 1.5.0 catalog 272000, not official advertised 1050000.",
+    "learning": "Initial copy only. Future main choices do not change independent learning defaults."
+  },
+  "routes": {
+    "deepseek-official": {
+      "kind": "deepseek",
+      "endpoint": "https://api.deepseek.com/anthropic/v1/messages",
+      "modelPolicies": {
+        "deepseek-v4-pro": {
+          "contextWindow": 1048576,
+          "maxOutputTokens": 393216,
+          "requestMaxTokens": 128000,
+          "reasoningEfforts": [
+            "off",
+            "low",
+            "high",
+            "max"
+          ],
+          "prices": {
+            "input": 9,
+            "output": 27,
+            "cachedInput": 0.3
+          },
+          "priceVersion": "DeepSeek-V4-Pro-0813/2026-08-17-Asia-Shanghai-peak-conservative-estimate"
+        },
+        "deepseek-flash": {
+          "contextWindow": 1048576,
+          "maxOutputTokens": 393216,
+          "requestMaxTokens": 128000,
+          "reasoningEfforts": [
+            "off",
+            "low",
+            "high",
+            "max"
+          ],
+          "prices": {
+            "input": 2,
+            "output": 8,
+            "cachedInput": 0.04
+          },
+          "priceVersion": "DeepSeek-V4.1-Flash-1017/2026-11-08-verified/peak-conservative-estimate"
+        }
+      }
+    },
+    "openai": {
+      "kind": "openai",
+      "endpoint": "https://api.openai.com/v1/responses",
+      "modelPolicies": {
+        "gpt-6-astra": {
+          "contextWindow": 272000,
+          "maxOutputTokens": 128000,
+          "requestMaxTokens": 128000,
+          "reasoningEfforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "gpt-6.1-sol": {
+          "contextWindow": 272000,
+          "maxOutputTokens": 128000,
+          "requestMaxTokens": 128000,
+          "reasoningEfforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        }
+      }
+    }
+  }
+}

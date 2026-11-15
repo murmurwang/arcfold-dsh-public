@@ -1,0 +1,61 @@
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -2181,6 +2181,8 @@
+ 	}
+ 	async *request(options, connection, signal, activity) {
+ 		signal.throwIfAborted();
++		const transport = this.dependencies.createTransport === void 0 ? { send: (url, init) => fetch(url, init) } : this.dependencies.createTransport(options);
++		if (transport === null || typeof transport !== "object" || typeof transport.send !== "function") throw new TypeError("DeepSeek createTransport must return an object with send(url, init)");
+ 		const { messages, versions } = await prepareImages(options.messages, connection, options.model, this.dependencies.resolveAttachments?.(), this.imageAccess, signal);
+ 		const auth = await this.dependencies.resolveAuth(connection);
+ 		try {
+@@ -2228,7 +2230,7 @@
+ 				});
+ 				signal.throwIfAborted();
+ 				const betas = [...fileIds !== void 0 && fileIds.size > 0 ? [MESSAGES_FILES_BETA] : [], ...body.messages.some((message) => message.content.some((block) => block.type === "tool_addition" || block.type === "tool_removal")) ? [MESSAGES_TOOL_CHANGES_BETA] : []];
+-				const response = await fetch(`${messagesApiRoot(connection.baseURL)}/messages`, {
++				const response = await transport.send(`${messagesApiRoot(connection.baseURL)}/messages`, {
+ 					method: "POST",
+ 					signal,
+ 					body: extensions.payload,
+@@ -2747,6 +2749,7 @@
+ 		registeredPolicy = policy;
+ 	});
+ }
++Object.defineProperty(registerDeepSeekProvider, "transportSeam", { value: "deepseek-messages-create-transport-v1", enumerable: true });
+ //#endregion
+ //#region lib/types/listing-config.js
+ /** Default deadline of one model-listing request and of a first-use wait. */
+--- a/lib/types/types.d.ts
++++ b/lib/types/types.d.ts
+@@ -1,5 +1,5 @@
+ /** Model catalog and request-local dependencies for DeepSeek Messages. */
+-import type { LlmModelInfo, ModelModality, SystemPromptUpdate, ToolUpdate, ResolvedRetryPolicy, ImageAttachmentAccess } from '@deepseek-ai/dsh-llm';
++import type { GenerateOptions, LlmModelInfo, ModelModality, SystemPromptUpdate, ToolUpdate, ResolvedRetryPolicy, ImageAttachmentAccess } from '@deepseek-ai/dsh-llm';
+ import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment';
+ import type { AnonymousUserId } from '@deepseek-ai/dsh-anonymous-user-id';
+ import type { DeepSeekLlmApiExtensionRequest, PreparedDeepSeekLlmApiExtensions } from '@deepseek-ai/dsh-deepseek-llm-api-extensions';
+@@ -87,6 +87,10 @@
+ }
+ /** Constructor options for {@link DeepSeekAdapter}: the operation-local resolution hooks the plugin owns. */
+ export interface DeepSeekAdapterOptions<Connection extends DeepSeekConnectionOptions = DeepSeekConnectionOptions> {
++    /** Create one stream-local Messages sender before image preparation or authentication. A supplied callback must return a valid sender; errors never fall back to fetch. */
++    createTransport?: (options: GenerateOptions<string>) => {
++        send(url: string, init: RequestInit): Promise<Response>;
++    };
+     /** Report unusable native Messages replay metadata without exposing content or signatures. */
+     onReplayDegrade?: (detail: {
+         provider: string;
+--- a/lib/types/host.d.ts
++++ b/lib/types/host.d.ts
+@@ -17,5 +17,9 @@
+  * @param provider - exact route owned by this plugin.
+  * @param dependencies - provider-owned discovery, credential, and configuration callbacks.
+  */
+-export declare function registerDeepSeekProvider<C extends DeepSeekConnectionOptions>(ctx: Context, provider: string, dependencies: Pick<DeepSeekAdapterOptions<C>, 'options' | 'resolveAuth' | 'providerName' | 'discoverModels' | 'connect' | 'admit'>): void;
++export declare function registerDeepSeekProvider<C extends DeepSeekConnectionOptions>(ctx: Context, provider: string, dependencies: Pick<DeepSeekAdapterOptions<C>, 'options' | 'resolveAuth' | 'providerName' | 'discoverModels' | 'connect' | 'admit' | 'createTransport'>): void;
++/** Runtime capability of the loaded function, independent of the package files currently on disk. */
++export declare namespace registerDeepSeekProvider {
++    const transportSeam: 'deepseek-messages-create-transport-v1';
++}
+ //# sourceMappingURL=host.d.ts.map

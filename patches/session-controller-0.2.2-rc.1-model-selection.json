@@ -1,0 +1,47 @@
+{
+  "id": "arcfold-session-controller-0.2.2-rc.1-model-selection-v1",
+  "package": "@deepseek-ai/dsh-api-session-controller",
+  "version": "0.2.2-rc.1",
+  "upstreamCommit": "66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db",
+  "runtimeCapability": {
+    "export": "SessionController",
+    "property": "modelSelectionSeam",
+    "value": "session-model-selection-commit-v1"
+  },
+  "files": [
+    {
+      "path": "lib/index.js",
+      "beforeSha256": "4cf6c66e65cce865d270fa89405b96d048ffa62e493e4ffbd1a826be2207a4cd",
+      "afterSha256": "4d17afaad23ba915d2f1e125d439b92b4c946d229a79f5937567067fc2f5f768",
+      "edits": [
+        {
+          "before": "\t\t\t\tagent.model.select(selected);\n\t\t\t\tthis.ctx.agentDefaultModel.saveSelection(selected).catch((error) => {\n\t\t\t\t\tthis.ctx.logger.warn(`session-controller: model selection changed for the Session but the default was not saved: ${String(error)}`);\n\t\t\t\t});\n\t\t\t\treturn { selected: { ...selected } };",
+          "after": "\t\t\t\treturn await this.ctx.waterfall(\"session/select-model\", Object.freeze({ agent, selected: Object.freeze({ ...selected }) }), async () => {\n\t\t\t\t\tagent.model.select(selected);\n\t\t\t\t\tthis.ctx.agentDefaultModel.saveSelection(selected).catch((error) => {\n\t\t\t\t\t\tthis.ctx.logger.warn(`session-controller: model selection changed for the Session but the default was not saved: ${String(error)}`);\n\t\t\t\t\t});\n\t\t\t\t\treturn { selected: { ...selected } };\n\t\t\t\t});"
+        },
+        {
+          "before": "export { ApiSessionNotFound, SessionController, SessionController as default, SessionFileReferences, SessionSkillCatalog };",
+          "after": "Object.defineProperty(SessionController, \"modelSelectionSeam\", { value: \"session-model-selection-commit-v1\", enumerable: true });\nexport { ApiSessionNotFound, SessionController, SessionController as default, SessionFileReferences, SessionSkillCatalog };"
+        }
+      ]
+    },
+    {
+      "path": "lib/types/index.d.ts",
+      "beforeSha256": "2bbdf3da7ac7be5444b998d59526b7eeb8e7c0513e5da87044ea24e734850688",
+      "afterSha256": "c2ac48ddbd8273e5bc97aba423c970c015c234d92acfaf7280cc0a1bec77a806",
+      "edits": [
+        {
+          "before": "import type { SessionId } from '@deepseek-ai/dsh-session';",
+          "after": "import type { SessionId } from '@deepseek-ai/dsh-session';\nimport type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent';"
+        },
+        {
+          "before": "declare module '@deepseek-ai/cordis' {\n",
+          "after": "declare module '@deepseek-ai/cordis' {\n    interface Events {\n        /** Optional validated selection commit hook. No listener preserves native behavior.\n         * The payload is frozen; agent is the real session Agent. A handler owns\n         * commit/readback and returns its result, or calls next once to delegate.\n         * Rejections propagate to the existing selectModel error boundary.\n         * @mode waterfall\n         */\n        'session/select-model'(payload: Readonly<{ agent: Agent; selected: Readonly<ModelSelection> }>, next: () => Promise<SessionSelectModelValue>): Promise<SessionSelectModelValue>;\n    }\n"
+        },
+        {
+          "before": "export declare class SessionController extends TypertRemoteService {\n",
+          "after": "export declare class SessionController extends TypertRemoteService {\n    /** Loaded optional commit hook; not proof a product handler is installed. */\n    static readonly modelSelectionSeam: \"session-model-selection-commit-v1\";\n"
+        }
+      ]
+    }
+  ]
+}

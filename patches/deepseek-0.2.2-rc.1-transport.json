@@ -1,0 +1,65 @@
+{
+  "id": "deepseek-0.2.2-rc.1-transport-v1",
+  "package": "@deepseek-ai/dsh-llm-deepseek",
+  "version": "0.2.2-rc.1",
+  "upstreamCommit": "66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db",
+  "scope": "Published npm dist only; optional per-stream Messages sender; no serializer/translator or Arcfold-specific upstream service",
+  "files": [
+    {
+      "path": "lib/index.js",
+      "beforeSha256": "955dc7bc7ca6c857ff4a7e373b87c143b96a4c43fc80325b67dc0982600dcc75",
+      "afterSha256": "fc27ceacbed59c8d32100f3aa41cf79e1acab403ac0bc12b0e7f807a6274c752",
+      "edits": [
+        {
+          "before": "\tasync *request(options, connection, signal, activity) {\n\t\tsignal.throwIfAborted();\n",
+          "after": "\tasync *request(options, connection, signal, activity) {\n\t\tsignal.throwIfAborted();\n\t\tconst transport = this.dependencies.createTransport === void 0 ? { send: (url, init) => fetch(url, init) } : this.dependencies.createTransport(options);\n\t\tif (transport === null || typeof transport !== \"object\" || typeof transport.send !== \"function\") throw new TypeError(\"DeepSeek createTransport must return an object with send(url, init)\");\n"
+        },
+        {
+          "before": "const response = await fetch(`${messagesApiRoot(connection.baseURL)}/messages`, {",
+          "after": "const response = await transport.send(`${messagesApiRoot(connection.baseURL)}/messages`, {"
+        },
+        {
+          "before": "}\n//#endregion\n//#region lib/types/listing-config.js",
+          "after": "}\nObject.defineProperty(registerDeepSeekProvider, \"transportSeam\", { value: \"deepseek-messages-create-transport-v1\", enumerable: true });\n//#endregion\n//#region lib/types/listing-config.js"
+        }
+      ]
+    },
+    {
+      "path": "lib/types/types.d.ts",
+      "beforeSha256": "8949419d7ed87dd227132dc331909c3e234ee2aebe72ca9c57569fa426ee062d",
+      "afterSha256": "a3a7284f64c5467e4bc359b9e79050f190c389c6807e6f30c75f475d9ab95c7a",
+      "edits": [
+        {
+          "before": "import type { LlmModelInfo, ModelModality, SystemPromptUpdate, ToolUpdate, ResolvedRetryPolicy, ImageAttachmentAccess }",
+          "after": "import type { GenerateOptions, LlmModelInfo, ModelModality, SystemPromptUpdate, ToolUpdate, ResolvedRetryPolicy, ImageAttachmentAccess }"
+        },
+        {
+          "before": "export interface DeepSeekAdapterOptions<Connection extends DeepSeekConnectionOptions = DeepSeekConnectionOptions> {\n",
+          "after": "export interface DeepSeekAdapterOptions<Connection extends DeepSeekConnectionOptions = DeepSeekConnectionOptions> {\n    /** Create one stream-local Messages sender before image preparation or authentication. A supplied callback must return a valid sender; errors never fall back to fetch. */\n    createTransport?: (options: GenerateOptions<string>) => {\n        send(url: string, init: RequestInit): Promise<Response>;\n    };\n"
+        }
+      ]
+    },
+    {
+      "path": "lib/types/host.d.ts",
+      "beforeSha256": "c80712e47c5909c85d1e1736c84fa5da698f3493201b7870b4a02dc1e801a4ef",
+      "afterSha256": "7b8cf687eacc9045b1ac840c08f6cdbc018e140725c1785cffdcb4c54632b7ea",
+      "edits": [
+        {
+          "before": "'options' | 'resolveAuth' | 'providerName' | 'discoverModels' | 'connect' | 'admit'",
+          "after": "'options' | 'resolveAuth' | 'providerName' | 'discoverModels' | 'connect' | 'admit' | 'createTransport'"
+        },
+        {
+          "before": "//# sourceMappingURL=host.d.ts.map",
+          "after": "/** Runtime capability of the loaded function, independent of the package files currently on disk. */\nexport declare namespace registerDeepSeekProvider {\n    const transportSeam: 'deepseek-messages-create-transport-v1';\n}\n//# sourceMappingURL=host.d.ts.map"
+        }
+      ]
+    }
+  ],
+  "runtimeCapability": {
+    "export": "registerDeepSeekProvider",
+    "property": "transportSeam",
+    "value": "deepseek-messages-create-transport-v1",
+    "writable": false,
+    "configurable": false
+  }
+}
