@@ -79,6 +79,8 @@ def decision_note(raw):
         values = re.findall(rf"(?m)^{key}: ([^\n]+)$", header)
         require(len(values) == 1, f"决策记录必须填写唯一的 {key}。")
         fields[key] = text_field(values[0], key)
+    import source_delivery
+    fields.update(source_delivery.headers(header))
     require(fields["fixed_in"] == "pending" or re.fullmatch(VERSION, fields["fixed_in"]), "fixed_in 须为发行版本或 pending。")
     require(fields["user_verified"] == "pending", "候选中的用户验收字段须为 pending，实际观察通过 close-loop 登记。")
     sections = {}
@@ -124,6 +126,9 @@ def changed(path, base, head):
 
 
 def ci_review_record(ci, job, log):
+    if job.get("layout") == "split-v1":
+        import ci_evidence
+        return ci_evidence.record(ci, job, log, DESKTOP_RESULT, WORKFLOW_RESULT)
     desktop, workflow = [], []
     for line in log.splitlines():
         label, step, stamped = (line.split("\t", 2) + ["", ""])[:3]
@@ -161,8 +166,25 @@ def release_notes(path, head, base, paths, fields):
     affects_release = any(inside_scope(name, RELEASE_PATHS) for name in paths)
     version = fields["fixed_in"]
     if version == "pending":
+        if fields.get("release_mode") == "source":
+            require(affects_release, "待发行源码须有实际插件改动。")
+            manifests = {}
+            for filename in ("package.json", "packages/method-ui/package.json", "package-lock.json"):
+                before = json.loads(blob(path, base, filename))
+                after = json.loads(blob(path, head, filename))
+                manifests[filename] = after
+                require(before["version"] == after["version"], "源码交付先不改共享发行版本；通过组装确定版本。")
+                if filename == "package-lock.json":
+                    require(before["packages"][""]["version"] == after["packages"][""]["version"],
+                            "源码交付不能先改锁文件中的共享版本。")
+            require(len({m["version"] for m in manifests.values()}) == 1 and
+                    manifests["package.json"]["engines"]["dsh"] == COMPATIBLE_DSH,
+                    "源码交付须保持两份包与锁文件版本一致及现有宿主兼容范围。")
+            return {"kind": "source", "note": fields["release_note"]}
         require(not affects_release, "影响运行或打包的改动须先登记发行版本和更新说明。")
+        require(fields.get("release_mode") != "assembly", "发行组装须明确最终版本。")
         return None
+    require(fields.get("release_mode") != "source", "源码交付的 fixed_in 保持 pending，组装时登记实际版本。")
     require("CHANGELOG.md" in paths, "版本改动缺少本次更新说明。")
     notes = blob(path, head, "CHANGELOG.md").decode()
     match = re.search(rf"(?ms)^## {re.escape(version)}[ \t]*\n(.+?)(?=^## |\Z)", notes)
@@ -221,6 +243,8 @@ class Workflow:
             require_alignment(self, key, note["sha256"])
             pending = open_decisions(self, key)
             require(not pending, f"本任务还有未答的决定单 {'、'.join(pending)}，先请开发者答复。")
+            import source_delivery
+            source_delivery.reserve_target(self, record, note)
             base = self.repo.main()
             record.update(base=base, decision_sha256=note["sha256"], phase="starting")
             write(path / "task.json", record)
@@ -246,8 +270,12 @@ class Workflow:
             require(task["phase"] == "open" and task["repository"] == self.repo.name, "任务须从入口启动。")
             checkout = Path(task["checkout"])
             require(not git_line(checkout, "status", "--porcelain"), "先提交候选的全部改动。")
-            base, head = self.repo.main(), git_line(checkout, "rev-parse", "HEAD")
-            require(base == task["base"], "main 已前进。重新组合到当前 main 后再提交。")
+            base, head = task["base"], git_line(checkout, "rev-parse", "HEAD")
+            current_main = self.repo.main()
+            if current_main != base:
+                self.repo.fetch(checkout)
+                require(git_line(checkout, "merge-base", base, "refs/arcfold/main") == base,
+                        "登记的开发起点已不在主线历史中，先核对。")
             self.material(checkout, task, head, base)
             branch = task["branch"]
             extra = Path(body_path).read_text().strip() if body_path else "改动范围和验收条件见决策记录。"
@@ -274,16 +302,16 @@ class Workflow:
                 git(checkout, "push", *options, self.repo.url, f"{head}:{ref}", remote=True, timeout=120)
                 remote_head = git(checkout, "ls-remote", "--heads", self.repo.url, branch, remote=True).decode().split()[0]
                 require(remote_head == head, "尚未确认远端分支。")
-            require(self.repo.main() == base, "main 已前进，先重新组合。")
             if not pulls:
                 require(attempt.get("phase") not in ("creating", "confirmed"), "上次创建提案结果未知。先到 GitHub 核对。")
                 write(journal, {"phase": "creating", "head": head})
                 pr = self.repo.api("/pulls", {"title": task["title"], "head": branch, "base": "main", "body": body, "draft": True})
             else:
                 pr = self.repo.pr(pulls[0]["number"])
-            require(pr["head"]["sha"] == head and pr["base"]["sha"] == base and
+            require(pr["head"]["sha"] == head and pr["base"]["ref"] == "main" and
                     pr["body"].splitlines()[0] == f"Decision: docs/notes/{key}.md", "远端提案与入口候选不一致。")
-            result = {"phase": "confirmed", "pr": pr["number"], "url": pr["html_url"], "head": head, "base": base}
+            result = {"phase": "confirmed", "pr": pr["number"], "url": pr["html_url"], "head": head, "base": base,
+                      "needs_rebase": pr["base"]["sha"] != base}
             write(journal, result)
             return result
 
@@ -325,9 +353,8 @@ class Workflow:
                 "此提交的 GitHub Desktop 检查尚未通过。")
         run = rows[0]
         jobs = self.repo.api(f"/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs")["jobs"]
-        job = next((row for row in jobs if row["name"] == "Desktop checks" and row["conclusion"] == "success"), None)
-        completed = {row["name"] for row in job["steps"] if row["conclusion"] == "success"} if job else set()
-        require(set(CI_STEPS) <= completed, "自动检查回执缺少确切提交、Desktop 检查或工作流检查。")
+        import ci_evidence
+        job = ci_evidence.select(jobs, head, CI_STEPS)
         return {"id": run["id"], "attempt": run["run_attempt"], "head": head, "url": run["html_url"]}, job
 
     def successful_ci(self, head):
@@ -348,6 +375,8 @@ class Workflow:
         files = {}
         paths = [name for _, name in pairs]
         release = release_notes(checkout, head, base, paths, note)
+        import source_delivery
+        release = source_delivery.check_release(self, checkout, task, base, paths, note, release)
         for status, name in pairs:
             require(inside_scope(name, scope), f"改动超出登记范围 {name}。")
             # For deletions include the preceding text as review evidence.
@@ -415,6 +444,34 @@ class Workflow:
         rows = [read(path) for path in sorted(directory.glob("*/task.json"))]
         return {"repo": self.repo.name, "main": self.repo.main(), "tasks": rows}
 
+    def review_materials(self, number):
+        """Prepare fixed material even while integration or CI is still pending.
+
+        Previews never enter the accepted review directory and cannot authorize
+        a model request or merge. The ordinary review path remains strict.
+        """
+        import desktop_review_request as reviewer
+        pr = self.repo.pr(number)
+        require(pr["state"] == "open" and pr["base"]["ref"] == "main" and
+                pr["base"]["repo"]["full_name"] == self.repo.name, "准备材料须使用本仓库开放的主线提案。")
+        match = re.findall(rf"(?m)^Decision: docs/notes/({ID})\.md[ \t]*$", pr.get("body") or "")
+        require(len(match) == 1, "提案须指向唯一的已登记决策。")
+        _, task = self.task(match[0])
+        require(task["phase"] == "open", "任务尚未启动。")
+        head, base = pr["head"]["sha"], task["base"]
+        folder = self.state / "prs" / str(number) / "previews" / (head + "-" + base)
+        with locked(self.state / "prs", str(number)):
+            source = folder / "source"
+            self.repo.fetch(source, number=number)
+            require(git_line(source, "rev-parse", "refs/arcfold/pr") == head, "准备期间提案代码已变化。")
+            files, _, release, _ = self.material(source, task, head, base)
+            target = {"repo": self.repo.name, "pr": number, "head": head, "base": base,
+                      "decision": task["id"], "release": release, "preparation_only": True}
+            packet = reviewer.packet_for(target, files)
+            write(folder / "material.json", packet)
+            return {"material": str(folder / "material.json"), "target": target,
+                    "next": "最终组合源码和检查就绪后，通过 review 重新准备正式审阅材料"}
+
     def close_loop(self, key, version, observation, outcome, feedback=None):
         from collab import load_feedback, route
         from release import published
@@ -428,7 +485,9 @@ class Workflow:
         with locked(directory, "task"):
             fields = self.check(key)
             release = read(self.state / "releases" / version / "release.json")
-            require(release["target"]["decision"] == key and fields["fixed_in"] == version,
+            source_included = fields.get("release_mode") == "source" and key in (
+                release["target"].get("release") or {}).get("includes", [])
+            require((release["target"]["decision"] == key and fields["fixed_in"] == version) or source_included,
                     "观察须关联此问题实际修复的发行版本。")
             published(release)
             result = {"observed_in_version": fields["observed_in_version"], "fixed_in": version,
@@ -617,14 +676,15 @@ class Workflow:
         return receipt, comment
 
     def merge(self, number):
-        with locked(self.state / "prs", str(number)), locked(self.state, "main"):
+        with locked(self.state / "prs", str(number)):
             pr = self.repo.pr(number)
             directory = self.state / "prs" / str(number)
             journal = directory / "merge-attempt.json"
             known = read(journal) if journal.exists() else {}
             if pr.get("merged"):
                 require(known.get("phase") in ("merging", "confirmed"), "GitHub 已合入，缺少本入口的操作记录。")
-                return self.confirm_merge(number, known, pr, journal)
+                with locked(self.state, "main"):
+                    return self.confirm_merge(number, known, pr, journal)
             require(known.get("phase") not in ("merging", "confirmed"), "上次合入结果未知，先到 GitHub 核对。")
             pr, head, base = self.pair(number)
             receipt, comment = self.verify_receipt(number, head, base)
@@ -636,14 +696,18 @@ class Workflow:
                 require(not known, "上次退出草稿结果未知，先到 GitHub 核对。")
                 write(journal, {"phase": "marking-ready", "head": head, "base": base})
                 self.repo.gh("pr", "ready", str(number), "--repo", self.repo.name)
-            pr, checked_head, checked_base = self.pair(number)
-            require(not pr["draft"] and (checked_head, checked_base) == (head, base) and
-                    self.successful_ci(head) == receipt["target"]["ci"], "合入前的提交或检查已变化。")
-            known = {"phase": "merging", "target": receipt["target"], "review_sha256": receipt["sha256"],
-                     "review_comment": comment["url"], "started_at": timestamp()}
-            write(journal, known)
-            self.repo.gh("pr", "merge", str(number), "--repo", self.repo.name, "--squash", "--match-head-commit", head)
-            return self.confirm_merge(number, known, self.repo.pr(number), journal)
+            import merge_queue
+            merge_queue.enqueue(self, receipt["target"])
+            with locked(self.state, "main"):
+                merge_queue.require_turn(self, receipt["target"])
+                pr, checked_head, checked_base = self.pair(number)
+                require(not pr["draft"] and (checked_head, checked_base) == (head, base) and
+                        self.successful_ci(head) == receipt["target"]["ci"], "合入前的提交或检查已变化。")
+                known = {"phase": "merging", "target": receipt["target"], "review_sha256": receipt["sha256"],
+                         "review_comment": comment["url"], "started_at": timestamp()}
+                write(journal, known)
+                self.repo.gh("pr", "merge", str(number), "--repo", self.repo.name, "--squash", "--match-head-commit", head)
+                return self.confirm_merge(number, known, self.repo.pr(number), journal)
 
     def confirm_merge(self, number, known, pr, journal):
         target = known["target"]
@@ -654,17 +718,21 @@ class Workflow:
         require(commit["tree"]["sha"] == target["tree"] and [row["sha"] for row in commit["parents"]] == [target["base"]],
                 "合入后的文件或基线不符，停止发布。")
         current = self.repo.main()
-        require(current == commit_sha or known.get("phase") == "confirmed",
-                "合入后 main 已前进，先核对 GitHub 实际代码再确认。")
+        if current != commit_sha:
+            ancestry = self.repo.api(f"/compare/{commit_sha}...{current}")
+            require(ancestry.get("status") == "ahead" and ancestry.get("merge_base_commit", {}).get("sha") == commit_sha,
+                    "合入后的源码已不在主线历史中，先核对。")
         result = {**known, "phase": "confirmed", "source": commit_sha, "confirmed_at": timestamp(), "pr": number}
         release = target["release"]
-        if release:
+        if release and release.get("kind") != "source":
             version = release["version"]
             path = self.state / "merges" / f"{version}.json"
             if path.exists():
                 require(read(path)["source"] == commit_sha, "此版本已经关联另一提交。")
             else:
                 write(path, result)
+        import source_delivery
+        source_delivery.register_merge(self, result)
         write(journal, result)
         return result
 
@@ -722,8 +790,36 @@ def parse_args():
     review.add_argument("--pr", type=int, required=True)
     review.add_argument("--provider", choices=("openai", "lmuai"), default="openai")
     review.add_argument("--approval", metavar="A编号", help="开发者已同意的审阅费用授权单")
+    preview = sub.add_parser("review-materials", help="提前准备固定源码材料，不发送模型请求")
+    preview.add_argument("--pr", type=int, required=True)
+    assembly = sub.add_parser("release-plan", help="只读核对当前起点包含的全部源码交付")
+    assembly.add_argument("id")
+    assembly.add_argument("--base", required=True)
+    plan = sub.add_parser("execution-plan", help="登记任务内步骤、真实依赖与共享对象")
+    plan.add_argument("id")
+    plan.add_argument("--input", required=True)
+    claim = sub.add_parser("execution-claim", help="领取一步固定输入的执行")
+    claim.add_argument("id")
+    claim.add_argument("--step", required=True)
+    finish = sub.add_parser("execution-finish", help="保存实际结果，不代替正式检查或审阅")
+    finish.add_argument("--run", required=True)
+    finish.add_argument("--outcome", choices=("pass", "fail", "unknown"), required=True)
+    finish.add_argument("--evidence", action="append", required=True)
+    retry = sub.add_parser("execution-retry", help="核对失败后显式重试本地步骤")
+    retry.add_argument("--run", required=True)
+    retry.add_argument("--evidence", required=True)
+    execute = sub.add_parser("execution-run", help="并行运行已就绪的离线检查步骤")
+    execute.add_argument("--task")
+    limit = sub.add_parser("execution-limit", help="设置同一状态目录的重计算总上限")
+    limit.add_argument("--jobs", type=int, required=True)
+    sub.add_parser("execution-status", help="只读显示可执行、运行、等待及结果")
+    sub.add_parser("execution-metrics", help="只读显示实际运行区间、并发数及重复执行")
     merge = sub.add_parser("merge")
     merge.add_argument("--pr", type=int, required=True)
+    sub.add_parser("merge-queue", help="只读查看已明确请求合入的候选顺序")
+    cancel_merge = sub.add_parser("merge-unqueue", help="保留原因并退出本机合入排队")
+    cancel_merge.add_argument("--pr", type=int, required=True)
+    cancel_merge.add_argument("--reason", required=True)
     release = sub.add_parser("release")
     release.add_argument("--version", required=True)
     mode = release.add_mutually_exclusive_group()
@@ -779,8 +875,38 @@ def main():
             result = flow.submit(args.id, args.body_file)
         elif action == "review":
             result = flow.review(args.pr, args.approval, args.provider)
+        elif action == "review-materials":
+            result = flow.review_materials(args.pr)
+        elif action == "release-plan":
+            import source_delivery
+            _, task = flow.task(args.id)
+            result = source_delivery.plan(flow, Path(task["checkout"]), task["base"], args.base)
+        elif action.startswith("execution-"):
+            import execution
+            if action == "execution-plan":
+                result = execution.register(flow, args.id, read(args.input))
+            elif action == "execution-claim":
+                result = execution.claim(flow, args.id, args.step)
+            elif action == "execution-finish":
+                result = execution.finish(flow, args.run, args.outcome, args.evidence)
+            elif action == "execution-retry":
+                result = execution.retry(flow, args.run, args.evidence)
+            elif action == "execution-run":
+                result = execution.run_ready(flow, args.task)
+            elif action == "execution-limit":
+                result = execution.set_limit(flow, args.jobs)
+            elif action == "execution-metrics":
+                result = execution.metrics(flow)
+            else:
+                result = execution.view(flow)
         elif action == "merge":
             result = flow.merge(args.pr)
+        elif action == "merge-queue":
+            import merge_queue
+            result = merge_queue.view(flow)
+        elif action == "merge-unqueue":
+            import merge_queue
+            result = merge_queue.cancel(flow, args.pr, args.reason)
         elif action == "release":
             from release import release
             result = release(flow, args.version, args.prepare, args.finalize, args.isolated_receipt)

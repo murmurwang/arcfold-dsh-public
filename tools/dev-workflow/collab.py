@@ -521,6 +521,14 @@ def after_merge(flow, directory, merge, number, row):
     release = (merge.get("target") or {}).get("release")
     if not release:
         return row("D5", f"已合入 main（{merge.get('source', '')[:7]}），不涉及发行", "无", closed=True, pr=number)
+    if release.get("kind") == "source":
+        import source_delivery
+        assemblies = source_delivery.publication_for(flow, merge["target"]["decision"])
+        if not assemblies:
+            return row("D5", "源码已合入，待组装发行", "Agent", pr=number, release_required=True)
+        assembly = sorted(assemblies, key=lambda a: a.get("confirmed_at", ""))[-1]
+        result = after_merge(flow, directory, assembly, number, row)
+        return {**result, "source_delivery": merge["source"], "assembly_pr": assembly["target"]["pr"]}
     version = release["version"]
     folder = flow.state / "releases" / version
     extra = {"pr": number, "version": version}
@@ -638,9 +646,15 @@ def progress(flow, remote=False):
     for path in sorted((flow.state / "tasks").glob("*/task.json")):
         row = task_progress(flow, path.parent, read(path), open_asks)
         (retired if row["stage"] == "retired" else tasks).append(row)
-    result = {"repo": flow.repo.name, "daily": daily_version(), "tasks": tasks,
+    import execution, merge_queue
+    executions = execution.view(flow)
+    for row in tasks:
+        steps = [step for step in executions["steps"] if step["step"].split("/")[0] == row["id"]]
+        if steps:
+            row["steps"] = steps
+    result = {"repo": flow.repo.name, "daily": daily_version(), "tasks": tasks, "execution": executions,
               "asks": [ask_summary(row) for row in open_asks], "feedback": unrouted_feedback(flow),
-              "pending_writes": pending_writes(flow.state), "retired": retired}
+              "pending_writes": pending_writes(flow.state), "retired": retired, "merge_queue": merge_queue.view(flow)}
     if remote:
         result["remote"] = remote_facts(flow, tasks)
     return result
@@ -668,6 +682,11 @@ def render(result):
         ("已退场的任务", [f"{row['id']}：{row['reason']}" + (f"（由 {row['replaced_by']} 取代）" if row["replaced_by"] else "")
                          for row in result["retired"]]),
     )
+    for row in result.get("execution", {}).get("steps", []):
+        labels = {"ready": "现在可做", "running": "正在执行", "waiting": "等待", "pass": "已完成",
+                  "fail": "失败", "unknown": "结果待核对"}
+        detail = json.dumps(row.get("waiting", []), ensure_ascii=False) if row.get("waiting") else row.get("reason", "")
+        lines.append(f"- {labels.get(row['state'], row['state'])}：{cell(row['step'])} {cell(row['title'])} {cell(detail)}")
     for title, items in sections:
         if items:
             lines += [title + "：", "", *[f"- {cell(item)}" for item in items], ""]

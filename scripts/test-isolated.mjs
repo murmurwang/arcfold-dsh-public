@@ -40,7 +40,9 @@ applyModelSelectionPatch({ packageDir: join(directory, 'node_modules/@deepseek-a
 execFileSync(process.execPath, ['packages/method-ui/build.mjs'], { cwd: directory, env: process.env, stdio: 'inherit' });
 console.log(`Isolated test source and evidence: ${directory}`);
 const files = process.argv.slice(2);
-const child = spawnSync(process.execPath, ['--test', ...(files.length ? files : ['test/*.test.mjs'])], {
+const concurrency = Number(process.env.ARCFOLD_TEST_CONCURRENCY ?? 2);
+assert.ok(Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 16, 'Test concurrency must be 1 to 16');
+const child = spawnSync(process.execPath, ['--test', `--test-concurrency=${concurrency}`, ...(files.length ? files : ['test/*.test.mjs'])], {
   cwd: directory, env: { ...process.env, TMPDIR: temp, ARCFOLD_PATCH_TEST_INSTALLATION: installation }, stdio: 'inherit',
 });
 if (child.error) throw child.error;

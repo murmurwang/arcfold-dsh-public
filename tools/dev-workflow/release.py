@@ -85,49 +85,9 @@ def verify_package(path, row, version, notes, env):
     return result
 
 
-def prepare(flow, directory, version, merge):
-    target = merge["target"]
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tempfile.TemporaryDirectory(prefix="build-", dir=directory) as local:
-        local = Path(local).resolve()
-        checkout = local / "source"
-        flow.repo.fetch(checkout)
-        require(git_line(checkout, "rev-parse", "refs/arcfold/main") == merge["source"],
-                "构建前 main 已变化。")
-        git(checkout, "switch", "--detach", merge["source"])
-        require(git_line(checkout, "rev-parse", "HEAD^{tree}") == target["tree"], "已合入文件树与审阅不符。")
-        env = npm_environment(local / "npm")
-        install_dependencies(checkout, env)
-        archive = python_archive(checkout, local, env)
-        first = build(checkout, local / "first", "accepted", version, archive, env)
-        second = build(checkout, local / "second", "accepted", version, archive, env)
-        require(first["packages"] == second["packages"], "两次构建的安装包不一致。")
-        require(all(row["source"]["commit"] == merge["source"] and row["source"]["tree"] == target["tree"]
-                    for row in (first, second)), "构建回执缺少已审阅源码身份。")
-        info = {"license": (checkout / "LICENSE").read_bytes(), "third_party": (checkout / "THIRD_PARTY_NOTICES.md").read_bytes()}
-        packages = []
-        dry_runs = []
-        for row in first["packages"]:
-            first_archive = local / "first" / row["file"]
-            require(first_archive.read_bytes() == (local / "second" / row["file"]).read_bytes(),
-                    "复建产物逐字节核对失败。")
-            dry_runs.append(verify_package(first_archive, row, version, info, env))
-            packages.append({key: row[key] for key in ("name", "version", "file", "sha256", "integrity", "bytes")})
-        require(flow.repo.main() == merge["source"], "构建期间 main 已变化。")
-        for row in packages:
-            shutil.copyfile(local / "first" / row["file"], directory / row["file"])
-        write(directory / "build-manifest.json", first)
-        write(directory / "npm-dry-run.json", dry_runs)
-        shutil.copyfile(local / "first" / "dependency-lock.json", directory / "dependency-lock.json")
-    receipt = {"schema": "arcfold-release-v1", "version": version, "source": merge["source"], "target": target,
-               "ci": target["ci"], "review_sha256": merge["review_sha256"], "review_comment": merge["review_comment"],
-               "engines_dsh": target["release"]["engines_dsh"], "release_notes": target["release"]["notes"],
-               "reproduced": True, "packages": packages, "built_at": timestamp(),
-               "build_manifest_sha256": digest((directory / "build-manifest.json").read_bytes()),
-               "npm_dry_run_sha256": digest((directory / "npm-dry-run.json").read_bytes()),
-               "dependency_lock_sha256": digest((directory / "dependency-lock.json").read_bytes())}
-    write(directory / "release.json", receipt)
-    return receipt
+def prepare(flow, directory, version, merge, candidate=None):
+    from parallel_build import prepare as build_fixed_source
+    return build_fixed_source(flow, directory, version, merge, candidate)
 
 
 def verify_release(directory, receipt):
@@ -139,6 +99,9 @@ def verify_release(directory, receipt):
     for file, key in (("build-manifest.json", "build_manifest_sha256"), ("npm-dry-run.json", "npm_dry_run_sha256"),
                       ("dependency-lock.json", "dependency_lock_sha256")):
         require(digest((directory / file).read_bytes()) == receipt[key], f"{file} 与发行回执不一致。")
+    if "rebuild_manifest_sha256" in receipt:
+        require(digest((directory / "rebuild-manifest.json").read_bytes()) == receipt["rebuild_manifest_sha256"],
+                "第二次独立构建的回执不一致。")
 
 
 def release_assets(directory, receipt):
@@ -205,12 +168,16 @@ def verify_isolated(path, receipt):
 
 
 def release(flow, version, local_only, finalize, isolated):
-    with locked(flow.state, "main"):
+    with locked(flow.state / "releases" / version, "release"):
         merged = flow.state / "merges" / f"{version}.json"
         require(merged.is_file(), "此版本尚无已确认的受管 main 合入。")
         merge = read(merged)
-        require(merge["phase"] == "confirmed" and flow.repo.main() == merge["source"],
-                "发行使用经过受管合入的当前 main。")
+        require(merge["phase"] == "confirmed", "发行须有受管合入回执。")
+        # Candidate-history integration is a separate rollout prerequisite.
+        # This legacy entry cannot select or supersede a retained candidate.
+        require(flow.repo.main() == merge["source"], "旧发行入口仍要求当前主线；先完成候选记录接入再发布保留候选。")
+        from parallel_build import require_in_main
+        require_in_main(flow, merge["source"])
         directory = flow.state / "releases" / version
         path = directory / "release.json"
         receipt = read(path) if path.exists() else prepare(flow, directory, version, merge)
@@ -220,7 +187,8 @@ def release(flow, version, local_only, finalize, isolated):
         result = {"record": str(path), **receipt}
         if local_only:
             return result
-        require(flow.repo.main() == merge["source"], "GitHub 发行前 main 已变化。")
+        require(flow.repo.main() == merge["source"], "候选记录接入前不从已前进主线的旧来源对外发行。")
+        require_in_main(flow, merge["source"])
         journal = directory / "finalize.json"
         if finalize:
             require(isolated, "发布 GitHub Release 前要有隔离账户的实际验收。")

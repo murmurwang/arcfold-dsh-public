@@ -1,0 +1,74 @@
+# Activation is a later managed change, after the installed entry can read split-v1.
+# This file is deliberately outside .github/workflows during the compatibility rollout.
+name: Desktop 离线检查
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  desktop:
+    name: Desktop runtime checks
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: 核对检查使用的提交
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+          cache: npm
+      - name: 取得并校验 Desktop 随包提供的计数环境
+        shell: bash
+        run: |
+          package="$RUNNER_TEMP/arcfold-test-package"
+          archive="$package/runtime/desktop-python.tar.gz"
+          mkdir -p "$package/runtime"
+          url="$(node --input-type=module -e "import { desktopPython } from './src/desktop/python-runtime.mjs'; console.log(desktopPython.url)")"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 120 --output "$archive" "$url"
+          python="$(node --input-type=module -e "import { prepareBundledDesktopPython } from './src/desktop/python-runtime.mjs'; console.log(prepareBundledDesktopPython(process.argv[1], process.argv[2]))" "$package" "$RUNNER_TEMP")"
+          echo "ARCFOLD_DESKTOP_PYTHON_ARCHIVE=$archive" >> "$GITHUB_ENV"
+          echo "ARCFOLD_TREE_ENCODING_PYTHON=$python" >> "$GITHUB_ENV"
+      - name: 安装锁定依赖，不运行安装脚本
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: 在独立副本运行 Desktop 模拟检查
+        env:
+          ARCFOLD_PATCH_TEST_INSTALLATION: ${{ github.workspace }}
+          ARCFOLD_DESKTOP_PACKAGE_SOURCE: ${{ github.workspace }}
+          ARCFOLD_DESKTOP_PACKAGE_DEPENDENCIES: ${{ github.workspace }}
+          DSH_TELEMETRY_DISABLED: '1'
+          ARCFOLD_TEST_CONCURRENCY: '2'
+        run: node scripts/test-isolated.mjs
+  workflow:
+    name: Dev workflow checks
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: 核对检查使用的提交
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - name: 运行工作流检查
+        run: python3 -B -m unittest discover -s tools/dev-workflow -v
+  summary:
+    name: Desktop checks
+    needs: [desktop, workflow]
+    if: ${{ always() }}
+    runs-on: macos-15
+    steps:
+      - name: 核对全部并行检查结果
+        env:
+          DESKTOP_RESULT: ${{ needs.desktop.result }}
+          WORKFLOW_RESULT: ${{ needs.workflow.result }}
+        run: test "$DESKTOP_RESULT" = success && test "$WORKFLOW_RESULT" = success

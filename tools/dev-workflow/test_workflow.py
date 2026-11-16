@@ -65,7 +65,8 @@ class WorkflowTests(unittest.TestCase):
                  ("核对检查使用的提交", "在独立副本运行 Desktop 模拟检查", "运行工作流检查")]
         run = {"head_sha": HEAD, "event": "pull_request", "path": WORKFLOW, "status": "completed", "conclusion": "success",
                "id": 13, "run_attempt": 1, "html_url": CI["url"]}
-        jobs = {"jobs": [{"name": "Desktop checks", "conclusion": "success", "steps": steps}]}
+        jobs = {"jobs": [{"name": "Desktop checks", "conclusion": "success", "steps": steps,
+                          "head_sha": HEAD, "status": "completed"}]}
         self.repo.api.side_effect = [
             {"workflow_runs": [{**run, "head_sha": OTHER}]}, {"workflow_runs": [{**run, "conclusion": "failure"}]},
             {"workflow_runs": [run]}, jobs,
@@ -236,9 +237,13 @@ class WorkflowTests(unittest.TestCase):
         self.repo.gh.assert_not_called()
 
     def test_merge_uses_matched_head_then_checks_squash_tree(self):
+        self.new()
+        task_path, task = self.flow.task("simple-change")
+        task["phase"] = "open"
+        write(task_path / "task.json", task)
         open_pr = {**self.repo.pr.return_value, "draft": False}
         merged = {**open_pr, "merge_commit_sha": OTHER, "merged": True}
-        target = {"head": HEAD, "base": BASE, "tree": "tree", "ci": CI, "release": None, "decision": "simple-change"}
+        target = {"pr": 10, "head": HEAD, "base": BASE, "tree": "tree", "ci": CI, "release": None, "decision": "simple-change"}
         self.repo.pr.side_effect = [open_pr, open_pr, open_pr, merged]
         self.repo.main.side_effect = [BASE, BASE, OTHER]
         self.repo.commit.return_value = {"tree": {"sha": "tree"}, "parents": [{"sha": BASE}]}
