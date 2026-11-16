@@ -22,6 +22,10 @@ const DESKTOP_NOTICES = ['LICENSE', 'THIRD_PARTY_NOTICES.md'];
 const DESKTOP_CORE_REQUIRED = ['src', 'runtime', 'cordis.patch.yml', 'presets', ...DESKTOP_NOTICES];
 const DESKTOP_EXCLUDED_SOURCES = ['src/openai-provider.mjs',
   'patches/pi-ai-0.2.2-rc.1-transport.json', 'patches/session-controller-0.2.2-rc.1-model-selection.json'];
+const THIRD_PARTY_ROOT = 'src/desktop/third-party';
+// Bind the reviewed component inventory as well as the notices it references.
+// Changing a bundled binary requires a new inventory and review, not just new text files.
+const THIRD_PARTY_MANIFEST_SHA256 = 'c3813fa597d2c3e289c147dd7e3398d9a215fd30e86dbcc46eb2c0d00956f30b';
 
 const CORE_FILES = new Set(['scripts/exact-package-patch.mjs', 'scripts/patch-model-selection.mjs', 'docs/model-selection.md', 'src', 'presets', 'bin', 'runtime', 'cordis.patch.yml', 'scripts/patch-deepseek-transport.mjs',
   'scripts/prepare-runtime-locks.mjs', 'patches', 'docs/local-runtime.md',
@@ -75,6 +79,31 @@ function checkFiles(files, root, forbiddenRoots, target) {
     assert.equal(/(?:\/Users\/[^/\s]+\/|\/var\/folders\/|\/home\/[^/\s]+\/)/u.test(text), false,
       `Personal absolute path in ${file.path}`);
     assert.equal(/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u.test(text), false, `Private key in ${file.path}`);
+  }
+}
+
+function validateThirdPartyNotices(root, files) {
+  const manifestPath = THIRD_PARTY_ROOT + '/manifest.json';
+  const names = new Map(files.map(file => [file.path, file.sha256]));
+  assert.equal(names.get(manifestPath), THIRD_PARTY_MANIFEST_SHA256, 'Third-party notice inventory differs from the reviewed inventory');
+  const manifest = readJson(join(root, manifestPath));
+  assert.equal(manifest.schema, 'arcfold-third-party-v1');
+  for (const component of [manifest.python, manifest.recipe]) {
+    assert.equal(names.get(safePath(component.archive.path)), component.archive.sha256,
+      'Third-party notices do not match the bundled archive');
+  }
+  const notices = new Set();
+  for (const notice of manifest.files) {
+    const path = safePath(notice.path);
+    assert.equal(notices.has(path), false, `Duplicate third-party notice: ${path}`);
+    notices.add(path);
+    assert.equal(names.get(THIRD_PARTY_ROOT + '/' + path), notice.sha256, `Missing or changed third-party notice: ${path}`);
+  }
+  const covered = [...manifest.python.components, ...manifest.recipe.components,
+    manifest.recipe.root_component, manifest.rust_standard_library];
+  for (const component of covered) {
+    assert.ok(component.notices?.length > 0, `Missing third-party license coverage: ${component.name || component.version}`);
+    for (const path of component.notices) assert.ok(notices.has(path), `Unlisted third-party notice: ${path}`);
   }
 }
 
@@ -184,6 +213,7 @@ export function validateReleasePackage(root, kind, forbiddenRoots = [], target =
       assert.ok(names.has(desktopPython.path), 'Desktop installation requires the bundled Python runtime');
       assert.ok(names.has('src/desktop/bootstrap.mjs'));
       assert.ok(names.has('src/desktop/vendor/NOTICE.md'));
+      validateThirdPartyNotices(root, files);
       assert.ok(DESKTOP_EXCLUDED_SOURCES.every(path => !names.has(path)));
       assert.ok(metadata.files.every(path => !DESKTOP_INSTALLER_FILES.has(path) && !path.startsWith('docs/')));
     } else {

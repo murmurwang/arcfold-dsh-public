@@ -52,6 +52,40 @@ test('Desktop distribution builds an installable pair with a working offline cou
     if (kind === 'core') {
       assert.equal(actual.metadata.dependencies['@arcfold/dsh-method-ui'], release.version);
       assert.equal(actual.metadata.dependencies['@deepseek-ai/dsh-llm-pi-ai'], undefined);
+      const noticesRoot = join(unpackedRoot, 'src/desktop/third-party');
+      const noticeManifestPath = join(noticesRoot, 'manifest.json');
+      const noticeManifestBytes = readFileSync(noticeManifestPath);
+      const noticeManifest = JSON.parse(noticeManifestBytes);
+      assert.equal(noticeManifest.recipe.components.length, 332);
+      assert.equal(noticeManifest.python.version, '3.12.14');
+      const wheelPath = join(unpackedRoot, noticeManifest.recipe.archive.path);
+      const wheelEntry = entry => execFileSync('/usr/bin/unzip', ['-p', wheelPath, entry], { maxBuffer: 2 * 1024 * 1024 });
+      const sbomBytes = wheelEntry(noticeManifest.recipe.sbom.entry);
+      assert.equal(createHash('sha256').update(sbomBytes).digest('hex'), noticeManifest.recipe.sbom.sha256);
+      const sbom = JSON.parse(sbomBytes);
+      const components = rows => rows.map(row => ({ name: row.name, version: row.version, licenses: row.licenses,
+        sha256: row.archive_sha256 || row.hashes?.find(hash => hash.alg === 'SHA-256')?.content || null,
+      })).sort((a, b) => `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.version}`));
+      assert.deepEqual(components(noticeManifest.recipe.components), components(sbom.components));
+      for (const notice of noticeManifest.recipe.embedded_notices)
+        assert.deepEqual(readFileSync(join(noticesRoot, notice.notice)), wheelEntry(notice.entry));
+      // Exercise the actual unpacked tarball, including each independent notice source.
+      for (const group of ['python/', 'cargo/', 'recipe/', 'rust/']) {
+        const notice = noticeManifest.files.find(file => file.path.startsWith(group));
+        assert.ok(notice, `Missing notice group ${group}`);
+        const path = join(noticesRoot, notice.path), original = readFileSync(path);
+        renameSync(path, path + '.held');
+        assert.throws(() => desktopBuilder.validateReleasePackage(unpackedRoot, 'core', [], 'desktop'), /Missing or changed third-party notice/);
+        renameSync(path + '.held', path);
+        writeFileSync(path, Buffer.concat([original, Buffer.from('\nchanged\n')]));
+        assert.throws(() => desktopBuilder.validateReleasePackage(unpackedRoot, 'core', [], 'desktop'), /Missing or changed third-party notice/);
+        writeFileSync(path, original);
+      }
+      noticeManifest.recipe.components.pop();
+      writeFileSync(noticeManifestPath, JSON.stringify(noticeManifest, null, 2) + '\n');
+      assert.throws(() => desktopBuilder.validateReleasePackage(unpackedRoot, 'core', [], 'desktop'), /notice inventory differs/);
+      writeFileSync(noticeManifestPath, noticeManifestBytes);
+      assert.deepEqual(desktopBuilder.validateReleasePackage(unpackedRoot, 'core', [], 'desktop').files, actual.files);
       assert.doesNotMatch(readFileSync(join(unpackedRoot, 'cordis.patch.yml'), 'utf8'), /@arcfold\/dsh\/openai/u);
       const description = readFileSync(join(unpackedRoot, 'README.md'), 'utf8');
       assert.match(description, /Add plugin/u);
