@@ -415,7 +415,7 @@ class Workflow:
                     "观察须关联此问题实际修复的发行版本。")
             published(release)
             result = {"observed_in_version": fields["observed_in_version"], "fixed_in": version,
-                      "user_verified": text_field(observation, "Murphy 的实际观察"), "at": timestamp(),
+                      "user_verified": text_field(observation, "用户的实际观察"), "at": timestamp(),
                       "decision": key, "source": release["source"], "packages": release["packages"]}
             name = directory / "observations" / (uuid.uuid4().hex + ".json")
             write(name, result)
