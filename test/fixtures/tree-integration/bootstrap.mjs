@@ -38,7 +38,7 @@ import { digest } from '../../../src/tree/contracts.mjs';
 
 /** Actual entry points. Default is synthetic loopback only. The explicit real
  * branch is restricted to the single authorized experiment and native guards. */
-export async function bootstrapFixture(t, script, { nativeHost = false, realExperiment = null, webOnly = false, webMainModel = null, desktop = false, nativeModels = false } = {}) {
+export async function bootstrapFixture(t, script, { nativeHost = false, realExperiment = null, webOnly = false, webMainModel = null, desktop = false, nativeModels = false, beforeInstall = async () => {} } = {}) {
   assert.ok(!(webOnly && realExperiment), 'Real test budget and live website accounting are distinct');
   assert.ok(!(desktop && realExperiment), 'Desktop fixture is synthetic only');
   assert.equal(realExperiment, null, 'Public test fixtures support synthetic loopback only');
@@ -118,6 +118,7 @@ export async function bootstrapFixture(t, script, { nativeHost = false, realExpe
       accounting: { artifactDirectory: join(privateRoot, 'requests'), authorization: { authorizationRef: 'synthetic-native-no-spend' } } });
     if (!nativeHost) await active(await ctx.plugin(TokenMeter));
   }
+  await beforeInstall(config);
   await active(await ctx.plugin(Business, { filename: join(root, 'legacy.sqlite'), goalTreeV3: config }));
   if (nativeModels) {
     const base = `http://127.0.0.1:${server.address().port}`;

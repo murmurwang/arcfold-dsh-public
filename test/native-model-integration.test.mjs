@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { bootstrapFixture } from './fixtures/tree-integration/bootstrap.mjs';
 import { emptyLearning } from './fixtures/tree-learning/helpers.mjs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
+import { TreeRepository } from '../src/tree/repository.mjs';
+import { TreeJobs } from '../src/tree/jobs.mjs';
+import { nativeModelConfig } from '../src/tree/native-models.mjs';
+import { envelope } from './fixtures/tree-model/contracts.mjs';
 
 const first = { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'off' };
 const second = { provider: 'synthetic-other', model: 'synthetic-other-model' };
@@ -71,4 +75,23 @@ test('a native tool continuation keeps the current model and persists the next c
   assert.equal(agent.model.current().provider, second.provider);
   assert.equal((await f.turn(agent, '现在使用下一轮模型。')).status, 'settled');
   assert.equal(f.requests.filter(r => r.role === 'main').at(-1).body.model, second.model);
+});
+
+test('native startup preserves historical data and internal work while cancelling unsent calls from the old route', async t => {
+  let oldId;
+  const f = await bootstrapFixture(t, reply, { nativeModels: true, beforeInstall(config) {
+    const repo = new TreeRepository({ treeFilename: config.treeFilename, userId: config.userId });
+    try {
+      const jobs = new TreeJobs({ repository: repo, assertSources: () => true });
+      const input = envelope('verification', [repo.rootId()]);
+      const old = { ...nativeModelConfig('verification', { ...first, maxTokens: 1024 }, config.workspace), budgetScope: 'web-unlimited' };
+      oldId = jobs.enqueue({ role: 'verification', key: 'old-unsent', nodeIds: [repo.rootId()], input, revisionSet: {}, config: old, trigger: { kind: 'window' } }).id;
+      repo.transaction(() => repo.save('tree_jobs', { id: 'internal-marker', kind: 'migration-marker', scopeKey: repo.rootId(),
+        nodeIds: [repo.rootId()], inputRevisionSet: {}, input: { note: 'preserve internal bookkeeping' }, inputHash: 'synthetic', status: 'queued' }));
+    } finally { repo.close(); }
+  } });
+  assert.equal(f.repo.get('tree_jobs', oldId).status, 'cancelled');
+  assert.equal(f.repo.get('tree_jobs', oldId).error.code, 'MODEL_ROUTE_UPGRADED');
+  assert.equal(f.repo.get('tree_jobs', 'internal-marker').status, 'queued');
+  assert.equal(f.requests.length, 0);
 });

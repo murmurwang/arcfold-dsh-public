@@ -753,7 +753,7 @@ export async function installTreeRuntime(ctx, config, { legacyFilename } = {}) {
       nativeRecords.recover();
       // An upgrade cannot replay work admitted under a different billing route.
       // Historical data and receipts stay in their original stores.
-      for (const job of repo.list('tree_jobs', j => !nativeModel(j.modelConfig) && ['queued', 'prepared'].includes(j.status)))
+      for (const job of repo.list('tree_jobs', j => j.role && !nativeModel(j.modelConfig) && ['queued', 'prepared'].includes(j.status)))
         runtime.jobs.transition(job.id, 'cancelled', { error: { code: 'MODEL_ROUTE_UPGRADED', message: '模型通道已更新；保留旧任务原文，不自动重发。' } });
       ctx.on('llm/stream', (options, next) => runtime.owner.owns(options.sessionId)
         ? runtime.owner.guardStream(options, () => nativeRecords.stream(options, next)) : next(), { prepend: true });
