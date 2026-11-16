@@ -55,7 +55,11 @@ test('Desktop distribution builds an installable pair with a working offline cou
       assert.doesNotMatch(readFileSync(join(unpackedRoot, 'cordis.patch.yml'), 'utf8'), /@arcfold\/dsh\/openai/u);
       const description = readFileSync(join(unpackedRoot, 'README.md'), 'utf8');
       assert.match(description, /Add plugin/u);
-      assert.match(description, /On first setup, Arcfold selects DeepSeek V4 Pro if the DSH default model is unset\./u);
+      assert.match(description, /model and reasoning setting chosen for that turn/u);
+      assert.doesNotMatch(description, /Arcfold selects DeepSeek V4 Pro/u);
+      const patch = readFileSync(join(unpackedRoot, 'cordis.patch.yml'), 'utf8');
+      for (const id of ['llm-deepseek', 'llm-deepseek-account', 'llm-pi-ai', 'agent-default-model'])
+        assert.doesNotMatch(patch, new RegExp('^- id: ' + id + '$', 'm'), 'Desktop retains native ' + id);
       const { desktopPython, prepareBundledDesktopPython } = await import(pathToFileURL(join(unpackedRoot, 'src/desktop/python-runtime.mjs')));
       assert.deepEqual(release.desktopPython, desktopPython);
       const home = join(root, 'home');

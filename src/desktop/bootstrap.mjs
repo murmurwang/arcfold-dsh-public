@@ -1,10 +1,8 @@
-import { readFileSync, realpathSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths';
-import { isBundledDesktopPython, prepareBundledDesktopPython } from './python-runtime.mjs';
-import { createDesktopSetup } from './setup-service.mjs';
+import { isBundledDesktopPython } from './python-runtime.mjs';
+import { createNativeDesktopSetup } from './native-setup.mjs';
 
 export const name = 'arcfold-desktop-bootstrap';
 export const inject = ['loader'];
@@ -59,22 +57,44 @@ export async function activateDesktop(ctx, result, { home, previousPython } = {}
     throw new Error('Desktop 未能启动 Arcfold，请保留当前设置并检查错误。');
 }
 
+export async function activateNativeDesktop(ctx, result, { home } = {}) {
+  const rows = [...ctx.loader.entries()];
+  const business = rows.filter(row => row.options.id === 'arcfold-business');
+  if (business.length !== 1) throw new Error('无法确认 Arcfold 配置位置。');
+  const entry = business[0], current = entry.options.config ?? {}, intended = { goalTreeV3: result.tree };
+  let previous = result.previousTree && { goalTreeV3: result.previousTree };
+  const python = current.goalTreeV3?.tokenCounter?.python;
+  if (previous && python && python !== previous.goalTreeV3.tokenCounter.python && isBundledDesktopPython(home, python))
+    previous = { goalTreeV3: { ...previous.goalTreeV3, tokenCounter: { python } } };
+  if (Object.keys(current).length && !same(current, intended) && !same(current, previous))
+    throw new Error('Arcfold 已有不同的运行设置，不能自动覆盖。');
+  const providers = rows.filter(row => ['arcfold-metered-provider', 'arcfold-desktop-metered-provider'].includes(row.options.id));
+  if (providers.some(row => !['@arcfold/dsh/deepseek', '@arcfold/dsh/desktop-deepseek'].includes(row.options.name)))
+    throw new Error('原模型连接的归属已改变，未修改已有设置。');
+  for (const provider of providers) if (provider.options.disabled !== true)
+    await provider.parent.tree.update(provider.options.id, { disabled: true });
+  if (!same(current, intended)) await entry.parent.tree.update(entry.options.id, { config: intended });
+  // Provider settings and the native default model are owned by DSH. The
+  // distribution restores their original entries without copying their values.
+  await ctx.loader.await();
+  const deadline = Date.now() + 5000;
+  while (!ctx.get('arcfoldTreeWeb') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+  if (!ctx.get('arcfoldTreeRuntime') || !ctx.get('arcfoldTreeV3') || !ctx.get('arcfoldTreeWeb') || !ctx.get('arcfoldNativeModelRecords'))
+    throw new Error('DSH 原生模型通道尚未完成启动，请保留当前设置后重启检查。');
+}
+
 export function apply(ctx) {
   const isDesktop = Boolean(process.versions.electron && process.argv.some(value => value.includes('dsh-desktop-host')));
   if (!isDesktop) {
     ctx.provide('arcfoldDesktopSetup', Object.freeze({ status: () => ({ state: 'not_desktop' }) }));
     return;
   }
-  const packageRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
   let setup;
   try {
     const home = realpathSync(resolveDshHome());
-    const policy = JSON.parse(readFileSync(join(packageRoot, 'runtime/initial-policy.json'), 'utf8'));
-    setup = createDesktopSetup({ home, installationFile: join(packageRoot, 'package.json'), policy,
-      preparePython: () => prepareBundledDesktopPython(packageRoot, home),
-      activate: (result, previousPython) => activateDesktop(ctx.root, result, { home, previousPython }) });
+    setup = createNativeDesktopSetup({ home, activate: result => activateNativeDesktop(ctx.root, result, { home }) });
   } catch (error) {
-    setup = Object.freeze({ status: () => ({ state: 'unavailable', activationError: error.message }) });
+    setup = Object.freeze({ status: () => ({ state: 'unavailable', modelRouting: 'dsh-native-v1', activationError: error.message }) });
   }
   ctx.provide('arcfoldDesktopSetup', setup);
   if (setup.status().state === 'configured') {

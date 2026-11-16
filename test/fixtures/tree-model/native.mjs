@@ -23,6 +23,8 @@ import { TreeModelOwner } from '../../../src/tree/model-owner.mjs';
 import { TreeTestLedger, TREE_TEST_SCOPE } from '../../../src/tree/experiment-budget.mjs';
 import { DeepSeekTransport } from '../../../src/deepseek-transport.mjs';
 import * as Provider from '../../../src/deepseek-provider.mjs';
+import * as NativeProvider from '@deepseek-ai/dsh-llm-deepseek-api-key';
+import { NativeModelRecords } from '../../../src/tree/native-model-records.mjs';
 import { registerTreeRequestAuthority, nativeRequestIdentity, assertNativeRequestCurrent } from '../../../src/native-request-authority.mjs';
 import { digest } from '../../../src/tree/contracts.mjs';
 import { minimal, envelope } from './contracts.mjs';
@@ -53,9 +55,11 @@ export async function nativeFixture(t, script = ({ role }) => minimal[role] ?? '
     res.writeHead(200, { 'content-type': 'text/event-stream', 'x-request-id': `synthetic-${row.ordinal}` }); res.end(sse(body, result, fixtureOptions.sseOptions));
   })().catch(e => res.destroy(e)); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); const endpoint = `http://127.0.0.1:${server.address().port}/anthropic/v1/messages`;
-  const owner = new TreeModelOwner({ jobs, host: ctx, createUserMessage, timers: fixtureOptions.timers, ledgerLookup: id => ledger.get(id), verifyMainInput: (job, options) => job.role === 'main' && options.messages.some(m => m.source?.kind === 'user'),
+  let nativeRecords;
+  const owner = new TreeModelOwner({ jobs, host: ctx, createUserMessage, timers: fixtureOptions.timers, ledgerLookup: id => fixtureOptions.nativeModels ? nativeRecords.get(id) : ledger.get(id), verifyMainInput: (job, options) => job.role === 'main' && options.messages.some(m => m.source?.kind === 'user'),
     mountWriterTools: async agentCtx => { for (const name of ['writer_read', 'writer_finish']) agentCtx.tools.register(defineTool({ name, description: 'Synthetic broker marker; no filesystem access', parameters: {}, output: { schema: { type: 'json' }, render: (_args, result) => [{ type: 'text', text: JSON.stringify(result) }] }, execute: async () => { toolRuns.push(name); return { ok: true }; } })); } });
   const unregister = registerTreeRequestAuthority(business, owner);
+  if (fixtureOptions.nativeModels) nativeRecords = new NativeModelRecords(repo, owner);
   const transport = new DeepSeekTransport({ ledger, artifactDirectory: join(root, 'requests'), provider, modelPolicies: { [model]: ledger.modelPolicy() }, endpoint, allowLocalTestEndpoint: true, timeoutMs: 3000, requestIdentity: options => nativeRequestIdentity(business, ctx.sessions, options), beforeDispatch: options => assertNativeRequestCurrent(ctx, options) });
   let closing;
   const shutdown = () => closing ??= (async () => {
@@ -78,15 +82,18 @@ export async function nativeFixture(t, script = ({ role }) => minimal[role] ?? '
     child.provide('credentials', { resolve: async () => ({ value: 'synthetic-key-never-real' }) });
     child.provide('launchEnvironment', createLaunchEnvironmentSnapshot([{ source: 'process', values: {} }]));
     child.provide('arcfoldDeepSeekTransport', { configuration: { provider, endpoint, modelPolicies: { [model]: ledger.modelPolicy() } }, createTransport: options => transport.createTransport(options) });
-    child.on('llm/stream', (options, next) => owner.guardStream(options, next));
+    child.on('llm/stream', (options, next) => owner.guardStream(options, fixtureOptions.nativeModels ? () => nativeRecords.stream(options, next) : next));
   } }));
-  await active(await ctx.plugin(Provider, { apiKeyRef: 'SYNTHETIC_KEY_REFERENCE', maxTokens: 1024, reasoningEffort: 'off' }));
+  await active(await ctx.plugin(fixtureOptions.nativeModels ? NativeProvider : Provider, fixtureOptions.nativeModels
+    ? { apiKeyEnv: 'SYNTHETIC_KEY_REFERENCE', baseURL: endpoint.replace('/v1/messages', ''), maxTokens: 1024, reasoningEffort: 'off' }
+    : { apiKeyRef: 'SYNTHETIC_KEY_REFERENCE', maxTokens: 1024, reasoningEffort: 'off' }));
   let sequence = 0;
   function enqueue(role, override = {}) {
     const input = envelope(role, [repo.rootId()]); input.scope.ancestorPaths = [[repo.rootId()]]; input.scope.treeRevision = repo.meta().treeRevision; input.allowedIds.nodeIds = [repo.rootId()]; input.knownItems = [];
     const kinds = { main: 'user_turn', attribution: 'human_input', learning: 'settled_main_turn', consolidation: 'leave_timeout', verification: 'window', improvement: 'repair_group', script_writer: 'explicit_script_request' };
     const trigger = { ...input.trigger, kind: kinds[role], producerRole: ['main', 'attribution'].includes(role) ? 'user' : role === 'learning' ? 'main' : 'program', origin: 'user', status: 'settled', ordinal: ++sequence, nativeSessionId: 'real-main', nativeTurn: 1, ...override.trigger };
     const config = { provider, model, reasoningEffort: 'off', maxTokens: 1024, preset: 'tree-fixture', cwd: root, modelVersion: budgetManifest.modelVersion, priceVersion: ledger.manifestHash, budgetScope: TREE_TEST_SCOPE, stage: 'smoke' };
+    if (fixtureOptions.nativeModels) Object.assign(config, { budgetScope: 'dsh-native', modelVersion: 'unreported', priceVersion: 'unknown' });
     return jobs.enqueue({ role, key: `${role}-${sequence}`, nodeIds: [repo.rootId()], input, revisionSet: {}, config, ...override, trigger });
   }
   async function runMain() {
@@ -95,5 +102,5 @@ export async function nativeFixture(t, script = ({ role }) => minimal[role] ?? '
     handle.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '这是合成用户轮，请给一个简短答复。' }] })); await handle.agent.whenIdle(); assert.equal(await ctx.sessions.flush(handle.agent.session), true);
     return owner.consume(job.id, await owner.readEvents(handle.agent.session.id, handle));
   }
-  return { root, ctx, repo, jobs, owner, ledger, transport, business, requests, toolRuns, enqueue, runMain, handles, shutdown };
+  return { root, ctx, repo, jobs, owner, ledger, nativeRecords, transport, business, requests, toolRuns, enqueue, runMain, handles, shutdown };
 }

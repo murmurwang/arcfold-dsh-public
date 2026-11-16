@@ -84,7 +84,19 @@ export class ConsolidationService {
     });
     return { contextEpoch: session.contextEpoch, summary: { id: summary.id, version: summary.version, oneLine: summary.oneLine, body: summary.body, sourceWatermark: summary.sourceWatermark }, recent, constraints: this.builder.build([nodeId], 'learning').segments };
   }
-  pressure({ fullRequest, measure, contextWindow, maxOutputTokens }) {
+  pressure({ fullRequest, measure, contextWindow, maxOutputTokens, estimated = false }) {
+    if (estimated) {
+      const reading = measure(fullRequest);
+      if (reading?.kind !== 'estimated' || reading.inputHash !== digest(fullRequest) || !Number.isSafeInteger(reading.tokens) || reading.tokens < 0)
+        fail('TOKEN_ESTIMATE_REQUIRED', 'Native learning requires a source-bound input estimate');
+      // Unknown provider capacity cannot be advertised as an exact safe bound.
+      // The native adapter still validates the actual request and reports errors.
+      if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0 || !Number.isSafeInteger(maxOutputTokens))
+        return { ...reading, limit: null, capacityStatus: 'unknown', needsSummary: false };
+      const limit = Math.floor(Math.min(contextWindow * 0.7, contextWindow - maxOutputTokens - Math.min(8192, contextWindow * 0.1)));
+      if (limit <= 0) fail('CONTEXT_CAPACITY', 'Model leaves no safe learning capacity');
+      return { ...reading, limit, capacityStatus: 'estimated', needsSummary: reading.tokens > limit };
+    }
     integer(contextWindow, 'model context window'); integer(maxOutputTokens, 'output tokens');
     const reading = measure(fullRequest);
     if (reading?.then || reading?.kind !== 'exact' || reading.inputHash !== digest(fullRequest) || !Number.isSafeInteger(reading.tokens) || reading.tokens < 0 || !reading.tokenizerIdentity) fail('EXACT_TOKEN_COUNT_REQUIRED', 'Full prompt/messages/tools need a source-bound exact count; the host character heuristic is not proof');

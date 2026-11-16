@@ -119,21 +119,31 @@ function writeDesktopReadme(path, version) {
 
 Arcfold ${version} runs in DSH ${DESKTOP_VERSION} on macOS with Apple silicon.
 
-Open Plugins, choose Add plugin, and enter \`@arcfold/dsh\`. Enable Arcfold and complete its first-run setup. It creates its own workspace and data. Configure DeepSeek in DSH's Models settings when ready.
+Open Plugins, choose Add plugin, and enter \`@arcfold/dsh\`. Enable Arcfold and complete its first-run setup. It creates its own workspace and data. Configure providers in DSH's Models settings and select a model in the chat input.
 
 To update, open the installed Arcfold entry in Plugins, choose a compatible version, and confirm. Back up your Desktop data before replacing the installed version.
 
-Arcfold supports DeepSeek V4 Pro and Flash. On first setup, Arcfold selects DeepSeek V4 Pro if the DSH default model is unset.
+The conversation and its background tasks use the model and reasoning setting chosen for that turn. A selection made during a turn applies to the next turn. Provider credentials, the model catalog and the default selection remain owned by DSH. Missing usage or pricing is recorded as unknown.
+
+Upgrading from 0.4.x requires confirming the native model route in Arcfold setup. Existing data and old billing records remain in place. The new route records reported usage without a local spending cap; actual charges remain with the selected provider.
 `);
 }
 
 function prepareDesktopPatch(path) {
-  const overlay = readFileSync(path, 'utf8');
+  let overlay = readFileSync(path, 'utf8');
   // The shared overlay still includes a disabled OpenAI entry for local runtime
   // configurations. Desktop archives omit it because they do not ship that adapter.
   const openaiEntry = "    - id: arcfold-openai-provider\n      name: '@arcfold/dsh/openai'\n      disabled: true\n      config: {}\n";
   assert.equal(overlay.split(openaiEntry).length, 2, 'Review changes to the disabled OpenAI overlay row');
-  writeFileSync(path, overlay.replace(openaiEntry, ''));
+  overlay = overlay.replace(openaiEntry, '');
+  // Desktop must retain the host's provider directory and model default. The
+  // exact-budget local profile continues to use its separately owned routes.
+  for (const id of ['llm-deepseek', 'llm-deepseek-account', 'llm-pi-ai', 'agent-default-model']) {
+    const pattern = new RegExp('^- id: ' + id + '\\n(?:(?!^- (?:id:|insert:))[\\s\\S])*', 'm');
+    assert.ok(pattern.test(overlay), 'Review the shared model overlay: ' + id);
+    overlay = overlay.replace(pattern, '');
+  }
+  writeFileSync(path, overlay);
 }
 
 /** Validate the actual staged package, including files npm must not silently omit. */

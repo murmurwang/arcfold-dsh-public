@@ -2,6 +2,8 @@ import { canonicalJson, digest, fail } from './contracts.mjs';
 import { WRITER_TOOLS, TERMINAL_JOBS } from './jobs.mjs';
 import { directoryContext, contextMatches } from '../learning-runner.mjs';
 import { compilePrompt } from './prompts.mjs';
+import { nativeAgentOptions, nativeModel } from './native-models.mjs';
+import { nativeResponseComplete } from './native-model-records.mjs';
 
 const requestHash = options => digest({ messages: options.messages, tools: options.tools ?? [], toolHistory: options.toolHistory ?? null });
 function nativePosition(session) {
@@ -31,13 +33,13 @@ export class TreeModelOwner {
     // A rejected result is history, never adopted state. Its exact settled
     // response and the rejection receipt can remain in this node's own worker.
     if (sourceJob.status === 'invalid_output' && sourceJob.resultHash && sourceJob.nativeLogRef && sourceJob.invocationIds.length)
-      return sourceJob.invocationIds.every(id => { const call = this.jobs.repo.get('tree_invocations', id); return call?.state === 'result_received' && this.ledgerLookup(call.ledgerRequestId)?.status === 'settled'; });
+      return sourceJob.invocationIds.every(id => { const call = this.jobs.repo.get('tree_invocations', id), receipt = call && this.ledgerLookup(call.ledgerRequestId); return call?.state === 'result_received' && (receipt?.status === 'settled' || nativeModel(sourceJob.modelConfig) && nativeResponseComplete(receipt)); });
     return sourceJob.status === 'failed' && sourceJob.error?.code === 'NATIVE_PRE_DISPATCH' && sourceJob.nativeLogRef && !sourceJob.invocationIds.length;
   }
   assertProjection(job, options) {
     if (options.purpose !== undefined || options.system !== undefined) fail('PURPOSE_BYPASS', 'Tree roles use owned native messages, never purpose calls');
     const config = job.modelConfig;
-    if (['provider', 'model', 'reasoningEffort', 'maxTokens'].some(k => options[k] !== config[k])) fail('MODEL_CONFIG_CHANGED', 'Actual request differs from frozen model configuration');
+    if (['provider', 'model', 'reasoningEffort', 'maxTokens'].some(k => nativeModel(config) ? (options[k] ?? null) !== (config[k] ?? null) : options[k] !== config[k])) fail('MODEL_CONFIG_CHANGED', 'Actual request differs from frozen model configuration');
     const session = this.host.sessions.get(options.sessionId), header = session?.requestHeader()?.config;
     if (!session || !header || ['provider', 'model', 'reasoningEffort', 'maxTokens'].some(k => header[k] !== options[k])) fail('NATIVE_CONFIG_CHANGED', 'Native header and provider configuration disagree');
     const systems = options.messages.filter(m => m.role === 'system').flatMap(m => m.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('\n');
@@ -171,7 +173,7 @@ export class TreeModelOwner {
     for (const invocationId of job.invocationIds) {
       const invocation = this.jobs.repo.get('tree_invocations', invocationId), ledger = this.ledgerLookup(invocation.ledgerRequestId);
       const message = events.find(e => e.type === 'assistant/message' && e.seq > invocation.stepStartSeq && !events.some(s => s.type === 'step/start' && s.seq > invocation.stepStartSeq && s.seq < e.seq));
-      if (!message || !ledger || ledger.status !== 'settled') fail('USAGE_UNKNOWN', 'Every completed model step requires a settled ledger receipt');
+      if (!message || !ledger || !(nativeModel(job.modelConfig) ? nativeResponseComplete(ledger) : ledger.status === 'settled')) fail('USAGE_UNKNOWN', 'Every completed model step requires its own completed request record');
       this.jobs.invocationResult(invocationId, { state: 'result_received', usage: ledger.usage, resultHash: digest(message.data), nativeLogRef: `${job.nativeSessionId}#${message.seq}` });
     }
     this.jobs.receive(id, { message: { role: 'assistant', content: result.final.content }, nativeLogRef: `${job.nativeSessionId}#${result.end.seq}`, eventsHash: digest(events) });
@@ -201,16 +203,16 @@ export class TreeModelOwner {
         const start = existing.findLast(e => e.type === 'turn/start'), end = existing.findLast(e => e.type === 'turn/end');
         if (start && (!end || end.seq < start.seq)) fail('RESULT_UNKNOWN', 'Previous native turn remains uncertain');
       }
-      const config = job.modelConfig, options = { agentOptions: { provider: config.provider, model: config.model, maxTokens: config.maxTokens, reasoningEffort: config.reasoningEffort }, setup: ctx => this.setup(ctx, id), meta: { agentPreset: config.preset, cwd: config.cwd } };
+      const config = job.modelConfig, options = { agentOptions: nativeModel(config) ? nativeAgentOptions(config) : { provider: config.provider, model: config.model, maxTokens: config.maxTokens, reasoningEffort: config.reasoningEffort }, setup: ctx => this.setup(ctx, id), meta: { agentPreset: config.preset, cwd: config.cwd } };
       handle = existing?.length ? await this.host.agents.resume({ ...options, resumeSessionId: job.nativeSessionId }) : await this.host.agents.create({ ...options, sessionId: job.nativeSessionId });
       // A resumed learning session retains its previous native selection. Move
       // only this owned background session to the job's already-frozen route;
       // persist that selection before any submission or provider request.
       if (existing?.length && typeof handle.agent.model?.current === 'function') {
         const current = handle.agent.model.current();
-        if (!current || ['provider', 'model', 'reasoningEffort'].some(key => current[key] !== config[key])) {
+        if (!current || ['provider', 'model', 'reasoningEffort'].some(key => (current[key] ?? null) !== (config[key] ?? null))) {
           if (typeof handle.agent.model.select !== 'function') fail('MODEL_SELECTION_UNAVAILABLE', 'Cannot apply the frozen background model to its native session');
-          handle.agent.model.select({ provider: config.provider, model: config.model, reasoningEffort: config.reasoningEffort });
+          handle.agent.model.select({ provider: config.provider, model: config.model, ...(config.reasoningEffort == null ? {} : { reasoningEffort: config.reasoningEffort }) });
         }
       }
       this.handles.set(id, handle);
