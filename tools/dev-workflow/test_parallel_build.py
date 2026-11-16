@@ -146,3 +146,9 @@ class ParallelBuildTests(unittest.TestCase):
             release.prepare(self.flow, self.folder, "0.6.0", self.merge)
         self.assertEqual(self.starts, [])
         self.assertEqual(execution.state(self.flow)["runs"], {})
+
+    def test_legacy_publication_cannot_bypass_an_activated_candidate_index(self):
+        release.prepare(self.flow, self.folder, "0.6.0", self.merge)
+        write(self.folder / "candidates.json", {"active": "synthetic-new-candidate"})
+        with self.assertRaisesRegex(WorkflowError, "旧发行入口"):
+            release.release(self.flow, "0.6.0", False, False, None)

@@ -169,6 +169,8 @@ def verify_isolated(path, receipt):
 
 def release(flow, version, local_only, finalize, isolated):
     with locked(flow.state / "releases" / version, "release"):
+        require(not (flow.state / "releases" / version / "candidates.json").exists(),
+                "此版本已启用候选记录；旧发行入口不能读取旧包绕过当前候选，请使用已接入的入口。")
         merged = flow.state / "merges" / f"{version}.json"
         require(merged.is_file(), "此版本尚无已确认的受管 main 合入。")
         merge = read(merged)
