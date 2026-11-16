@@ -1,3 +1,6 @@
+// Finish linking runtime dependencies before DSH can refresh a ready profile.
+// Actual runtime activation remains behind the existing configuration/consent checks.
+import { installTreeRuntime } from './tree/runtime.mjs';
 import { OpportunityService } from './opportunities.mjs';
 import { ImportService } from './importer.mjs';
 import { BusinessStore } from './business.mjs';
@@ -20,7 +23,6 @@ export async function apply(ctx, config = {}) {
   }
   ctx.provide('arcfoldTreeMode', Object.freeze({ enabled: config.goalTreeV3?.enabled === true }));
   if (config.goalTreeV3?.enabled === true) {
-    const { installTreeRuntime } = await import('./tree/runtime.mjs');
     await installTreeRuntime(ctx, config.goalTreeV3, { legacyFilename: config.filename });
     return;
   }
