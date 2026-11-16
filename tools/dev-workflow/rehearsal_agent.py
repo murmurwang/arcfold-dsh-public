@@ -90,6 +90,7 @@ def outbox(configured):
     path = Path(configured["outbox"])
     if not path.exists():
         path.mkdir(mode=0o755)
+        path.chmod(0o755)
     owned(path, configured["uid"], directory=True)
     return path
 
@@ -144,6 +145,10 @@ def validate_request(configured, folder, verify_material=True):
     for name, sha in (plan["files"].items() if verify_material else ()):
         require(not Path(name).is_absolute() and ".." not in Path(name).parts, "测试路径无效。")
         path = folder / "kit" / name
+        for parent in path.parents:
+            if parent == folder:
+                break
+            owned(parent, configured["issuer_uid"], directory=True)
         owned(path, configured["issuer_uid"])
         require(digest(path.read_bytes()) == sha, "测试材料发生变化。")
     if verify_material:

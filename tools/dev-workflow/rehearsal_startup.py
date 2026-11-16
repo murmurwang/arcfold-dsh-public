@@ -137,6 +137,7 @@ def enable(flow, path, ask):
             item.chmod(0o755 if item.suffix == ".command" else 0o644)
         shared.chmod(0o755)
         (shared / "inbox").mkdir(exist_ok=True, mode=0o755)
+        (shared / "inbox").chmod(0o755)
         write(shared / "activation.json", {"plan_sha256": digest(Path(path).read_bytes()), "approval": ask,
               "service_sha256": plan["service_sha256"], "issuer_uid": os.getuid(), "at": timestamp()})
         (shared / "activation.json").chmod(0o644)
@@ -214,15 +215,22 @@ def enqueue(flow, path, ask):
                                "source": plan["source"], "created_at": previous["created_at"]})
             return status(flow, identifier)
         folder.mkdir(mode=0o755)
+        folder.chmod(0o755)
         kit = folder / "kit"
         kit.mkdir(mode=0o755)
+        kit.chmod(0o755)
         for name in plan["files"]:
             target = kit / name
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+            for parent in target.parents:
+                if parent == kit:
+                    break
+                parent.chmod(0o755)
             shutil.copyfile(Path(plan["kit"]) / name, target)
             target.chmod(0o755 if name.endswith(".command") else 0o644)
         command_dir = folder / "commands"
         command_dir.mkdir(mode=0o755)
+        command_dir.chmod(0o755)
         request = {"id": identifier, "plan": plan, "plan_sha256": digest(plan_path.read_bytes()),
                    "approval": ask, "issuer_uid": os.getuid(), "created_at": timestamp()}
         write(command_dir / "000001.json", {"seq": 1, "action": "launch", "job": identifier})

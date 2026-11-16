@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -109,6 +110,19 @@ class StartupTests(unittest.TestCase):
         self.assertEqual(startup.enqueue(self.flow, self.plan, self.ask)["id"], request["id"])
         self.assertEqual((folder / "request.json").read_bytes(), original)
         self.assertEqual(len(list((folder / "commands").iterdir())), 1)
+
+    def test_restrictive_umask_still_allows_readonly_cross_account_handoff(self):
+        previous = os.umask(0o077)
+        try:
+            folder, _ = self.enqueue()
+            self.outbox.rmdir()
+            agent.outbox(self.config)
+        finally:
+            os.umask(previous)
+        for path in (folder, folder / "kit", folder / "commands", self.outbox):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
+        for path in (folder / "request.json", folder / "commands" / "000001.json"):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
 
     def test_another_approval_cannot_start_same_bundle_again(self):
         self.enqueue()
