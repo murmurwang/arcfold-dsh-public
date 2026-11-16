@@ -487,7 +487,7 @@ def review_directory(flow, number, head, base):
 def review_view(flow, row):
     directory = flow.state / row["run"]
     records = {name: json_or(directory / (name + ".json")) for name in
-               ("request", "estimate", "attempt", "response", "receipt", "comment", "billing-reconciliation", "advisories")}
+               ("request", "estimate", "attempt", "response", "receipt", "comment", "billing-reconciliation", "result-reconciliation", "advisories")}
     receipt, response, attempt = records["receipt"], records["response"], records["attempt"]
     status, conclusion = "prepared", None
     if receipt:
@@ -506,12 +506,10 @@ def review_view(flow, row):
         except (WorkflowError, KeyError, ValueError, TypeError):
             status = "unconfirmed"
     elif response:
-        status = "returned-unvalidated"
+        status = "failed" if flow.review_result_reconciled(attempt, records["result-reconciliation"]) else "returned-unvalidated"
     elif attempt:
-        settled = records["billing-reconciliation"]
-        no_usage = (settled.get("outcome") == "no_usage" and settled.get("evidence") and
-                    settled.get("client_request_id") == attempt.get("client_request_id"))
-        status = "failed" if attempt.get("request_sent") is False or no_usage else "unknown"
+        reconciled = flow.review_result_reconciled(attempt, records["result-reconciliation"])
+        status = "failed" if attempt.get("request_sent") is False or reconciled else "unknown"
     reviewer = (receipt.get("review") or {}).get("model") or row.get("reviewer")
     return {**row, "status": status, "conclusion": conclusion, "reviewer": reviewer,
             "author": reviewer if response and reviewer else "independent reviewer (not yet confirmed)", "records": records}

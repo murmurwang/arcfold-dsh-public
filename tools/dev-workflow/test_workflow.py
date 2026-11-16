@@ -216,6 +216,11 @@ class WorkflowTests(unittest.TestCase):
         write(old / "billing-reconciliation.json", {
             "client_request_id": "one", "outcome": "no_usage", "evidence": "synthetic provider usage history",
         })
+        self.assertTrue(self.flow.previous_review_uncertainty(directory / OTHER))
+        write(old / "result-reconciliation.json", {
+            "client_request_id": "one", "outcome": "unavailable", "reason": "no response was received",
+            "evidence": ["synthetic request investigation"], "at": "now", "recorded_by": "fixture-agent",
+        })
         self.assertEqual(self.flow.previous_review_uncertainty(directory / OTHER), [])
 
     def test_self_written_result_or_changed_head_cannot_merge(self):

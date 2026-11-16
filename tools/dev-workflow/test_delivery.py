@@ -12,7 +12,7 @@ import collab
 import delivery
 import delivery_feedback as feedback
 from common import WorkflowError, digest, git, git_line, locked, read, write
-from desktop_review_request import packet_for
+from desktop_review_request import CHECKS, RELAY_MODEL, packet_for
 from workflow import HERE, Workflow
 
 HEAD, BASE = "a" * 40, "b" * 40
@@ -139,6 +139,28 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("尚未关联交付的反馈", rendered)
         self.assertIn("dev-F1 · record-only", rendered)
 
+    def test_record_only_feedback_returns_to_pending_when_linked_or_routed(self):
+        registered = self.register()
+        for relation in delivery.RELATIONS:
+            with self.subTest(relation=relation):
+                row = feedback.record(self.flow, "deferred feedback")
+                original = snapshot(self.flow.state / "feedback" / row["id"])
+                feedback.route(self.flow, row["id"], "note", "deferred")
+                linked = feedback.link(self.flow, row["id"], "001", relation, "follow up")
+                self.assertEqual(linked["status"], "pending")
+                self.assertIn(row["id"], delivery.show(self.flow, "001")["pending"]["feedback"])
+                self.assertIn(row["id"], [r["id"] for r in collab.progress(self.flow)["feedback"]])
+                self.assertEqual(snapshot(self.flow.state / "feedback" / row["id"])["feedback.json"],
+                                 original["feedback.json"])
+                self.assertTrue(any(e.get("status") == "record-only" for e in linked["history"]))
+                feedback.resolved(self.flow, row["id"], "synthetic acceptance", "pass")
+                self.assertEqual(feedback.link(self.flow, row["id"], "001", relation, "add evidence")["status"], "resolved")
+        for target in ["issue:17", "new:" + registered["task"], "close-loop:" + registered["task"]]:
+            with self.subTest(route=target):
+                row = feedback.record(self.flow, "deferred route")
+                feedback.route(self.flow, row["id"], "note", "deferred")
+                self.assertEqual(feedback.route(self.flow, row["id"], target)["status"], "pending")
+
     def test_new_from_dev_feedback_uses_dev_source_instead_of_daily_package(self):
         item = feedback.record(self.flow, "入口输出不对", target="dev", version={"commit": "unknown", "reason": "未保留现场"})
         result = collab.new_from_feedback(self.flow, {"title": "修复入口输出", "scope": ["tools/"]}, item["id"])
@@ -243,6 +265,14 @@ class DeliveryTests(unittest.TestCase):
             with self.assertRaisesRegex(WorkflowError, "费用未知"):
                 self.flow.review(5, new_attempt=True)
             write(folder / "billing-reconciliation.json", {"client_request_id": "pending", "outcome": "no_usage", "evidence": "synthetic reconciliation"})
+            with self.assertRaisesRegex(WorkflowError, "未知"):
+                self.flow.review(5, new_attempt=True)
+            write(folder / "result-reconciliation.json", {
+                "client_request_id": "pending", "outcome": "invalid_response", "reason": "response has no report",
+                "evidence": ["synthetic response evidence"], "at": "now", "recorded_by": "fixture-agent",
+            })
+            self.assertEqual(delivery.show(self.flow, "001-R1")["status"], "failed")
+            self.assertIsNone(delivery.show(self.flow, "001-R1")["conclusion"])
             second = self.flow.review(5, new_attempt=True)
             self.assertEqual(second["review_id"], "001-R2")
             self.assertEqual(delivery.review_directory(self.flow, 5, HEAD, BASE), Path(second["material"]).parent)
@@ -298,6 +328,89 @@ class DeliveryTests(unittest.TestCase):
         delivery.migrate(self.flow, plan, "继续同一份核对")
         self.assertEqual(delivery.reservations(self.flow), [])
         self.assertEqual(self.register()["id"], "002")
+
+    def test_migrated_supersession_preserves_files_and_revokes_both_aliases(self):
+        self.legacy()
+        original = read(self.flow.state / "asks/A4.json")
+        write(self.flow.state / "asks/A5.json", {**original, "id": "A5", "status": "open", "answers": []})
+        before = snapshot(self.flow.state)
+        delivery.migrate(self.flow, delivery.migration_preview(self.flow), "checked")
+        for old, alias, reference in [("A4", "001-A1", "001-A1"), ("A5", "001-A2", "A5")]:
+            replacement = collab.create_ask(self.flow, {"delivery": "001", "kind": "approve", "title": "replacement",
+                                                       "body": "changed packet", "binds": {"packet": "b" * 64},
+                                                       "supersedes": reference})
+            self.assertEqual(replacement["answers"], [])
+            for ref in [old, alias]:
+                self.assertEqual(delivery.show(self.flow, ref)["status"], "superseded")
+                self.assertFalse(collab.granted(delivery.show(self.flow, ref)))
+                with self.assertRaises(WorkflowError):
+                    collab.answer(self.flow, ref, "yes", "late answer")
+        after = snapshot(self.flow.state)
+        for name, value in before.items():
+            self.assertEqual(after[name], value, name)
+
+    def test_migrated_answers_and_cancellation_preserve_the_original_request(self):
+        self.legacy()
+        path = self.flow.state / "asks/A4.json"
+        write(path, {**read(path), "status": "open", "answers": []})
+        before = snapshot(self.flow.state)
+        delivery.migrate(self.flow, delivery.migration_preview(self.flow), "checked")
+        collab.answer(self.flow, "001-A1", "other", "need to check")
+        collab.answer(self.flow, "A4", "yes", "approved original packet")
+        self.assertEqual(len(delivery.show(self.flow, "001-A1")["answers"]), 2)
+        self.assertTrue(collab.granted(delivery.show(self.flow, "A4")))
+        collab.cancel_ask(self.flow, "001-A1", "withdraw original approval")
+        self.assertFalse(collab.granted(delivery.show(self.flow, "A4")))
+        self.assertEqual(delivery.show(self.flow, "A4")["status"], "cancelled")
+        self.assertEqual(delivery.show(self.flow, "001-A1")["binds"], {"packet": "a" * 64})
+        after = snapshot(self.flow.state)
+        for name, value in before.items():
+            self.assertEqual(after[name], value, name)
+        write(path, {**read(path), "body": "unexpected external change"})
+        with self.assertRaisesRegex(WorkflowError, "原文件已变化"):
+            delivery.show(self.flow, "A4")
+
+    def test_known_billing_does_not_replace_a_valid_independent_report(self):
+        parent = self.flow.state / "prs/5"
+        old = parent / "previous"
+        packet = packet_for({"pr": 5}, {"src/a.mjs": "export {};\n"}, "lmuai")
+        write(old / "request.json", packet)
+        attempt = {"client_request_id": "earlier", "packet": packet["id"], "provider": "lmuai", "started_at": "then"}
+        write(old / "attempt.json", attempt)
+        billing = {"before": {"requests": 0, "actual_cost_usd": "0", "key_limit_usd": "0.30"},
+                   "after": {"requests": 1, "actual_cost_usd": "0.10"}, "actual_cost_usd": "0.10"}
+        result = {"packet": packet["id"], "checks": {name: {"status": "pass", "summary": "synthetic evidence",
+                  "evidence": [{"path": "src/a.mjs", "line": 1, "note": "fixture"}]} for name in CHECKS}, "findings": []}
+        # A valid failing report is a known result; a bill alone is not.
+        result["checks"]["data"]["status"] = "fail"
+        raw = {"id": "resp_fixture", "model": RELAY_MODEL, "status": "completed",
+               "usage": {"input_tokens": 10, "output_tokens": 2}, "output": []}
+        response = {"provider_request_id": "fixture", "response": raw, "billing": billing}
+        write(old / "response.json", response)
+        self.assertTrue(self.flow.previous_review_uncertainty(parent / "next"))
+        raw["output"] = [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": json.dumps(result)}]}]
+        write(old / "response.json", response)
+        self.assertEqual(self.flow.previous_review_uncertainty(parent / "next"), [])
+        write(old / "attempt.json", {**attempt, "packet": "wrong-packet"})
+        self.assertTrue(self.flow.previous_review_uncertainty(parent / "next"))
+
+    def test_billing_reconciliation_requires_separate_failed_result_evidence(self):
+        parent = self.flow.state / "prs/5"
+        old = parent / "previous"
+        write(old / "attempt.json", {"client_request_id": "earlier", "provider": "lmuai", "started_at": "then"})
+        write(old / "billing-reconciliation.json", {"client_request_id": "earlier", "outcome": "usage_confirmed",
+                                                    "actual_cost_usd": "0.10", "evidence": "synthetic usage"})
+        self.assertTrue(self.flow.previous_review_uncertainty(parent / "next"))
+        resolution = {"client_request_id": "earlier", "outcome": "unavailable", "reason": "connection ended without a report",
+                      "evidence": ["synthetic transport evidence"], "at": "then", "recorded_by": "fixture-agent"}
+        for invalid in [{**resolution, "outcome": "pass"}, {**resolution, "client_request_id": "another"},
+                        {**resolution, "evidence": []}]:
+            write(old / "result-reconciliation.json", invalid)
+            self.assertTrue(self.flow.previous_review_uncertainty(parent / "next"))
+        write(old / "result-reconciliation.json", resolution)
+        self.assertEqual(self.flow.previous_review_uncertainty(parent / "next"), [])
+        (old / "billing-reconciliation.json").unlink()
+        self.assertTrue(self.flow.previous_review_uncertainty(parent / "next"))
 
     def test_pause_resume_history_is_ordered_even_with_the_same_timestamp(self):
         self.register()

@@ -513,8 +513,18 @@ class Workflow:
         return issues
 
     @staticmethod
+    def review_result_reconciled(attempt, resolution):
+        # This records a failed execution, never an author's review verdict.
+        return (resolution.get("client_request_id") == attempt.get("client_request_id")
+                and resolution.get("outcome") in ("unavailable", "invalid_response")
+                and isinstance(resolution.get("evidence"), (str, list)) and bool(resolution["evidence"])
+                and all(isinstance(resolution.get(key), str) and resolution[key].strip()
+                        for key in ("reason", "at", "recorded_by")))
+
+    @staticmethod
     def previous_review_uncertainty(run_dir):
         from collab import amount
+        from desktop_review_request import validate
 
         def known_cost(value):
             try:
@@ -530,22 +540,36 @@ class Workflow:
             attempt = read(path)
             if attempt.get("request_sent") is False:
                 continue
+            cost_known, result_known = False, False
             response = path.parent / "response.json"
             if response.is_file():
                 returned = read(response)
                 usage = returned.get("response", {}).get("usage") or {}
                 known_tokens = all(type(usage.get(key)) is int and usage[key] >= 0
                                    for key in ("input_tokens", "output_tokens"))
-                if (attempt.get("provider") == "lmuai" and
+                cost_known = (attempt.get("provider") == "lmuai" and
                     known_cost((returned.get("billing") or {}).get("actual_cost_usd"))) or (
-                    attempt.get("provider") != "lmuai" and known_tokens):
-                    continue
+                    attempt.get("provider") != "lmuai" and known_tokens)
+                try:
+                    packet = read(path.parent / "request.json")
+                    require(digest({k: v for k, v in packet.items() if k != "id"}) == packet["id"]
+                            and packet["id"] == attempt["packet"]
+                            and packet.get("provider", "openai") == attempt.get("provider", "openai"),
+                            "旧审阅报告未绑定原送审材料。")
+                    validate(packet, returned)
+                    result_known = True
+                except (WorkflowError, OSError, KeyError, ValueError, TypeError, AttributeError, ArithmeticError):
+                    pass
             resolution_path = path.parent / "billing-reconciliation.json"
             resolution = read(resolution_path) if resolution_path.is_file() else {}
-            if (resolution.get("client_request_id") != attempt["client_request_id"]
-                or resolution.get("outcome") not in ("no_usage", "usage_confirmed")
-                or not resolution.get("evidence")
-                or resolution.get("outcome") == "usage_confirmed" and not known_cost(resolution.get("actual_cost_usd"))):
+            cost_known = cost_known or (
+                resolution.get("client_request_id") == attempt["client_request_id"]
+                and resolution.get("outcome") in ("no_usage", "usage_confirmed") and bool(resolution.get("evidence"))
+                and (resolution["outcome"] == "no_usage" or known_cost(resolution.get("actual_cost_usd"))))
+            result_path = path.parent / "result-reconciliation.json"
+            result_resolution = read(result_path) if result_path.is_file() else {}
+            result_known = result_known or Workflow.review_result_reconciled(attempt, result_resolution)
+            if not (cost_known and result_known):
                 uncertain.append({"request": attempt["client_request_id"], "started_at": attempt["started_at"]})
         return uncertain
 

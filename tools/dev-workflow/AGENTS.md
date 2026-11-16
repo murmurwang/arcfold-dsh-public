@@ -10,6 +10,8 @@
 
 `review` 预留完整 R 号；相同材料重复预览或核对结果不换号。新的独立请求使用 `--new-attempt`，旧结果或费用未知时不能换号绕过。授权后发送已预留的 R 时不再重复添加此参数。
 
+旧报告须绑定原请求及材料并通过完整校验；只有账单或用量不算结果已核对。报告没有取得或响应无效时，先核对证据，在原目录另存 `result-reconciliation.json`，写原请求号、`unavailable` 或 `invalid_response`、原因、证据、时间与记录者。它只记录执行失败，不代写独立结论；费用仍另用 `billing-reconciliation.json` 核对。具体格式见 [交付编号与查询](delivery-numbering.md)。
+
 `feedback` 默认分配独立 F；`--target dev` 分配 dev-F，`--delivery 总号` 分配交付内 F。dev 反馈保存实际入口提交、工作文件摘要或明确未知原因，日常产品版本只作背景。`--related` 仅关联发生场景。用 `classify` 更正对象、`feedback-link` 增补或纠正关联，保留原号和历史。关联交付或 Issue 后反馈仍待处理；`feedback-resolve --acceptance FILE` 才能按同一交付的实际通过回执解决旧反馈。
 
 不发行安装包的 dev 交付合入后仍需实际反馈，使用 `accept-dev ID --feedback F编号 --outcome pass|fail|unconfirmed`；通过须对应已合入的实际入口版本。合入和发布成功均不能代替实际验收。

@@ -80,12 +80,19 @@ def asks_dir(flow):
 
 def load_ask(flow, ask):
     require(isinstance(ask, str) and ASK_ID.fullmatch(ask), "请求单编号形如 001-A3；旧 A3 仍可查询。")
-    mapping = delivery.mappings(flow).get("materials", {}).get(ask)
+    materials = delivery.mappings(flow).get("materials", {})
+    alias = next((key for key, value in materials.items() if value.get("legacy") == ask), ask)
+    mapping = materials.get(alias)
     path = flow.state / mapping["path"] if mapping else asks_dir(flow) / f"{ask}.json"
     require(path.is_file(), f"没有请求单 {ask}。")
     row = read(path)
+    updates = flow.state / "ask-updates" / path.name
+    if updates.is_file():
+        saved = read(updates)
+        require(saved["original_sha256"] == digest(path.read_bytes()), "旧请求原文件已变化，先核对附属答复与状态。")
+        row.update({key: value for key, value in saved["state"].items() if key in ASK_STATE_FIELDS})
     if mapping:
-        row = {**row, "reference": ask, "delivery": mapping["delivery"]}
+        row = {**row, "reference": alias, "delivery": mapping["delivery"]}
     if row.get("task") and not row.get("delivery"):
         try:
             row["delivery"] = delivery.owner(flow, row["task"])
@@ -97,6 +104,22 @@ def load_ask(flow, ask):
     if superseding:
         row.update(status="superseded", superseded_by=superseding)
     return path, row
+
+
+ASK_STATE_FIELDS = {"status", "answers", "answered_at", "cancellation"}
+
+
+def write_ask_state(flow, path, record):
+    # Mapped legacy requests remain byte-for-byte intact after migration too.
+    mappings = delivery.mappings(flow).get("materials", {}).values()
+    migrated = any(value.get("path") == str(path.relative_to(flow.state)) for value in mappings)
+    if migrated:
+        updates = flow.state / "ask-updates" / path.name
+        write(updates, {"original_sha256": digest(path.read_bytes()),
+                        "state": {key: record[key] for key in ASK_STATE_FIELDS if key in record}})
+        return updates
+    write(path, record)
+    return path
 
 
 def all_asks(flow):
@@ -203,10 +226,8 @@ def create_ask(flow, request):
         write(directory / f"{ask}.json", record)
         if total:
             delivery.complete(flow, ask, directory / f"{ask}.json")
-        if previous:
-            old = read(previous[0])
-            old.update(status="superseded", superseded_by=ask)
-            write(previous[0], old)
+        # load_ask derives replacement status from this new relation. Never
+        # mutate the replaced request, including a migrated legacy file.
         delivery.event(flow, total, "asked", evidence=str(directory / f"{ask}.json"), ask=ask)
     return record
 
@@ -216,7 +237,7 @@ def answer(flow, ask, verdict, text, step=None):
     words = text_field(text, "开发者的原话")
     with locked(asks_dir(flow), "answers"):
         path, metadata = load_ask(flow, ask)
-        record = read(path)
+        record = metadata
         require(record["status"] == "open", f"{ask} 已经答过。情况变了就另开一张。")
         row = {"verdict": verdict, "text": text, "at": timestamp(), "author": "开发者", "recorded_by": actor(), "source": ask}
         if step is not None:
@@ -236,8 +257,8 @@ def answer(flow, ask, verdict, text, step=None):
                 record["status"] = "answered"
         if record["status"] == "answered":
             record["answered_at"] = row["at"]
-        write(path, record)
-        delivery.event(flow, metadata.get("delivery"), "answered", evidence=str(path), ask=ask, verdict=verdict)
+        saved = write_ask_state(flow, path, record)
+        delivery.event(flow, metadata.get("delivery"), "answered", evidence=str(saved), ask=ask, verdict=verdict)
     return record
 
 
@@ -250,11 +271,11 @@ def cancel_ask(flow, ask, reason):
     with locked(asks_dir(flow), "answers"):
         path, current = load_ask(flow, ask)
         require(current["status"] not in ("cancelled", "superseded"), "请求已撤销或被取代。")
-        record = read(path)
+        record = current
         record["status"] = "cancelled"
         record["cancellation"] = {"reason": reason, **delivery.provenance(ask)}
-        write(path, record)
-        delivery.event(flow, current.get("delivery"), "ask-cancelled", ask=ask, reason=reason, evidence=str(path))
+        saved = write_ask_state(flow, path, record)
+        delivery.event(flow, current.get("delivery"), "ask-cancelled", ask=ask, reason=reason, evidence=str(saved))
         return record
 
 

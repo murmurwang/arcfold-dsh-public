@@ -49,12 +49,16 @@ def load(flow, item):
         elif event["action"] == "link":
             record["links"].append(event)
             removed.discard((event["delivery"], event["relation"]))
+            if record["status"] == "record-only":
+                record["status"] = "pending"
         elif event["action"] == "unlink":
             removed.add((event["delivery"], event["relation"]))
             record["links"] = [link for link in record["links"]
                                if (link["delivery"], link["relation"]) != (event["delivery"], event["relation"])]
         elif event["action"] == "route":
             record["routes"].append(event)
+            if event["to"] != "note" and record["status"] == "record-only":
+                record["status"] = "pending"
         elif event["action"] == "status":
             record["status"] = event["status"]
         elif event["action"] == "attach":
