@@ -341,7 +341,15 @@ def migration_preview(flow):
             report["id"] = f"{total}-R{index}"
         plans.append({"task": task["id"], "delivery": total, "title": task["title"],
                       "decision": total + "-D1", "asks": askmap, "reviews": reviewmap})
-    orphaned = [p.stem for p in (flow.state / "asks").glob("A*.json") if not read(p).get("task")]
+    known_tasks = {task["id"] for task in tasks}
+    orphaned = []
+    for p in (flow.state / "asks").glob("A*.json"):
+        task_id = read(p).get("task")
+        if not isinstance(task_id, str) or task_id not in known_tasks:
+            orphaned.append(p.stem)
+            # Unassigned records are part of the reviewed plan too. Keep their
+            # contents bound through apply/recovery without guessing an owner.
+            snapshot[str(p.relative_to(flow.state))] = digest(p.read_bytes())
     plan = {"schema": "delivery-migration-v1", "repo": flow.repo.name, "start": start, "tasks": plans,
             "unassigned_asks": sorted(orphaned), "snapshot": snapshot}
     return {**plan, "sha256": digest(plan)}

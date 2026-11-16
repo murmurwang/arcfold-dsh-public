@@ -432,6 +432,54 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(delivery.reservations(self.flow), [])
         self.assertEqual(self.register()["id"], "002")
 
+    def test_migration_lists_all_requests_without_an_existing_task_and_preserves_them(self):
+        self.legacy()
+        original = read(self.flow.state / "asks/A4.json")
+        for number, task in ((5, None), (6, "missing-task"), (7, "")):
+            item = f"A{number}"
+            write(self.flow.state / "asks" / (item + ".json"), {**original, "id": item, "task": task})
+        # A leftover directory without task.json is not an existing task.
+        write(self.flow.state / "tasks/missing-task/decision.md", b"orphaned old decision\n")
+        before = snapshot(self.flow.state)
+        plan = delivery.migration_preview(self.flow)
+        self.assertEqual(snapshot(self.flow.state), before)
+        self.assertEqual(plan["tasks"][0]["asks"], {"A4": "001-A1"})
+        self.assertEqual(plan["unassigned_asks"], ["A5", "A6", "A7"])
+        for item in plan["unassigned_asks"]:
+            self.assertEqual(plan["snapshot"][f"asks/{item}.json"], digest(before[f"asks/{item}.json"][0]))
+        result = delivery.migrate(self.flow, plan, "有效归属和缺失归属均已核对")
+        self.assertEqual(result["unassigned_asks"], ["A5", "A6", "A7"])
+        for name, value in before.items():
+            self.assertEqual(snapshot(self.flow.state)[name], value)
+        self.assertEqual(set(result["mappings"]["materials"]), {"001-A1"})
+        self.assertEqual(delivery.migration_preview(self.flow)["unassigned_asks"], ["A5", "A6", "A7"])
+        with self.assertRaisesRegex(WorkflowError, "另一份"):
+            collab.review_approval(self.flow, "A6", 5, "b" * 64, {})
+
+    def test_migration_rechecks_unassigned_request_contents_before_apply_and_resume(self):
+        self.legacy()
+        original = read(self.flow.state / "asks/A4.json")
+        path = self.flow.state / "asks/A5.json"
+        write(path, {**original, "id": "A5", "task": None})
+        plan = delivery.migration_preview(self.flow)
+        raw = path.read_bytes()
+        write(path, {**read(path), "body": "归属仍为空，但已核对的内容变了"})
+        before = {k: v for k, v in snapshot(self.flow.state).items() if not k.endswith(".lock")}
+        with self.assertRaisesRegex(WorkflowError, "改变"):
+            delivery.migrate(self.flow, plan, "之前的对照已核对")
+        # Acquiring the migration locks may create empty lock files, not records.
+        self.assertEqual({k: v for k, v in snapshot(self.flow.state).items() if not k.endswith(".lock")}, before)
+        write(path, raw)
+        with patch("delivery.complete", side_effect=OSError("synthetic interrupted migration")), self.assertRaises(OSError):
+            delivery.migrate(self.flow, plan, "恢复原对照")
+        write(path, {**read(path), "body": "中断后内容变了"})
+        before = snapshot(self.flow.state)
+        with self.assertRaisesRegex(WorkflowError, "改变"):
+            delivery.migrate(self.flow, plan, "继续同一份对照")
+        self.assertEqual(snapshot(self.flow.state), before)
+        write(path, raw)
+        self.assertEqual(delivery.migrate(self.flow, plan, "原内容已恢复")["unassigned_asks"], ["A5"])
+
     def test_migrated_supersession_preserves_files_and_revokes_both_aliases(self):
         self.legacy()
         original = read(self.flow.state / "asks/A4.json")
