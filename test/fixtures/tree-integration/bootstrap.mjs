@@ -26,6 +26,8 @@ import Credentials from '@deepseek-ai/dsh-credentials-local';
 import * as Business from '../../../src/index.mjs';
 import * as Provider from '../../../src/deepseek-provider.mjs';
 import * as DesktopProvider from '../../../src/desktop/provider.mjs';
+import * as NativeDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key';
+import * as NativePiAi from '@deepseek-ai/dsh-llm-pi-ai';
 import * as TreeHost from '../../../src/tree/host.mjs';
 import * as OldBudget from '../../../src/deepseek-budget-plugin.mjs';
 import * as OldLearning from '../../../src/learning-plugin.mjs';
@@ -36,7 +38,7 @@ import { digest } from '../../../src/tree/contracts.mjs';
 
 /** Actual entry points. Default is synthetic loopback only. The explicit real
  * branch is restricted to the single authorized experiment and native guards. */
-export async function bootstrapFixture(t, script, { nativeHost = false, realExperiment = null, webOnly = false, webMainModel = null, desktop = false } = {}) {
+export async function bootstrapFixture(t, script, { nativeHost = false, realExperiment = null, webOnly = false, webMainModel = null, desktop = false, nativeModels = false } = {}) {
   assert.ok(!(webOnly && realExperiment), 'Real test budget and live website accounting are distinct');
   assert.ok(!(desktop && realExperiment), 'Desktop fixture is synthetic only');
   assert.equal(realExperiment, null, 'Public test fixtures support synthetic loopback only');
@@ -50,7 +52,7 @@ export async function bootstrapFixture(t, script, { nativeHost = false, realExpe
     for (const message of body.messages) for (const block of message.content ?? []) if (block.type === 'text') {
       try { const value = JSON.parse(block.text); if (value.jobId && value.role) input = value; } catch {}
     }
-    const row = { ordinal: requests.length + 1, role: input?.role ?? 'main', input, body }; requests.push(row);
+    const row = { ordinal: requests.length + 1, role: input?.role ?? 'main', input, body, url: req.url }; requests.push(row);
     const result = await script(row, ctx.get('arcfoldTreeRuntime'));
     res.writeHead(200, { 'content-type': 'text/event-stream', 'x-request-id': 'synthetic-bootstrap-' + row.ordinal }); res.end(sse(body, result));
   })().catch(error => res.destroy(error)); });
@@ -60,7 +62,7 @@ export async function bootstrapFixture(t, script, { nativeHost = false, realExpe
     await runtime?.idle();
     writeFileSync(join(root, realExperiment?.resumeRoot ? 'evidence-e01-resume.json' : 'evidence.json'), JSON.stringify({ kind: realExperiment ? 'actual-v3-entrypoints-native-loop-real-provider-shared-finite-ledger' : 'actual-v3-entrypoints-native-loop-synthetic-loopback-provider', requests,
       jobs: runtime?.repo.list('tree_jobs'), invocations: runtime?.repo.list('tree_invocations'), diagnostics: runtime?.repo.meta().runtimeDiagnostics,
-      ledger: ctx.get('arcfoldDeepSeekTransport')?.summary() }, null, 2), realExperiment?.resumeRoot ? { flag: 'wx' } : undefined);
+      ledger: ctx.get('arcfoldDeepSeekTransport')?.summary(), nativeRecords: ctx.get('arcfoldNativeModelRecords')?.summary() }, null, 2), realExperiment?.resumeRoot ? { flag: 'wx' } : undefined);
     for (const handle of handles) await handle.dispose(); await ctx.fiber.dispose();
     if (server.listening) { server.closeAllConnections(); await new Promise(r => server.close(r)); }
   });
@@ -109,8 +111,20 @@ export async function bootstrapFixture(t, script, { nativeHost = false, realExpe
     }
   }
   if (desktop) { config.adapter = 'desktop-private-v1'; config.followConversationModel = true; }
+  const initialModel = nativeModels ? { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'off' } : config.models.main;
+  if (nativeModels) {
+    delete config.models; delete config.budget; delete config.tokenCounter;
+    Object.assign(config, { adapter: 'dsh-native-v1', followConversationModel: true,
+      accounting: { artifactDirectory: join(privateRoot, 'requests'), authorization: { authorizationRef: 'synthetic-native-no-spend' } } });
+    if (!nativeHost) await active(await ctx.plugin(TokenMeter));
+  }
   await active(await ctx.plugin(Business, { filename: join(root, 'legacy.sqlite'), goalTreeV3: config }));
-  await active(await ctx.plugin(desktop ? DesktopProvider : Provider, { apiKeyRef: realExperiment ? 'ARCFOLD_DEEPSEEK_API_KEY' : 'SYNTHETIC_KEY_REFERENCE', maxTokens: config.models.main.maxTokens, reasoningEffort: config.models.main.reasoningEffort }));
+  if (nativeModels) {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    await active(await ctx.plugin(NativeDeepSeek, { apiKeyEnv: 'SYNTHETIC_KEY_REFERENCE', baseURL: base + '/anthropic', maxTokens: 4096 }));
+    await active(await ctx.plugin(NativePiAi, { providers: { 'synthetic-other': { api: 'anthropic-messages', baseURL: base + '/other',
+      apiKeyEnv: 'SYNTHETIC_KEY_REFERENCE', models: [{ id: 'synthetic-other-model', name: 'Synthetic other model', contextWindow: 32000, maxTokens: 4096, reasoningEfforts: false }] } } }));
+  } else await active(await ctx.plugin(desktop ? DesktopProvider : Provider, { apiKeyRef: realExperiment ? 'ARCFOLD_DEEPSEEK_API_KEY' : 'SYNTHETIC_KEY_REFERENCE', maxTokens: config.models.main.maxTokens, reasoningEffort: config.models.main.reasoningEffort }));
   if (nativeHost) {
     for (const plugin of [Subprocess, Sandbox, TokenMeter]) await active(await ctx.plugin(plugin));
     for (const component of ['filesystem', 'shell', 'compaction', 'goal']) await active(await ctx.plugin(TreeHost, { component, ...(component === 'shell' ? { timeoutMs: 60000 } : {}) }));
@@ -129,7 +143,7 @@ export async function bootstrapFixture(t, script, { nativeHost = false, realExpe
     runtime.jobs.enqueue = spec => enqueue({ ...spec, trigger: { ...spec.trigger, repairEvidence: realExperiment.repairEvidence } });
   }
   async function main(id, setup = async () => {}, resume = false) {
-    const handle = await (resume ? ctx.agents.resume.bind(ctx.agents) : ctx.agents.create.bind(ctx.agents))({ ...(resume ? { resumeSessionId: id } : { sessionId: id }), meta: { cwd: workspace, agentPreset: 'arcfold-main' }, agentOptions: config.models.main,
+    const handle = await (resume ? ctx.agents.resume.bind(ctx.agents) : ctx.agents.create.bind(ctx.agents))({ ...(resume ? { resumeSessionId: id } : { sessionId: id }), meta: { cwd: workspace, agentPreset: 'arcfold-main' }, agentOptions: initialModel,
       setup: async (owner, agent) => { await ctx.agentPresets.mount(owner, 'arcfold-main'); await setup(owner, agent); } }); handles.push(handle); return handle.agent;
   }
   async function turn(agent, text) {

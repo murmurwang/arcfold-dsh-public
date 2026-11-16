@@ -12,13 +12,15 @@ const assert = (condition, message) => { if (!condition) throw new Error(message
 /** Project an already authorized Desktop installation into the native host.
  * This function is read-only. In particular it does not create a ledger,
  * adopt another installation's files, obtain credentials or authorize spending. */
-function projectDesktopConfiguration({ local, runtimeRoot, python, userId, models }, checkLedger) {
+function projectDesktopConfiguration({ local, runtimeRoot, python, userId, models }, checkLedger, checkInterpreter = true) {
   const config = validateRuntimeConfig(local);
   const data = canonicalRuntimePath(config.dataRoot), workspace = canonicalRuntimePath(config.workspace);
   const workers = canonicalRuntimePath(runtimeRoot, 'runtimeRoot');
-  const interpreter = realpathSync(canonicalRuntimePath(python, 'python'));
-  assert(lstatSync(interpreter).isFile(), 'Desktop token counter needs an executable interpreter');
-  accessSync(interpreter, constants.X_OK);
+  const interpreter = checkInterpreter ? realpathSync(canonicalRuntimePath(python, 'python')) : canonicalRuntimePath(python, 'python');
+  if (checkInterpreter) {
+    assert(lstatSync(interpreter).isFile(), 'Desktop token counter needs an executable interpreter');
+    accessSync(interpreter, constants.X_OK);
+  }
   const install = dirname(canonicalRuntimePath(config.installationFile));
   assert(lstatSync(workspace).isDirectory(), 'Desktop workspace must already exist');
   assert(disjoint(data, workspace) && disjoint(workers, data) && disjoint(workers, workspace) &&
@@ -61,6 +63,9 @@ function projectDesktopConfiguration({ local, runtimeRoot, python, userId, model
 }
 
 export function desktopConfiguration(options) { return projectDesktopConfiguration(options, true); }
+// Upgrade inspects the old configuration and ledger without executing or
+// requiring its retired tokenizer. This does not authorize any model call.
+export function desktopConfigurationForUpgrade(options) { return projectDesktopConfiguration(options, true, false); }
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 function writePrivateNew(path, value) {

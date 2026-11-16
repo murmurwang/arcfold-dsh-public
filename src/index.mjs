@@ -11,13 +11,20 @@ export const name = 'arcfold-business';
 export const inject = ['sessions', 'sessionPersistence', 'llm'];
 export async function apply(ctx, config = {}) {
   if (config.goalTreeV3?.enabled !== undefined && typeof config.goalTreeV3.enabled !== 'boolean') throw new Error('goalTreeV3.enabled must be an explicit boolean');
+  const desktopSetup = ctx.get('arcfoldDesktopSetup'), desktop = desktopSetup?.status();
+  if (desktop?.modelRouting === 'dsh-native-v1' && !desktopSetup.authorizes?.(config.goalTreeV3)) {
+    // A saved 0.4.x runtime must not start its old provider while Desktop is
+    // awaiting consent to native routing. Setup remains visible and no task runs.
+    ctx.provide('arcfoldTreeMode', Object.freeze({ enabled: false }));
+    return;
+  }
   ctx.provide('arcfoldTreeMode', Object.freeze({ enabled: config.goalTreeV3?.enabled === true }));
   if (config.goalTreeV3?.enabled === true) {
     const { installTreeRuntime } = await import('./tree/runtime.mjs');
     await installTreeRuntime(ctx, config.goalTreeV3, { legacyFilename: config.filename });
     return;
   }
-  const desktopState = ctx.get('arcfoldDesktopSetup')?.status().state;
+  const desktopState = desktop?.state;
   if (!config.filename && ['needs_setup', 'configured', 'activation_failed', 'interrupted', 'unavailable'].includes(desktopState)) {
     ctx.provide('arcfoldLegacyMode', Object.freeze({ enabled: true }));
     return;

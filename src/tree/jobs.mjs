@@ -13,10 +13,18 @@ const triggers = {
   improvement: ['repair_group'], script_writer: ['explicit_script_request', 'learned_script_request'],
 };
 export function freezeModelConfig(role, value) {
-  shape(value, ['provider', 'model', 'reasoningEffort', 'maxTokens', 'preset', 'cwd', 'modelVersion', 'priceVersion', 'budgetScope', 'stage']);
+  shape(value, ['provider', 'model', 'reasoningEffort', 'maxTokens', 'preset', 'cwd', 'modelVersion', 'priceVersion', 'budgetScope', 'stage'], ['contextWindow']);
   for (const key of ['provider', 'model', 'preset', 'cwd', 'modelVersion', 'priceVersion', 'budgetScope', 'stage']) text(value[key], key, 4096);
   if (!value.cwd.startsWith('/')) fail('CONFIG_PATH', 'Explicit absolute working directory required');
-  oneOf(value.reasoningEffort, ['off', 'low', 'high', 'max'], 'reasoning effort'); integer(value.maxTokens, 'maxTokens', 1, role === 'main' && value.budgetScope !== 'arcfold-tree-v3-150cny' ? Number.MAX_SAFE_INTEGER : ROLE_LIMITS[role]); return jsonClone(value);
+  if (value.budgetScope === 'dsh-native') {
+    if (value.reasoningEffort !== null) text(value.reasoningEffort, 'reasoning effort', 256);
+    if (value.maxTokens !== null) integer(value.maxTokens, 'maxTokens', 1, role === 'main' ? Number.MAX_SAFE_INTEGER : ROLE_LIMITS[role]);
+    if (value.contextWindow != null) integer(value.contextWindow, 'context window');
+  } else {
+    oneOf(value.reasoningEffort, ['off', 'low', 'high', 'max'], 'reasoning effort');
+    integer(value.maxTokens, 'maxTokens', 1, role === 'main' && value.budgetScope !== 'arcfold-tree-v3-150cny' ? Number.MAX_SAFE_INTEGER : ROLE_LIMITS[role]);
+  }
+  return jsonClone(value);
 }
 
 export class TreeJobs {

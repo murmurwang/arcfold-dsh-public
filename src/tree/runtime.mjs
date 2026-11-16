@@ -30,6 +30,8 @@ import { HookService, mountHookContext } from './hooks.mjs';
 import { TreeUIService, bindTurnSnapshot } from './ui.mjs';
 import { mountTreeTools, nativeTreeCall } from './tools.mjs';
 import { TreeTokenCounter } from './token-counter.mjs';
+import { bindNativeTurnSelection, captureNativeSelection, nativeModel, nativeModelConfig, NativeInputEstimate } from './native-models.mjs';
+import { NativeModelRecords } from './native-model-records.mjs';
 
 const program = { kind: 'program', id: 'tree-runtime' };
 const done = new Set(['committed', 'failed', 'invalid_output', 'stale', 'cancelled']);
@@ -84,11 +86,12 @@ class RuntimeContextBuilder extends ContextBuilder {
  * it never follows up a main Agent or invents another human turn. */
 export class TreeRuntime {
   constructor({ repository, host, createUserMessage, defineTool, modelConfig, ledgerLookup, resourcesFor, artifacts, createWriterOptions,
-    jobs, owner, inputTokenCount, tokenCounter, annotations, browserScope, snapshotsFor, followConversationModel = false }) {
+    jobs, owner, inputTokenCount, tokenCounter, annotations, browserScope, snapshotsFor, followConversationModel = false, nativeModels = false }) {
     Object.assign(this, { repo: repository, host, createUserMessage, defineTool, modelConfig, resourcesFor });
     this.logs = new Map(); this.mainAgents = new Map(); this.settlements = new Map(); this.workers = new Map(); this.closed = false;
     this.admissions = new AdmissionQueue(1); this.requestSlots = new AdmissionQueue(2); this.mainAdmissions = new Map(); this.shutdown = new AbortController();
     this.enabled = true;
+    this.nativeModels = nativeModels;
     this.sources = new NativeSources({ readSession: id => ({ sessionId: id, durable: this.logs.has(id), events: this.logs.get(id) }) });
     this.resolveSource = evidenceResolver(repository, ref => this.sources.resolve(ref));
     const options = { repository, resolveSource: this.resolveSource, sources: this.sources, context: () => ({ actor: program }) };
@@ -97,7 +100,10 @@ export class TreeRuntime {
     this.jobs.assertSources = rows => rows.every(s => Boolean(this.resolveSource(s.ref)));
     this.owner = owner ?? new TreeModelOwner({ jobs: this.jobs, host, createUserMessage, ledgerLookup, inputTokenCount });
     this.tokenCounter = tokenCounter;
-    if (tokenCounter) { this.owner.prepareInput = options => tokenCounter.prepare(options); this.owner.inputTokenCount = options => tokenCounter.count(options); }
+    if (tokenCounter) {
+      this.owner.prepareInput = options => tokenCounter.prepare(options);
+      if (tokenCounter.count) this.owner.inputTokenCount = options => tokenCounter.count(options);
+    }
     this.owner.verifyMainInput = (job, request) => this.verifyMainInput(job, request);
     this.owner.applyResult = (result, context) => this.applyResult(result, context);
     this.owner.beforeSubmit = (job, agent) => this.beforeSubmit(job, agent);
@@ -237,6 +243,8 @@ export class TreeRuntime {
   async prepareAdmitted(payload, decision) {
     const { agent, turn: nativeTurn, signal } = payload, sessionId = agent.session.id;
     signal.throwIfAborted(); await this.freezeSession(agent.session);
+    if (this.nativeModels) payload = { ...payload, modelSelection: this.mainJob(sessionId, nativeTurn)?.modelConfig
+      ?? await captureNativeSelection(this.host, agent, payload.modelSelection, signal) };
     let turn = this.attribution.existing(sessionId, nativeTurn), fresh = !turn;
     if (fresh) {
       if (!decision.messages.some(m => m.source?.kind === 'user')) { this.releaseMain(sessionId); return { kind: 'reject' }; }
@@ -351,6 +359,7 @@ export class TreeRuntime {
   }
   mountMain(ctx, agent) {
     const sessionId = agent.session.id; this.mainAgents.set(sessionId, agent);
+    if (this.nativeModels) ctx.effect(() => bindNativeTurnSelection(agent), 'keep the originating model until the native turn ends');
     this.owner.attachMain(ctx);
     mountHookContext(ctx, { service: this.hooks(sessionId), sessionId, createUserMessage: this.createUserMessage });
     mountTreeContext(ctx, { builder: this.builder, sessionId, createUserMessage: this.createUserMessage });
@@ -366,7 +375,8 @@ export class TreeRuntime {
         runtime.builder.expose(sessionId, invocation.id, invocation.stepStartSeq, runtime.builder.capture(sessionId));
         try {
           for await (const chunk of next()) {
-            if (runtime.owner.ledgerLookup(invocation.ledgerRequestId)?.dispatchedAt) runtime.releaseMain(sessionId, true);
+            const receipt = runtime.owner.ledgerLookup(invocation.ledgerRequestId);
+            if (receipt?.dispatchedAt || runtime.nativeModels && receipt?.startedAt) runtime.releaseMain(sessionId, true);
             yield chunk;
           }
         } finally { runtime.releaseMain(sessionId); }
@@ -504,10 +514,11 @@ export class TreeRuntime {
       tools: [], toolHistory: { tools: [], updates: [] }, signal: this.shutdown.signal };
     const reading = await this.tokenCounter.prepare(options), fullRequest = this.tokenCounter.request(options);
     const model = await this.host.llm.resolveModelInfo(job.modelConfig.provider, job.modelConfig.model, this.shutdown.signal);
-    const pressure = this.consolidation.pressure({ fullRequest, measure: () => reading, contextWindow: model.context?.contextWindow, maxOutputTokens: job.modelConfig.maxTokens });
+    const pressure = this.consolidation.pressure({ fullRequest, measure: () => reading, contextWindow: model.context?.contextWindow,
+      maxOutputTokens: job.modelConfig.maxTokens, estimated: this.nativeModels });
     if (pressure.needsSummary) {
       this.diagnostic('learning_pressure', { code: 'LEARNING_PRESSURE', message: 'Learning append stopped before submission' }, { jobId: job.id, measurement: pressure });
-      fail('LEARNING_PRESSURE', `Exact input ${pressure.tokens} exceeds ${pressure.limit}; original input retained and no request submitted`);
+      fail('LEARNING_PRESSURE', `${reading.kind} input ${pressure.tokens} exceeds ${pressure.limit}; original input retained and no request submitted`);
     }
   }
   handlePressure(job) {
@@ -516,7 +527,7 @@ export class TreeRuntime {
     if (session?.contextEpoch !== job.contextEpoch) return true;
     this.repo.command('handleLearningPressure', { requestId: digest(['learning-pressure', job.id]), expected: {}, input: { jobId: job.id, contextEpoch: job.contextEpoch } }, program, () => {
       const plan = this.consolidation.plan(nodeId, 'threshold');
-      this.jobs.pauseLearning(nodeId, '精确输入计数达到上限，等待整理；原文保留。');
+      this.jobs.pauseLearning(nodeId, this.nativeModels ? '预计输入长度接近上限，等待整理；原文保留。' : '精确输入计数达到上限，等待整理；原文保留。');
       if (plan && plan.sourceWatermark !== session.sourceWatermark) return { summaryJobId: this.enqueueSummary(plan).id };
       this.diagnostic('learning_capacity', { code: 'LEARNING_CAPACITY', message: 'No older material can be summarized while retaining the last three learning turns' }, { jobId: job.id, nodeId });
       return { capacityBlocked: true };
@@ -536,7 +547,8 @@ export class TreeRuntime {
     const previous = messages.filter(m => m.source?.kind === 'compact-checkpoint');
     const scope = this.builder.scope(agent.session.id), nodeIds = scope?.nodeIds ?? [this.repo.rootId()];
     const key = digest(['native-compaction', agent.session.id, start.data.compactionId]), existing = this.repo.get('tree_jobs', digest(['model_job', 'consolidation', key]));
-    const job = existing ?? this.jobs.enqueue({ role: 'consolidation', key, nodeIds, revisionSet: {}, config: this.backgroundModelConfig('consolidation', { agent }),
+    const selection = this.nativeModels ? await captureNativeSelection(this.host, agent, agent.model.current(), signal) : undefined;
+    const job = existing ?? this.jobs.enqueue({ role: 'consolidation', key, nodeIds, revisionSet: {}, config: this.backgroundModelConfig('consolidation', { agent, selection }),
       trigger: { kind: 'threshold', reason: 'threshold', nativeCompaction: true },
       input: { scope: { nodeIds, ancestorPaths: nodeIds.map(id => this.repo.ancestors(id).map(n => n.id)), treeRevision: this.repo.meta().treeRevision }, sources, knownItems: [], changeReceipts: [],
         allowedIds: { nodeIds, subjectIds: [], fileIds: [] }, nativeCompaction: { sessionId: agent.session.id, inputHash: digest(input), previous,
@@ -633,12 +645,20 @@ export async function installTreeRuntime(ctx, config, { legacyFilename } = {}) {
   const treeFilename = path(config.treeFilename, 'treeFilename'), workspace = path(config.workspace, 'workspace');
   if (!beneath(treeFilename, privateRoot) || treeFilename === privateRoot || beneath(runtimeRoot, privateRoot) || beneath(privateRoot, runtimeRoot)) fail('TREE_CONFIG', 'Tree database is private; execution files require a separate root');
   for (const directory of [privateRoot, runtimeRoot]) mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const budget = config.budget ?? {}, ledgerPath = path(budget.ledgerPath, 'budget.ledgerPath'), evidence = path(budget.artifactDirectory, 'budget.artifactDirectory');
+  const nativeModels = config.adapter === 'dsh-native-v1';
+  const budget = config.budget ?? {}, ledgerPath = nativeModels ? null : path(budget.ledgerPath, 'budget.ledgerPath');
+  const evidence = path(nativeModels ? config.accounting?.artifactDirectory : budget.artifactDirectory, 'request evidence');
   const webOnly = budget.mode === 'web-only';
-  if (budget.mode !== undefined && !webOnly || webOnly && (budget.manifest || budget.scope !== 'web-unlimited' || Object.hasOwn(budget, 'authorizationRef') || Object.hasOwn(budget, 'ceilingCny'))) fail('TREE_CONFIG', 'Web-only accounting must retain its explicit website authority without a test allowance');
-  if (!beneath(ledgerPath, privateRoot) || !beneath(evidence, privateRoot) || ledgerPath === treeFilename || (webOnly ? !budget.webAuthorization : !budget.authorizationRef)) fail('TREE_CONFIG', 'Explicit private ledger/evidence paths and authorization required');
+  if (nativeModels) {
+    if (config.budget || config.models || config.tokenCounter || config.followConversationModel !== true || !config.accounting?.authorization?.authorizationRef)
+      fail('TREE_CONFIG', 'Native model routing requires its own explicit consent and the originating conversation choice');
+  } else {
+    if (budget.mode !== undefined && !webOnly || webOnly && (budget.manifest || budget.scope !== 'web-unlimited' || Object.hasOwn(budget, 'authorizationRef') || Object.hasOwn(budget, 'ceilingCny'))) fail('TREE_CONFIG', 'Web-only accounting must retain its explicit website authority without a test allowance');
+    if (!beneath(ledgerPath, privateRoot) || ledgerPath === treeFilename || (webOnly ? !budget.webAuthorization : !budget.authorizationRef)) fail('TREE_CONFIG', 'Explicit private ledger paths and authorization required');
+  }
+  if (!beneath(evidence, privateRoot) || evidence === privateRoot) fail('TREE_CONFIG', 'Private request evidence path required');
   const lease = await ownEvidenceDirectory(evidence);
-  let repo, ledger, transport, runtime, unregister, closing;
+  let repo, ledger, transport, nativeRecords, runtime, unregister, closing;
   const close = () => closing ??= (async () => {
     try { await runtime?.close(); await transport?.close(); }
     finally { try { unregister?.(); ledger?.close(); repo?.close(); } finally { await lease.close(); } }
@@ -647,11 +667,11 @@ export async function installTreeRuntime(ctx, config, { legacyFilename } = {}) {
   try {
     repo = new TreeRepository({ treeFilename, userId: config.userId, legacyFilename });
     const experiment = budget.manifest?.budgetScope === TREE_TEST_SCOPE;
-    ledger = experiment ? new TreeTestLedger({ filename: ledgerPath, manifest: budget.manifest, authorizationRef: budget.authorizationRef, create: budget.create === true })
+    ledger = nativeModels ? null : experiment ? new TreeTestLedger({ filename: ledgerPath, manifest: budget.manifest, authorizationRef: budget.authorizationRef, create: budget.create === true })
       : webOnly ? openOwnedWebBudget({ artifactDirectory: evidence, ledgerPath, webAuthorization: budget.webAuthorization, owner: lease }).ledger
       : new BudgetLedger(ledgerPath, { ceilingCny: budget.ceilingCny, authorizationRef: budget.authorizationRef, scope: budget.scope, webAuthorization: budget.webAuthorization, create: false });
     const modelPolicies = experiment ? { [ledger.manifest.model]: ledger.modelPolicy() } : budget.modelPolicies;
-    if (!modelPolicies || !Object.keys(modelPolicies).length) fail('TREE_CONFIG', 'Frozen model policies are required');
+    if (!nativeModels && (!modelPolicies || !Object.keys(modelPolicies).length)) fail('TREE_CONFIG', 'Frozen model policies are required');
     const protectedRoots = [privateRoot, ...(config.protectedRoots ?? []).map(p => path(p, 'protectedRoots'))];
     if (legacyFilename) protectedRoots.push(canonicalPath(legacyFilename));
     const resources = new Map(), brokers = new Set();
@@ -692,6 +712,7 @@ export async function installTreeRuntime(ctx, config, { legacyFilename } = {}) {
       } }) };
     };
     const modelConfig = (role, agent, selection) => {
+      if (nativeModels) return nativeModelConfig(role, selection, agent ? host.workingDirectory.get(agent.session) : workspace, config.stage ?? 'desktop');
       const selected = config.models?.[role]; if (!selected) fail('TREE_CONFIG', `Explicit ${role} model configuration required`);
       const route = role === 'main' ? { ...selected, ...(selection ?? agent?.model?.current?.() ?? agent?.model), maxTokens: agent?.options.maxTokens ?? selected.maxTokens }
         : config.followConversationModel === true ? { ...selected, provider: selection?.provider ?? config.models.main.provider, model: selection?.model ?? config.models.main.model } : selected;
@@ -707,13 +728,14 @@ export async function installTreeRuntime(ctx, config, { legacyFilename } = {}) {
         modelVersion: versions[0], priceVersion: experiment ? ledger.manifestHash : policy.priceVersion,
         budgetScope: experiment ? TREE_TEST_SCOPE : budget.scope, stage: selected.stage ?? config.stage ?? 'runtime' };
     };
-    for (const role of ['attribution', 'learning', 'consolidation', 'verification', 'improvement', 'script_writer']) modelConfig(role);
-    if (!config.tokenCounter) fail('TREE_CONFIG', 'The new tree requires an explicit verified offline token counter');
-    if (config.adapter !== undefined && config.adapter !== 'desktop-private-v1') fail('TREE_CONFIG', 'Unknown provider adapter');
+    if (!nativeModels) for (const role of ['attribution', 'learning', 'consolidation', 'verification', 'improvement', 'script_writer']) modelConfig(role);
+    if (!nativeModels && !config.tokenCounter) fail('TREE_CONFIG', 'The new tree requires an explicit verified offline token counter');
+    if (config.adapter !== undefined && !['desktop-private-v1', 'dsh-native-v1'].includes(config.adapter)) fail('TREE_CONFIG', 'Unknown provider adapter');
     const adapter = config.adapter === 'desktop-private-v1'
       ? await (await import('../desktop/adapter.mjs')).loadDesktopDeepSeekAdapter() : undefined;
-    const tokenCounter = new TreeTokenCounter({ python: config.tokenCounter.python, moduleDirectory: join(privateRoot, 'tokenizer-dependency'), adapter });
-    runtime = new TreeRuntime({ repository: repo, host, createUserMessage, defineTool, modelConfig, followConversationModel: config.followConversationModel === true, ledgerLookup: id => ledger.get(id), artifacts, resourcesFor: resourceFor, tokenCounter,
+    const tokenCounter = nativeModels ? new NativeInputEstimate(host) : new TreeTokenCounter({ python: config.tokenCounter.python, moduleDirectory: join(privateRoot, 'tokenizer-dependency'), adapter });
+    runtime = new TreeRuntime({ repository: repo, host, createUserMessage, defineTool, modelConfig, nativeModels,
+      followConversationModel: config.followConversationModel === true, ledgerLookup: id => nativeModels ? nativeRecords?.get(id) : ledger.get(id), artifacts, resourcesFor: resourceFor, tokenCounter,
       createWriterOptions: job => ({ workspaceIO: resourceFor(job.modelConfig.cwd).io, runtimeRoot, protectedRoots }),
       browserScope: context => ctx.sessions.get(context.sessionId) ? { nodeIds: repo.list('tree_nodes', n => !n.deleted).map(n => n.id) } : null });
     runtime.hostPolicy = supplied => {
@@ -726,7 +748,18 @@ export async function installTreeRuntime(ctx, config, { legacyFilename } = {}) {
     // resolver. It grants no old work/learning ownership and starts no writers.
     const business = Object.freeze({ get: () => null, listAll: () => [] });
     unregister = registerTreeRequestAuthority(business, runtime.owner);
-    transport = new DeepSeekTransport({ ledger, artifactDirectory: evidence, provider: 'deepseek-official', modelPolicies,
+    if (nativeModels) {
+      nativeRecords = new NativeModelRecords(repo, runtime.owner);
+      nativeRecords.recover();
+      // An upgrade cannot replay work admitted under a different billing route.
+      // Historical data and receipts stay in their original stores.
+      for (const job of repo.list('tree_jobs', j => !nativeModel(j.modelConfig) && ['queued', 'prepared'].includes(j.status)))
+        runtime.jobs.transition(job.id, 'cancelled', { error: { code: 'MODEL_ROUTE_UPGRADED', message: '模型通道已更新；保留旧任务原文，不自动重发。' } });
+      ctx.on('llm/stream', (options, next) => runtime.owner.owns(options.sessionId)
+        ? runtime.owner.guardStream(options, () => nativeRecords.stream(options, next)) : next(), { prepend: true });
+      ctx.provide('arcfoldNativeModelRecords', Object.freeze({ summary: () => nativeRecords.summary() }));
+    } else {
+      transport = new DeepSeekTransport({ ledger, artifactDirectory: evidence, provider: 'deepseek-official', modelPolicies,
       endpoint: budget.endpoint, allowLocalTestEndpoint: budget.allowLocalTestEndpoint === true, timeoutMs: budget.timeoutMs,
       requestIdentity: options => runtime.owner.identity(options), beforeDispatch: options => runtime.owner.assertRequest(options) });
     await transport.recover({ exclusive: true });
@@ -734,12 +767,13 @@ export async function installTreeRuntime(ctx, config, { legacyFilename } = {}) {
       if (!runtime.owner.owns(options.sessionId)) fail('MODEL_OWNER', 'New-tree profile refuses every unowned request');
       transport.validateInput(options); return runtime.owner.guardStream(options, next);
     }, { prepend: true });
+      ctx.provide('arcfoldDeepSeekTransport', Object.freeze({ summary: () => ledger.summary(), createTransport: options => transport.createTransport(options),
+        configuration: Object.freeze({ provider: 'deepseek-official', endpoint: transport.endpoint, modelPolicies: transport.modelPolicies }) }));
+    }
     ctx.on('session/event', (session, event) => runtime.observe(session, event));
     ctx.provide('arcfoldBusiness', business);
     ctx.provide('arcfoldTreeRuntime', runtime);
     ctx.provide('arcfoldTreeV3', runtime.ui);
-    ctx.provide('arcfoldDeepSeekTransport', Object.freeze({ summary: () => ledger.summary(), createTransport: options => transport.createTransport(options),
-      configuration: Object.freeze({ provider: 'deepseek-official', endpoint: transport.endpoint, modelPolicies: transport.modelPolicies }) }));
     await runtime.recover(); runtime.start(); return runtime;
   } catch (error) { await close(); throw error; }
 }

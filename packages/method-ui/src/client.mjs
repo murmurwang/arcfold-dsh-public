@@ -22,14 +22,14 @@ const NS = 'arcfold-methods';
 export async function apply(ctx) {
   let desktop;
   try { desktop = await ctx.connection.rpc.call('/api', 'arcfoldDesktop/status', { args: { request: {} } }); } catch {}
-  if (desktop?.ok === true && ['needs_setup', 'configured', 'activation_failed', 'interrupted', 'unavailable', 'ready'].includes(desktop.value?.state)) {
+  if (desktop?.ok === true && ['needs_setup', 'needs_upgrade', 'configured', 'activation_failed', 'interrupted', 'unavailable', 'ready'].includes(desktop.value?.state)) {
     ctx.effect(() => { const style = document.createElement('style'); style.dataset.plugin = 'arcfold-desktop-setup';
       style.textContent = '.arcfold-desktop-setup{max-width:42rem;margin:1rem auto;padding:1.5rem;line-height:1.6}.arcfold-desktop-setup code{overflow-wrap:anywhere}.arcfold-desktop-setup button{margin-top:1rem;padding:.5rem .9rem}.arcfold-desktop-setup label{display:block}';
       document.head.append(style); return () => style.remove(); }, 'Arcfold Desktop setup style');
-    ctx.slots.inject('settings.models.footer', () => ctx.slots.register({ name: 'settings.models.footer', id: 'arcfold-deepseek-credential',
+    if (desktop.value.modelRouting !== 'dsh-native-v1') ctx.slots.inject('settings.models.footer', () => ctx.slots.register({ name: 'settings.models.footer', id: 'arcfold-deepseek-credential',
       order: 11, inject: () => ({ rpc: ctx.connection.rpc }) }, DesktopModels));
   }
-  if (desktop?.ok === true && ['needs_setup', 'configured', 'activation_failed', 'interrupted', 'unavailable'].includes(desktop.value?.state)) {
+  if (desktop?.ok === true && ['needs_setup', 'needs_upgrade', 'configured', 'activation_failed', 'interrupted', 'unavailable'].includes(desktop.value?.state)) {
     const props = { initial: desktop.value, rpc: ctx.connection.rpc,
       openWorkspace: path => openDesktopWorkspace(ctx.get('workspaces'), ctx.get('uiWorkspace'), path) };
     for (const name of ['settings.section', 'conversation.hero.options'])

@@ -166,7 +166,7 @@ test('Desktop credential setting sends the secret only to the native credential 
   assert.equal(calls.some(row => row.method.startsWith('arcfold')), false);
 });
 
-test('Desktop contributes the shared credential control to the existing DSH Models page', async t => {
+for (const native of [false, true]) test(native ? 'native Desktop leaves the model page and picker entirely to DSH' : 'legacy Desktop contributes the shared credential control to the existing DSH Models page', async t => {
   const dom = new JSDOM('<!doctype html><html><body></body></html>');
   const prior = Object.getOwnPropertyDescriptor(globalThis, 'document');
   Object.defineProperty(globalThis, 'document', { value: dom.window.document, configurable: true });
@@ -178,13 +178,14 @@ test('Desktop contributes the shared credential control to the existing DSH Mode
   }
   new Slots(ctx);
   ctx.provide('connection', { rpc: { async call(_channel, method) {
-    if (method === 'arcfoldDesktop/status') return { ok: true, value: { state: 'ready' } };
+    if (method === 'arcfoldDesktop/status') return { ok: true, value: { state: 'ready', ...(native ? { modelRouting: 'dsh-native-v1' } : {}) } };
     if (method === 'arcfoldMode/current') return { ok: true, value: { goalTreeV3: true } };
     throw new Error('Unexpected read while mounting');
   } } });
   ctx.provide('locale', {}); ctx.provide('fileUpload', {});
   t.after(async () => { await ctx.fiber.dispose(); dom.window.close(); prior ? Object.defineProperty(globalThis, 'document', prior) : delete globalThis.document; });
   await ctx.plugin(Client).await();
-  assert.ok(entries.some(row => row.options.name === 'settings.models.footer' && row.options.id === 'arcfold-deepseek-credential'));
+  assert.equal(entries.some(row => row.options.name === 'settings.models.footer' && row.options.id === 'arcfold-deepseek-credential'), !native);
   assert.ok(!entries.some(row => row.options.name === 'settings.section' && row.options.id === 'arcfold-desktop-models'));
+  if (native) assert.ok(!entries.some(row => /model/.test(row.options.name) || /model/.test(row.options.id)));
 });
