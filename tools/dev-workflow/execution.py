@@ -27,6 +27,7 @@ from task_access import resolve as resolve_task
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,63}")
 RECIPES = {"workflow-checks", "desktop-checks"}
 ACTIVE = {"running", "unknown"}
+DEPENDENCY_OBSERVATIONS = {}
 
 
 def root(flow):
@@ -147,6 +148,47 @@ def directory_identity(directory):
     return digest(entries)
 
 
+def dependency_stamp(directory):
+    """Detect file replacement/content changes without rereading unchanged bytes."""
+    directory = Path(directory).resolve(strict=True)
+    entries = []
+    for parent, dirs, files in os.walk(directory, followlinks=False):
+        for name in sorted([*dirs, *files]):
+            path = Path(parent) / name
+            info = path.lstat()
+            link = None
+            if path.is_symlink():
+                require(path.resolve().is_relative_to(directory), "依赖链接须指向同一冻结目录内的内容。")
+                link = os.readlink(path)
+            entries.append([str(path.relative_to(directory)), info.st_dev, info.st_ino, info.st_mode,
+                            info.st_size, info.st_mtime_ns, info.st_ctime_ns, link])
+    return digest(sorted(entries))
+
+
+def dependency_content(flow, directory):
+    directory = Path(directory).resolve(strict=True)
+    key = digest(str(directory))
+    stamp = dependency_stamp(directory)
+    path = root(flow) / "dependency-checks" / (key + ".json")
+    previous = read(path) if path.is_file() else DEPENDENCY_OBSERVATIONS.get(key, {})
+    if previous.get("directory") == str(directory) and previous.get("stamp") == stamp:
+        return previous["sha256"]
+    content = directory_identity(directory)
+    require(dependency_stamp(directory) == stamp, "依赖内容核对期间发生变化，请先固定该安装。")
+    DEPENDENCY_OBSERVATIONS[key] = {"directory": str(directory), "stamp": stamp, "sha256": content}
+    return content
+
+
+def remember_dependencies(flow, inputs):
+    """Only a successful claim writes the cache; queries never create records."""
+    if not inputs.get("dependencies"):
+        return
+    key = digest(str((Path(inputs["dependencies"]) / "node_modules").resolve()))
+    observation = DEPENDENCY_OBSERVATIONS.get(key)
+    if observation and observation["sha256"] == inputs.get("dependency_tree"):
+        write(root(flow) / "dependency-checks" / (key + ".json"), observation)
+
+
 def source_inputs(flow, task, step):
     """Resolve actual command inputs; mutable working files are never test inputs."""
     inputs = dict(step["inputs"])
@@ -170,7 +212,7 @@ def source_inputs(flow, task, step):
             archive = Path(inputs.get("python_archive", "")).expanduser().resolve(strict=True)
             require(archive.is_file(), "Desktop 检查须提供已校验的随包 Python 归档。")
             inputs.update(dependencies=str(dependencies), dependency_lock=digest(lock),
-                          dependency_tree=directory_identity(dependencies / "node_modules"),
+                          dependency_tree=dependency_content(flow, dependencies / "node_modules"),
                           node=command(["node", "--version"]).decode().strip(),
                           python_archive=str(archive), python_archive_sha256=digest(archive.read_bytes()))
     return inputs
@@ -272,6 +314,7 @@ def claim(flow, key, step_id):
                "registered_ns": row["registered_ns"],
                "owner": {"pid": os.getpid(), "agent": os.getenv("CODEX_THREAD_ID") or os.getenv("ARCFOLD_AGENT_ID", "local")}}
         record["runs"][token] = run
+    remember_dependencies(flow, run["inputs"])
     return {"acquired": True, "run": run}
 
 

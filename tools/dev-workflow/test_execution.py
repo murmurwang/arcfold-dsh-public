@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -167,6 +168,24 @@ class ExecutionTests(unittest.TestCase):
         final = execution.finish(self.flow, run["id"], "pass", [str(self.proof)])
         self.assertEqual(final["resolutions"][0]["status"], "unknown")
         self.assertEqual(final["resolutions"][0]["evidence"], unknown["evidence"])
+
+    def test_dependency_cache_is_readonly_until_claim_and_same_mtime_does_not_hide_changes(self):
+        installation = self.root / "frozen"
+        modules = installation / "node_modules"
+        modules.mkdir(parents=True)
+        file = modules / "fixture.mjs"
+        file.write_text("old bytes")
+        prior = file.stat()
+        identity = execution.dependency_content(self.flow, modules)
+        self.assertFalse(execution.root(self.flow).exists())
+        execution.remember_dependencies(self.flow, {"dependencies": str(installation), "dependency_tree": identity})
+        with patch.object(execution, "directory_identity", wraps=execution.directory_identity) as rehash:
+            self.assertEqual(execution.dependency_content(self.flow, modules), identity)
+            rehash.assert_not_called()
+            file.write_text("new bytes")
+            os.utime(file, ns=(prior.st_atime_ns, prior.st_mtime_ns))
+            self.assertNotEqual(execution.dependency_content(self.flow, modules), identity)
+            rehash.assert_called_once()
 
     def test_actual_runner_freezes_source_runs_two_checks_and_keeps_logs(self):
         for key in ("task-one", "task-two"):
