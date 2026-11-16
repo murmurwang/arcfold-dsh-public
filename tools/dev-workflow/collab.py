@@ -413,9 +413,11 @@ def unknown_fields(value, path=""):
 
 def pending_writes(state):
     """Records of external writes whose outcome was never confirmed."""
+    from release_candidates import settled_journals
     found = []
     if not state.is_dir():
         return found
+    settled = settled_journals(state)
     for root, dirs, files in os.walk(state):
         dirs[:] = sorted(name for name in dirs if name not in SKIP_DIRS)
         here = Path(root)
@@ -425,6 +427,8 @@ def pending_writes(state):
             path = here / name
             try:
                 data = read(path)
+                if (path, digest(path.read_bytes())) in settled:
+                    continue
             except (OSError, ValueError):
                 continue
             if not isinstance(data, dict):

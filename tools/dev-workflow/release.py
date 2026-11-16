@@ -159,7 +159,7 @@ def ensure_github_release(flow, directory, receipt, artifact_directory=None):
     from release_candidates import folder, reconciled_journals
     if phase.exists():
         relative = str(phase.relative_to(folder(flow, receipt["version"])))
-        if reconciled_journals(flow, receipt["version"]).get(relative) == digest(phase.read_bytes()):
+        if (relative, digest(phase.read_bytes())) in reconciled_journals(flow, receipt["version"]):
             pending = {}
     publication = read(directory / "publication.json")
     def journal(value):
@@ -257,8 +257,8 @@ def release(flow, version, local_only, finalize, isolated, candidate=None, appro
             candidates.check_remote_packages(remote, receipt)
             publication = candidates.optional(directory / "publication.json")
             publication_path = directory / "publication.json"
-            if publication and candidates.reconciled_journals(flow, version).get(
-                    str(publication_path.relative_to(candidates.folder(flow, version)))) == digest(publication_path.read_bytes()):
+            if publication and (str(publication_path.relative_to(candidates.folder(flow, version))),
+                    digest(publication_path.read_bytes())) in candidates.reconciled_journals(flow, version):
                 publication = {}
             if not publication:
                 handoff = candidates.legacy_handoff(flow, directory, row, remote)

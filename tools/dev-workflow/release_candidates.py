@@ -62,7 +62,13 @@ def publication_directory(flow, row):
 
 def publication_record(flow, row, name):
     directory = folder(flow, row["version"]) / "candidates" / row["id"]
-    return optional(directory / name) or (optional(artifacts(flow, row) / name) if row["legacy"] else {})
+    for path in (directory / name, artifacts(flow, row) / name):
+        if path.is_file():
+            relative = str(path.relative_to(folder(flow, row["version"])))
+            if (relative, digest(path.read_bytes())) in reconciled_journals(flow, row["version"]):
+                return {}
+            return read(path)
+    return {}
 
 
 def built_receipt(flow, row):
@@ -204,8 +210,20 @@ def journal_records(flow, version):
 
 
 def reconciled_journals(flow, version):
-    return {r["file"]: r["sha256"] for p in (folder(flow, version) / "reconciliations").glob("*.json")
+    return {(r["file"], r["sha256"]) for p in (folder(flow, version) / "reconciliations").glob("*.json")
             for r in read(p)["journals"]}
+
+
+def settled_journals(state):
+    """Read-only exceptions for next; archived bytes remain available as evidence."""
+    result = set()
+    for root in (state / "releases").glob("*"):
+        for path in (root / "reconciliations").glob("*.json"):
+            result.update((root / row["file"], row["sha256"]) for row in read(path)["journals"])
+        for path in (root / "candidates").glob("*/legacy-publication.json"):
+            if optional(path.parent / "publication.json").get("phase") == "github_published":
+                result.update((root / row["file"], row["sha256"]) for row in read(path)["journals"])
+    return result
 
 
 def frozen_reasons(flow, version):
@@ -215,7 +233,7 @@ def frozen_reasons(flow, version):
         reasons.append("已观察到对外版本记录，删除远端记录也不会恢复修补")
     reconciled = reconciled_journals(flow, version)
     for row in journal_records(flow, version):
-        if reconciled.get(row["file"]) != row["sha256"]:
+        if (row["file"], row["sha256"]) not in reconciled:
             reasons.append("已开始或记录过对外写入：" + row["file"])
     return reasons
 

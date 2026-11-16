@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from common import WorkflowError, digest, locked, read, write
-from collab import answer, create_ask, progress
+from collab import answer, create_ask, pending_writes, progress
 from release import REHEARSAL_CHECKS, release, verify_isolated
 import release_candidates as candidates
 from workflow import Workflow, decision_note, release_notes
@@ -257,10 +257,13 @@ class CandidateTests(unittest.TestCase):
             candidates.reconcile(self.flow, VERSION, {**document, "journals": {}})
         candidates.reconcile(self.flow, VERSION, document)
         self.assertFalse(candidates.frozen_reasons(self.flow, VERSION))
+        self.assertEqual(pending_writes(self.flow.state), [])
+        self.assertEqual(candidates.publication_record(self.flow, row, "github.json"), {})
         with self.assertRaisesRegex(WorkflowError, "unknown tag"):
             release(self.flow, VERSION, False, True, None, row["id"], ask)
         # The old no-write conclusion must not exempt a later identical operation.
         self.assertTrue(candidates.frozen_reasons(self.flow, VERSION))
+        self.assertTrue(pending_writes(self.flow.state))
 
     def test_observed_tag_remains_frozen_when_later_registry_query_fails_then_tag_is_deleted(self):
         row = self.candidate()
