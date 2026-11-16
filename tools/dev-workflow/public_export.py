@@ -14,7 +14,9 @@ from workflow import scan
 
 WHEEL = "src/tree/tokenizer-resources/deepseek_recipe-0.2.0-cp310-abi3-macosx_11_0_arm64.whl"
 WHEEL_SHA = "624bb4d0fb3ed541b9e34d2ef96ff66057026ded7d6708b0b9088cc6d6723999"
-PERSONAL_EMAIL = re.compile(rb"@[a-zA-Z0-9.-]+\.(?:gmail|outlook)\.com", re.IGNORECASE)
+PERSONAL_EMAIL = re.compile(
+    rb"\b[A-Za-z0-9._%+-]+@(?:gmail|outlook)\.com\b(?!\.[A-Za-z0-9])", re.IGNORECASE,
+)
 
 
 def inspect_export(path, sha, output, owner=None):

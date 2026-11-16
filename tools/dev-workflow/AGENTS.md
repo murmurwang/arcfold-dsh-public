@@ -6,7 +6,9 @@
 4. `merge --pr N` 复核代码、检查和独立审阅，使用 GitHub squash 合入，再核验 main 的文件树和基线。新任务基于合入后的 main。
 5. `release --version X` 从已合入源码两次构建并核对同批包，保存 npm dry-run 和许可，建立 Git 标签与 GitHub 发行草稿。隔离账户验证安装、发消息、更新、失败恢复和重启读回后，用 `--finalize --isolated-receipt FILE` 完成 GitHub 发行。首次公开仓库和真实 npm 发布按用户明确授权执行。
 6. `export --output DIR` 生成当前 main 的无历史导出及逐文件检查清单。为用户核对可能的个人资料、凭据、真实数据和许可，再请用户批准创建公开仓库。公开后 main 要求最近的自动检查成功并与 main 同步。
-7. Murphy 更新并提供观察后，用 `close-loop ID --version X --observation-file FILE` 核对 npm 上的两份包并关联观察。验收只描述实际发生的情况。
+7. 用户更新并提供观察后，用 `close-loop ID --version X --observation-file FILE` 核对 npm 上的两份包并关联观察。验收只描述实际发生的情况。
+
+npm 正式发布还需核对安装包之外的公开发布信息，见 [发布隐私核对](npm-publication-privacy.md)。
 
 `--repo OWNER/REPOSITORY` 或 `ARCFOLD_REPOSITORY` 指定仓库。`ARCFOLD_AGENT_ID` 可声明其他 Agent 的贡献标识，入口也支持当前 Codex 会话或操作系统账号。代码和回执流程适用于走该入口的协作者。分支权限由所连接的 GitHub 仓库配置。
 

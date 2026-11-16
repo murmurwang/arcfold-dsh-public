@@ -110,7 +110,7 @@ try {
   await assert.rejects(spawnConfined({ argv: [process.execPath, '-e', 'throw Error("must not run")'], enforcement: 'partial' }, { cwd: workspace, runDirectory: run }), { code: 'SANDBOX_UNAVAILABLE' });
   const report = { checkedAt: new Date().toISOString(), root, platform: process.platform, cases, receipts,
     gateChecks: { scopeRaceBodyZero: true, withdrawRaceBodyZero: true, hashMismatchBodyZero: true, partialBodyZero: true, missingRunnerBodyZero: true },
-    gates: { G2: 'component-pass', G3: 'macos-component-pass' }, limitations: ['Linux deferred by Murphy; not implemented or claimed supported.', 'Generated script child creation is denied; no child capability is currently granted.', 'Full B4 snapshot and persistent run recovery remain separate batch obligations.'] };
+    gates: { G2: 'component-pass', G3: 'macos-component-pass' }, limitations: ['Linux support is deferred; not implemented or claimed supported.', 'Generated script child creation is denied; no child capability is currently granted.', 'Full B4 snapshot and persistent run recovery remain separate batch obligations.'] };
   writeFileSync(join(root, 'receipt.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ root, receipt: join(root, 'receipt.json'), gates: report.gates }));
 } finally { for (const server of [tcp, unix]) await new Promise(resolve => server.close(resolve)); }

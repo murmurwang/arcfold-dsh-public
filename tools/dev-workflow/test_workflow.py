@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from common import WorkflowError, digest, read, write
+from common import WorkflowError, digest, git, read, write
+from public_export import inspect_export
 from desktop_review_request import (
     CHECKS, HOST, RELAY_MODEL, blockers, connect, estimate, make_attempt, maximum_cost, relay_preflight, request,
     review_key, validate, worker,
@@ -73,6 +74,28 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(WorkflowError, "尚未通过"):
                 self.flow.successful_ci(HEAD)
         self.assertEqual(self.flow.successful_ci(HEAD), CI)
+
+    def test_export_flags_personal_email_addresses_without_domain_false_positives(self):
+        root = Path(self.temp.name) / "source"
+        root.mkdir()
+        git(root, "init", "--quiet")
+        git(root, "config", "user.name", "Synthetic fixture")
+        git(root, "config", "user.email", "fixture@example.invalid")
+        samples = {
+            "gmail.txt": b"Contact: reviewer+test@" + b"gmail.com.\n",
+            "outlook.txt": b"Contact: REVIEWER@" + b"OUTLOOK.COM\n",
+            "project.txt": b"Contact: fixture@example.invalid\nhttps://github.com/example/project\n",
+            "different-domain.txt": b"Contact: reviewer@" + b"gmail.com.example.invalid\n",
+        }
+        for name, data in samples.items():
+            (root / name).write_bytes(data)
+        git(root, "add", ".")
+        git(root, "commit", "--quiet", "-m", "Synthetic export fixture")
+        result = inspect_export(root, "HEAD", Path(self.temp.name) / "export", owner="fixture-maintainer")
+        self.assertEqual(set(result["flagged"]), {"gmail.txt", "outlook.txt"})
+        rows = {row["path"]: row for row in read(result["inventory"])["files"]}
+        self.assertTrue(all(rows[name]["scan"] == "needs review" for name in ("gmail.txt", "outlook.txt")))
+        self.assertTrue(all(rows[name]["scan"] == "scanned" for name in ("project.txt", "different-domain.txt")))
 
     def test_review_ci_record_includes_outcomes_only_from_the_required_steps(self):
         job = {"id": 20, "name": "Desktop checks", "conclusion": "success", "html_url": CI["url"] + "/job/20",
