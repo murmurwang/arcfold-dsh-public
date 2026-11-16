@@ -294,6 +294,8 @@ def begin_repair(flow, release, task, head):
         return
     with locked(folder(flow, release["version"]), "candidate"):
         directory, row = current(flow, release["version"], release["repair_of"])
+        # Publication may have started after submit's earlier material check.
+        require_unpublished(flow, release["version"])
         record = {"candidate": row["id"], "task": task, "head": head, "reason": release["repair_reason"]}
         once(directory / "repairs" / (digest(record) + ".json"), record)
 

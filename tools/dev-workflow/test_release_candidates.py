@@ -408,6 +408,16 @@ class CandidateTests(unittest.TestCase):
             release(self.flow, VERSION, False, True, None, row["id"], self.approval(row))
         self.assertEqual(self.repo.writes, [])
 
+    def test_repair_rechecks_publication_after_acquiring_the_candidate_lock(self):
+        row = self.candidate()
+        self.evidence(row)
+        info = self.merged(SECOND, FIRST, row)["target"]["release"]
+        candidates.check_repair(self.flow, info, FIRST)
+        release(self.flow, VERSION, False, True, None, row["id"], self.approval(row))
+        with self.assertRaisesRegex(WorkflowError, "不能同版修补"):
+            candidates.begin_repair(self.flow, info, "repair", SECOND)
+        self.assertFalse(list((candidates.artifacts(self.flow, row) / "repairs").glob("*.json")))
+
     def test_release_metadata_requires_bound_equal_version_repair_and_rejects_downgrade(self):
         core = {"version": VERSION, "engines": {"dsh": "0.2.2-rc.1"}}
         lock = {"version": VERSION, "packages": {"": {"version": VERSION}}}
