@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import getpass
 import json
 import os
@@ -561,8 +562,10 @@ class Workflow:
                 argv.append("--settle-billing")
             command(argv, timeout=1030, env=child_env)
 
-        with locked(self.state / "prs", str(number)):
+        with locked(self.state / "prs", str(number)), ExitStack() as locks:
             run_dir, target, files, _ = self.preflight(number)
+            if target.get("delivery"):
+                locks.enter_context(locked(delivery.root(self, target["delivery"]), "review"))
             preliminary = reviewer.packet_for(target, files, provider)
             run_dir, target = delivery.prepare_review(self, run_dir, target, preliminary, new=new_attempt)
             packet = reviewer.packet_for(target, files, provider)
@@ -578,7 +581,7 @@ class Workflow:
             else:
                 write(path, packet)
                 preview = {"packet": packet["id"], "review_id": target.get("review_id"), "target": target, "material": str(path), **reviewer.estimate(packet)}
-                uncertain = self.previous_review_uncertainty(run_dir)
+                uncertain = delivery.review_uncertainty(self, run_dir, target.get("delivery"))
                 if uncertain:
                     preview["prior_usage_pending"] = uncertain
                 write(run_dir / "estimate.json", preview)
@@ -586,7 +589,7 @@ class Workflow:
                     return preview
                 from collab import review_approval
                 granted = review_approval(self, approval, number, packet["id"], preview)
-                require(not uncertain, "此提案还有用量未核对的旧审阅尝试，先查 OpenAI 的用量或请求记录。")
+                require(not uncertain, "同一交付还有结果或费用未知的旧审阅尝试，先核对服务用量和请求记录。")
                 key = reviewer.review_key(provider)
                 require(self.pair(number)[1:] == (target["head"], target["base"]), "候选或 main 在调用前已变化。")
                 attempt = {**reviewer.make_attempt(packet), "approval": granted}

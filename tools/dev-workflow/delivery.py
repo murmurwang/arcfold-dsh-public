@@ -425,6 +425,23 @@ def reviews(flow, total):
                   key=lambda row: int(row["id"].split("-R")[1]))
 
 
+def review_uncertainty(flow, run_dir, total=None):
+    """Changing a proposal must not detach this delivery's unknown requests."""
+    directories = {run_dir.parent}
+    if total:
+        directories.update((flow.state / r["run"]).parent for r in reviews(flow, total))
+        for key in load(flow, total)[1]["tasks"]:
+            folder, _ = flow.task(key)
+            pr = json_or(folder / "submit.json").get("pr")
+            if pr:
+                directories.add(flow.state / "prs" / str(pr))
+    result = []
+    for directory in sorted(directories):
+        probe = run_dir if directory == run_dir.parent else directory / "not-a-run"
+        result.extend(flow.previous_review_uncertainty(probe))
+    return result
+
+
 def prepare_review(flow, pair_dir, target, packet, *, new=False):
     total = target.get("delivery")
     if not total:
@@ -436,9 +453,9 @@ def prepare_review(flow, pair_dir, target, packet, *, new=False):
         path = flow.state / latest["run"]
         if not new or not (path / "attempt.json").exists():
             return path, {**target, "review_id": latest["id"]}
-    # Check the entire PR, including another R for the same head. New labels do
-    # not erase unknown requests, or a relay response with unsettled billing.
-    uncertain = flow.previous_review_uncertainty(pair_dir.with_name("not-a-run"))
+    # Check every PR in this delivery, including another R for the same head.
+    # New labels do not erase unknown requests or unsettled relay billing.
+    uncertain = review_uncertainty(flow, pair_dir.with_name("not-a-run"), total)
     require(not uncertain, "旧审阅请求结果或费用未知，先核对，不能用新 R 绕过。")
     item = allocate(flow, total + "-R")
     run = pair_dir.with_name(pair_dir.name + "-" + item)

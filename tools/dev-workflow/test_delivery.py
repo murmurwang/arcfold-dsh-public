@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 import collab
 import delivery
 import delivery_feedback as feedback
-from common import WorkflowError, digest, git, git_line, read, write
+from common import WorkflowError, digest, git, git_line, locked, read, write
 from desktop_review_request import packet_for
 from workflow import HERE, Workflow
 
@@ -217,6 +217,9 @@ class DeliveryTests(unittest.TestCase):
         pair = self.flow.state / "prs" / "5" / (HEAD + "-" + BASE)
         with patch.object(self.flow, "preflight", return_value=(pair, target, {"src/a.mjs": "export {};\n"}, None)), \
                 patch("workflow.command") as run:
+            with locked(delivery.root(self.flow, "001"), "review"), self.assertRaisesRegex(WorkflowError, "另一流程"):
+                self.flow.review(5)
+            self.assertEqual(len(delivery.reviews(self.flow, "001")), 0)
             first = self.flow.review(5)
             again = self.flow.review(5)
             self.assertEqual(first["review_id"], "001-R1")
@@ -226,6 +229,12 @@ class DeliveryTests(unittest.TestCase):
             write(folder / "attempt.json", {"client_request_id": "pending", "provider": "lmuai", "started_at": "now"})
             with self.assertRaisesRegex(WorkflowError, "未知"):
                 self.flow.review(5, new_attempt=True)
+            self.assertEqual(len(delivery.reviews(self.flow, "001")), 1)
+            other_target = {**target, "pr": 6}
+            other_pair = self.flow.state / "prs" / "6" / (HEAD + "-" + BASE)
+            with patch.object(self.flow, "preflight", return_value=(other_pair, other_target, {"src/a.mjs": "export {};\n"}, None)), \
+                    self.assertRaisesRegex(WorkflowError, "未知"):
+                self.flow.review(6)
             self.assertEqual(len(delivery.reviews(self.flow, "001")), 1)
             write(folder / "response.json", {"response": {"usage": {"input_tokens": 10, "output_tokens": 2}}, "billing": {}})
             with self.assertRaisesRegex(WorkflowError, "费用未知"):
