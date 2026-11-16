@@ -159,6 +159,11 @@ def source_inputs(flow, task, step):
                       executor=digest(Path(__file__).read_bytes()), python=sys.version,
                       platform=platform.platform(), machine=platform.machine())
         if step["recipe"] == "desktop-checks":
+            tests = inputs.get("tests", [])
+            require(isinstance(tests, list) and all(isinstance(name, str) and
+                    re.fullmatch(r"test/[a-zA-Z0-9_.-]+\.test\.mjs", name) and (checkout / name).is_file() for name in tests),
+                    "专项检查只接受当前固定源码内的 test/*.test.mjs 文件列表。")
+            inputs["tests"] = tests
             dependencies = Path(inputs.get("dependencies", "")).expanduser().resolve()
             lock = (dependencies / "package-lock.json").read_bytes()
             require(lock == (checkout / "package-lock.json").read_bytes(), "依赖资源与候选锁文件不一致。")
@@ -372,7 +377,7 @@ def execute_check(flow, run):
             env.update(ARCFOLD_PATCH_TEST_INSTALLATION=str(dependencies), ARCFOLD_DESKTOP_PACKAGE_SOURCE=str(checkout),
                        ARCFOLD_DESKTOP_PACKAGE_DEPENDENCIES=str(dependencies), ARCFOLD_TREE_ENCODING_PYTHON=python,
                        ARCFOLD_DESKTOP_PYTHON_ARCHIVE=str(archive))
-            argv = ["node", "scripts/test-isolated.mjs"]
+            argv = ["node", "scripts/test-isolated.mjs", *run["inputs"]["tests"]]
         with logfile.open("wb") as output:
             process = subprocess.Popen(argv, cwd=checkout, env=env, stdin=subprocess.DEVNULL,
                                        stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
