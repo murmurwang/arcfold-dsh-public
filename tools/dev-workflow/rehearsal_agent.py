@@ -237,6 +237,9 @@ class Agent:
         request = validate_request(self.config, folder, verify_material=False)
         progress = self.state(request)
         state_path = self.private / (request["id"] + ".json")
+        if progress.get("halted"):
+            self.report(request, "failed", last_seq=progress["last_seq"], next="原动作启动失败，保留记录且不自动重试。")
+            return
         if progress.get("pending"):
             # Recover a recorded live launch only by observing its original window, never by spawning.
             pending = progress["pending"]
@@ -346,6 +349,12 @@ class Agent:
                 self.report(request, "checked", last_seq=seq, action=mode, evidence=exported,
                             next="本动作完成；实际验收以逐项原始证据为准。")
         except Exception:
+            if process is None:
+                progress.update(pending=None, halted=True)
+                save(state_path, progress)
+                self.report(request, "failed", last_seq=progress["last_seq"], action=mode, log=log.name,
+                            next="操作系统未能启动测试程序，已停止该任务；没有自动重试。")
+                return
             # Preserve pending and PID. Unknown/failed attempts are never replayed.
             self.report(request, "unknown", last_seq=progress["last_seq"], action=mode,
                         exit_code=process.poll() if process else None, log=log.name,
@@ -362,13 +371,17 @@ class Agent:
             active = any((row.get("pending") or (row.get("folder") and
                          matching_runner(self.config, Path(row["folder"]), row.get("pid"))))
                          for row in (read(path) for path in self.private.glob("*.json")))
-            save(self.results / "service-status.json", {"state": "waiting_window_exit" if active else "stopped",
-                 "at": now(), "uid": self.config["uid"]}, public=True)
+            save(self.results / "service-status.json", {"state": "waiting_window_exit" if active else "removing",
+                 "at": now(), "uid": self.config["uid"],
+                 "service_sha256": digest((HERE / "service.json").read_bytes())}, public=True)
             if active:
                 return True
             plist = Path(self.config["home"]) / "Library" / "LaunchAgents" / (self.config["label"] + ".plist")
             plist.unlink(missing_ok=True)
-            # bootout ends this process; write the result before invoking it.
+            # bootout may terminate us. Record completed plist removal and intent; the issuer
+            # must observe that this runtime's processes have actually exited before upgrading.
+            save(self.results / "service-status.json", {"state": "stopping", "at": now(),
+                 "uid": self.config["uid"], "service_sha256": digest((HERE / "service.json").read_bytes())}, public=True)
             subprocess.run(["/bin/launchctl", "bootout", "gui/" + str(self.config["uid"]) + "/" + self.config["label"]],
                            capture_output=True)
             return False

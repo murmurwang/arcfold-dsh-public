@@ -13,6 +13,8 @@ from common import digest, locked, read, require, timestamp, write
 
 HERE = Path(__file__).resolve().parent
 ACCOUNT = "arcfold-test"
+PYTHON = "/usr/bin/python3"
+NODE = "/usr/local/bin/node"
 ACTIONS = ("launch", "restored", "finish", "git", "git-section")
 CONTROLS = ("fixture.mjs", "registry.mjs", "model.mjs", "desktop.mjs", "run.mjs", "Run-DSH.command")
 
@@ -95,14 +97,18 @@ def prepare_service(flow, output):
     stage.mkdir()
     for name in ("rehearsal_agent.py", "rehearsal_probe.mjs"):
         shutil.copyfile(HERE / name, stage / name)
-    key = digest({"repo": flow.repo.name, "state_root": str(flow.state.parents[1]), "uid": account["uid"]})[:20]
+    version = {path.name: digest(path.read_bytes()) for path in stage.iterdir()}
+    harness = {name: digest((HERE / "rehearsal" / name).read_bytes()) for name in CONTROLS}
+    key = digest({"repo": flow.repo.name, "state_root": str(flow.state.parents[1]), "uid": account["uid"],
+                  "runtime": version, "harness": harness,
+                  "python": digest(Path(PYTHON).read_bytes()),
+                  "node": digest(Path(NODE).read_bytes())})[:20]
     shared = Path("/Users/Shared") / ("Arcfold-Test-Queue-" + key)
     outbox = Path("/Users/Shared") / ("Arcfold-Test-Results-" + key)
     runtime = {"schema": 1, "repo": flow.repo.name, **account, "issuer_uid": os.getuid(),
                "shared": str(shared), "outbox": str(outbox), "label": "org.arcfold.test-startup." + key,
-               "python": "/usr/bin/python3", "node": "/usr/local/bin/node",
-               "harness": {name: digest((HERE / "rehearsal" / name).read_bytes()) for name in CONTROLS},
-               "files": {path.name: digest(path.read_bytes()) for path in stage.iterdir()}}
+               "python": PYTHON, "node": NODE,
+               "harness": harness, "files": version}
     require(Path(runtime["node"]).is_file(), "缺少测试入口使用的系统 Node。")
     runtime["node_sha256"] = digest(Path(runtime["node"]).read_bytes())
     runtime["python_sha256"] = digest(Path(runtime["python"]).read_bytes())
@@ -128,6 +134,20 @@ def enable(flow, path, ask):
     verify(plan["stage"], plan["files"])
     shared = Path(plan["shared"])
     with locked(local(flow), "service"):
+        previous_path = local(flow) / "service.json"
+        if previous_path.exists():
+            previous = read(previous_path)
+            if previous["service_sha256"] != plan["service_sha256"] or (shared / "disable.json").exists():
+                receipt = Path(previous["outbox"]) / "service-status.json"
+                require(receipt.is_file() and not receipt.is_symlink() and receipt.stat().st_uid == previous["uid"] and
+                        not receipt.stat().st_mode & 0o022, "旧测试后台尚未确认停止，请先核对其移除回执。")
+                status_row = read(receipt)
+                require(status_row.get("state") == "stopping" and status_row.get("uid") == previous["uid"] and
+                        status_row.get("service_sha256") == previous["service_sha256"], "旧后台未完成移除，不能覆盖。")
+                processes = subprocess.run(["/bin/ps", "-ww", "-U", str(previous["uid"]), "-o", "args="],
+                                           capture_output=True, check=True, timeout=10).stdout.decode().splitlines()
+                old_entry = str(Path(previous["shared"]) / "rehearsal_agent.py") + " run"
+                require(not any(old_entry in line for line in processes), "旧后台进程仍在退出中，不能覆盖。")
         if shared.exists():
             verify(shared, plan["files"])
         else:
@@ -138,6 +158,7 @@ def enable(flow, path, ask):
         shared.chmod(0o755)
         (shared / "inbox").mkdir(exist_ok=True, mode=0o755)
         (shared / "inbox").chmod(0o755)
+        (shared / "disable.json").unlink(missing_ok=True)
         write(shared / "activation.json", {"plan_sha256": digest(Path(path).read_bytes()), "approval": ask,
               "service_sha256": plan["service_sha256"], "issuer_uid": os.getuid(), "at": timestamp()})
         (shared / "activation.json").chmod(0o644)
@@ -147,13 +168,13 @@ def enable(flow, path, ask):
             "next": "首次在普通测试账户登录后运行此配置入口；此后由后台领取已批准任务。"}
 
 
-def service(flow):
+def service(flow, *, require_current=True):
     path = local(flow) / "service.json"
     require(path.is_file(), "测试账户后台程序尚未登记。")
     row = read(path)
     require(digest((Path(row["shared"]) / "service.json").read_bytes()) == row["service_sha256"], "后台配置发生变化。")
     runtime = read(Path(row["shared"]) / "service.json")
-    require(all(digest((HERE / "rehearsal" / name).read_bytes()) == sha for name, sha in runtime["harness"].items()),
+    require(not require_current or all(digest((HERE / "rehearsal" / name).read_bytes()) == sha for name, sha in runtime["harness"].items()),
             "当前测试入口与已安装后台版本不同，请核对新的安装计划。")
     return row
 
@@ -327,7 +348,7 @@ def cancel(flow, identifier):
 
 
 def pause(flow, paused):
-    configured = service(flow)
+    configured = service(flow, require_current=False)
     path = Path(configured["shared"]) / "pause.json"
     write(path, {"service_sha256": configured["service_sha256"], "paused": paused, "at": timestamp()})
     path.chmod(0o644)
@@ -335,7 +356,7 @@ def pause(flow, paused):
 
 
 def removal_plan(flow, output):
-    configured = service(flow)
+    configured = service(flow, require_current=False)
     path = Path(output).resolve()
     require(not path.exists(), "移除计划已存在。")
     write(path, {"action": "remove-test-startup", "repo": flow.repo.name, **configured,
@@ -345,7 +366,7 @@ def removal_plan(flow, output):
 
 def disable(flow, path, ask):
     plan = approve(flow, path, ask)
-    configured = service(flow)
+    configured = service(flow, require_current=False)
     require(plan["action"] == "remove-test-startup" and plan["repo"] == flow.repo.name and
             all(plan[key] == value for key, value in configured.items()), "移除计划与当前对象不符。")
     target = Path(configured["shared"]) / "disable.json"

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -279,7 +280,8 @@ class StartupTests(unittest.TestCase):
             daemon.handle(folder)
             daemon.handle(folder)
         spawn.assert_called_once()
-        self.assertEqual(startup.status(self.flow, request["id"])["state"], "unknown")
+        self.assertEqual(startup.status(self.flow, request["id"])["state"], "failed")
+        self.assertIsNone(daemon.state(request)["pending"])
 
     def test_probe_process_matching_requires_exact_owner_directory_and_port(self):
         node = shutil.which("node")
@@ -293,6 +295,57 @@ const rows = ['100 503 '+base, '101 501 '+base, '102 503 '+base.replace('/test/e
 assert.deepEqual(matchingProcesses(rows, {uid:503,userData:'/test/electron'}), [100]);
 """.replace("MODULE", json.dumps((startup.HERE / "rehearsal_probe.mjs").as_uri()))
         subprocess.run([node, "--input-type=module", "-e", script], check=True, capture_output=True, timeout=15)
+
+
+    def test_prepared_upgrade_uses_distinct_path_and_keeps_old_material(self):
+        source = self.root / "source"
+        source.mkdir()
+        for name in ("rehearsal_agent.py", "rehearsal_probe.mjs"):
+            shutil.copyfile(startup.HERE / name, source / name)
+        shutil.copytree(startup.HERE / "rehearsal", source / "rehearsal")
+        account = {"account": startup.ACCOUNT, "uid": os.getuid(), "home": str(self.home)}
+        with patch.object(startup, "identity", return_value=account), patch.object(startup, "HERE", source), \
+             patch.object(startup, "NODE", shutil.which("node")), patch.object(startup, "PYTHON", sys.executable):
+            old = read(startup.prepare_service(self.flow, self.root / "old-stage")["plan"])
+            (source / "rehearsal_agent.py").write_text("# changed approved runtime\n")
+            new = read(startup.prepare_service(self.flow, self.root / "new-stage")["plan"])
+        self.assertNotEqual(old["shared"], new["shared"])
+        self.assertNotEqual(old["outbox"], new["outbox"])
+        self.assertNotEqual((Path(old["stage"]) / "rehearsal_agent.py").read_bytes(),
+                            (Path(new["stage"]) / "rehearsal_agent.py").read_bytes())
+
+    def test_changed_entry_can_pause_and_prepare_removal_of_old_service(self):
+        with patch.object(startup, "HERE", self.root / "different-version"):
+            with self.assertRaises(OSError):
+                startup.service(self.flow)
+            self.assertTrue(startup.pause(self.flow, True)["paused"])
+            plan = startup.removal_plan(self.flow, self.root / "remove.json")
+        self.assertEqual(read(plan["plan"])["service_sha256"], self.service_sha)
+
+    def test_upgrade_waits_for_test_account_stopped_receipt(self):
+        stage = self.root / "replacement"
+        stage.mkdir()
+        write(stage / "service.json", {**self.config, "version": "replacement"})
+        shared = self.root / "new-shared"
+        plan = {"action": "enable-test-startup", "repo": self.flow.repo.name,
+                "state_root": str(self.flow.state.parents[1]), "stage": str(stage), "shared": str(shared),
+                "outbox": str(self.root / "new-results"), "uid": os.getuid(), "account": startup.ACCOUNT,
+                "service_sha256": digest((stage / "service.json").read_bytes()),
+                "files": {"service.json": digest((stage / "service.json").read_bytes())}}
+        with patch.object(startup, "approve", return_value=plan):
+            with self.assertRaisesRegex(WorkflowError, "尚未确认停止"):
+                startup.enable(self.flow, self.plan, self.ask)
+            self.assertFalse(shared.exists())
+            agent.save(self.outbox / "service-status.json", {"state": "stopping", "uid": os.getuid(),
+                       "service_sha256": self.service_sha}, public=True)
+            running = (str(self.shared / "rehearsal_agent.py") + " run").encode()
+            with patch.object(startup.subprocess, "run", return_value=Mock(stdout=running)), \
+                 self.assertRaisesRegex(WorkflowError, "仍在退出"):
+                startup.enable(self.flow, self.plan, self.ask)
+            with patch.object(startup.subprocess, "run", return_value=Mock(stdout=b"")):
+                startup.enable(self.flow, self.plan, self.ask)
+        self.assertTrue(shared.is_dir())
+        self.assertTrue(self.shared.is_dir())
 
 
 if __name__ == "__main__":
