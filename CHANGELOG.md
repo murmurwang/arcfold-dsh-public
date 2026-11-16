@@ -1,5 +1,9 @@
 # Arcfold DSH 更新记录
 
+## 0.5.0
+
+开发候选：复用 DSH 原生模型配置和聊天选模，使 Arcfold 各环节继承来源会话的模型与思考设置。实现和验收进行中，尚未发行；决策见 docs/notes/native-model-configuration.md。
+
 ## 0.4.1
 
 - 插件详情说明首次设置时的默认模型。若 DSH 的默认模型为空，Arcfold 会选用 DeepSeek V4 Pro。
