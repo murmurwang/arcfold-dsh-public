@@ -722,6 +722,20 @@ def parse_args():
     review.add_argument("--pr", type=int, required=True)
     review.add_argument("--provider", choices=("openai", "lmuai"), default="openai")
     review.add_argument("--approval", metavar="A编号", help="开发者已同意的审阅费用授权单")
+    rehearsal_service = sub.add_parser("rehearsal-service", help="准备并按授权配置测试账户后台启动")
+    rehearsal_service.add_argument("operation", choices=("prepare", "enable", "prepare-remove", "remove", "pause", "unpause"))
+    rehearsal_service.add_argument("--output")
+    rehearsal_service.add_argument("--plan")
+    rehearsal_service.add_argument("--approval")
+    rehearsal = sub.add_parser("rehearsal", help="准备、排队和核对固定测试窗口")
+    rehearsal.add_argument("operation", choices=("prepare", "enqueue", "status", "step", "cancel"))
+    rehearsal.add_argument("--kit")
+    rehearsal.add_argument("--output")
+    rehearsal.add_argument("--expires-at")
+    rehearsal.add_argument("--plan")
+    rehearsal.add_argument("--approval")
+    rehearsal.add_argument("--job")
+    rehearsal.add_argument("--step", choices=("launch", "restored", "finish", "git", "git-section"))
     merge = sub.add_parser("merge")
     merge.add_argument("--pr", type=int, required=True)
     release = sub.add_parser("release")
@@ -779,6 +793,33 @@ def main():
             result = flow.submit(args.id, args.body_file)
         elif action == "review":
             result = flow.review(args.pr, args.approval, args.provider)
+        elif action == "rehearsal-service":
+            import rehearsal_startup as startup
+            if args.operation in ("pause", "unpause"):
+                result = startup.pause(flow, args.operation == "pause")
+            elif args.operation in ("prepare", "prepare-remove"):
+                require(args.output, "准备计划需要 --output。")
+                result = (startup.prepare_service(flow, args.output) if args.operation == "prepare"
+                          else startup.removal_plan(flow, args.output))
+            else:
+                require(args.plan and args.approval, "变更需要 --plan 和绑定它的 --approval。")
+                result = (startup.enable(flow, args.plan, args.approval) if args.operation == "enable"
+                          else startup.disable(flow, args.plan, args.approval))
+        elif action == "rehearsal":
+            import rehearsal_startup as startup
+            if args.operation == "prepare":
+                require(args.kit and args.output and args.expires_at, "准备测试需 --kit、--output 和 --expires-at。")
+                result = startup.prepare_run(flow, args.kit, args.output, args.expires_at)
+            elif args.operation == "enqueue":
+                require(args.plan and args.approval, "测试排队需 --plan 和 --approval。")
+                result = startup.enqueue(flow, args.plan, args.approval)
+            elif args.operation == "status":
+                result = startup.status(flow, args.job)
+            elif args.operation == "step":
+                require(args.job and args.step, "测试动作需 --job 和 --step。")
+                result = startup.step(flow, args.job, args.step)
+            else:
+                result = startup.cancel(flow, args.job)
         elif action == "merge":
             result = flow.merge(args.pr)
         elif action == "release":

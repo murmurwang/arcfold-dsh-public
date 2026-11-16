@@ -641,6 +641,8 @@ def progress(flow, remote=False):
     result = {"repo": flow.repo.name, "daily": daily_version(), "tasks": tasks,
               "asks": [ask_summary(row) for row in open_asks], "feedback": unrouted_feedback(flow),
               "pending_writes": pending_writes(flow.state), "retired": retired}
+    from rehearsal_startup import status as rehearsal_status
+    result["test_startup"] = rehearsal_status(flow)
     if remote:
         result["remote"] = remote_facts(flow, tasks)
     return result
