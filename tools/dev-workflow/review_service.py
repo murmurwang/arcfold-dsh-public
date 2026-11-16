@@ -58,7 +58,10 @@ def prepare(flow, output, name="default"):
     output.mkdir(parents=True, mode=0o700)
     stage = output / "runtime"
     stage.mkdir(mode=0o700)
-    identifier = digest({"repo": flow.repo.name, "state_root": str(flow.state.parents[1]), "profile": name})[:20]
+    sources = {path.name: digest(path.read_bytes()) for path in HERE.glob("*.py") if not path.name.startswith("test_")}
+    sources["ReviewKeychain.swift"] = digest((HERE / "ReviewKeychain.swift").read_bytes())
+    identifier = digest({"repo": flow.repo.name, "state_root": str(flow.state.parents[1]), "profile": name,
+                         "sources": sources, "python": digest(Path(sys.executable).resolve().read_bytes())})[:20]
     install_dir = Path.home() / "Library" / "Application Support" / "Arcfold Review" / identifier
     label = "org.arcfold.review." + identifier
     python = Path(sys.executable).resolve()
@@ -100,6 +103,11 @@ def prepare(flow, output, name="default"):
 def install(flow, plan_path, approval):
     plan = authorize_plan(flow, plan_path, approval)
     require(plan["action"] == "install", "不是安装计划。")
+    profile_path = Path(plan["profile_path"])
+    if profile_path.is_file():
+        existing = read(profile_path)
+        require(all(existing.get(key) == plan[key] for key in ("install_dir", "manifest_sha256", "helper_sha256")),
+                "已有不同版本的后台配置，先按绑定计划移除旧版本；不能覆盖仍在使用的密钥。")
     verify_files(plan["stage"], plan["files"])
     source = Path(plan["launch_agent_source"])
     require(digest(source.read_bytes()) == plan["launch_agent_sha256"], "后台启动配置已变化。")
@@ -114,7 +122,6 @@ def install(flow, plan_path, approval):
         # Native secure input; no credential is accepted as a CLI argument.
         result = subprocess.run([str(target / "ReviewKeychain"), "enroll"], timeout=600)
         require(result.returncode == 0, "本机密钥设置未完成；不启动后台程序，可核对后继续同一安装计划。")
-    profile_path = Path(plan["profile_path"])
     profile_row = {k: plan[k] for k in ("install_dir", "service", "account", "manifest_sha256", "helper_sha256")}
     profile_row.update(approval=approval, installed_at=timestamp())
     if profile_path.exists():
@@ -143,7 +150,7 @@ def install(flow, plan_path, approval):
 
 def removal_plan(flow, name, output):
     from review_queue import profile, root
-    installed = profile(flow, name)
+    installed = profile(flow, name, require_current=False)
     runtime = verify_installation(installed)
     target = Path(output).expanduser().resolve()
     require(not target.exists(), "移除计划已存在，请使用新文件。")

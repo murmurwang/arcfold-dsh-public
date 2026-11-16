@@ -24,14 +24,14 @@ def root(flow):
     return flow.state / "review-automation"
 
 
-def profile(flow, name):
+def profile(flow, name, *, require_current=True):
     require(isinstance(name, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", name), "后台配置名称无效。")
     path = root(flow) / "profiles" / (name + ".json")
     require(path.is_file(), "后台审阅尚未安装，请先准备安装计划并取得授权。")
     row = read(path)
     from review_service import verify_installation
     runtime = verify_installation(row)
-    require(all((HERE / filename).is_file() and digest((HERE / filename).read_bytes()) == sha
+    require(not require_current or all((HERE / filename).is_file() and digest((HERE / filename).read_bytes()) == sha
                 for filename, sha in runtime["files"].items()),
             "当前入口与后台安装版本不同，请重新核对安装计划。")
     metadata = Path(row["install_dir"]) / "credential.json"
@@ -293,7 +293,7 @@ def control(flow, identifier, action):
 
 
 def pause(flow, name, paused):
-    installed = profile(flow, name)
+    installed = profile(flow, name, require_current=False)
     directory = key_root(flow, installed["key_id"])
     with locked(directory, "control"):
         path = directory / "reservation.json"

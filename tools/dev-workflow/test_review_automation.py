@@ -15,6 +15,8 @@ from review_policy import check_balance, execution_approval, key_root, revoke
 from review_service import authorize_plan, verify_files, verify_installation
 from workflow import Workflow
 
+ORIGINAL_PROFILE = queue.profile
+
 HEAD, BASE = "a" * 40, "b" * 40
 REPO = "example/arcfold"
 KEY = digest(b"synthetic-credential")
@@ -286,6 +288,39 @@ class AutomationTests(unittest.TestCase):
         code.symlink_to(self.evidence)
         with self.assertRaises(WorkflowError):
             verify_files(runtime, files)
+
+    def test_changed_entry_can_pause_and_remove_intact_old_installation(self):
+        import review_service
+        directory = self.root / "old-runtime"
+        directory.mkdir()
+        (directory / "old.py").write_text("pass\n")
+        (directory / "ReviewKeychain").write_bytes(b"synthetic native helper")
+        runtime = {"install_dir": str(directory), "python": sys.executable,
+                   "python_sha256": digest(Path(sys.executable).read_bytes()), "service": "synthetic.review",
+                   "files": {"old.py": digest((directory / "old.py").read_bytes())}}
+        write(directory / "runtime.json", runtime)
+        write(directory / "credential.json", {"service": runtime["service"], "account": "review", "key_id": KEY})
+        installed = {"install_dir": str(directory), "service": runtime["service"], "account": "review",
+                     "manifest_sha256": digest((directory / "runtime.json").read_bytes()),
+                     "helper_sha256": digest((directory / "ReviewKeychain").read_bytes())}
+        write(queue.root(self.flow) / "profiles" / "default.json", installed)
+        with self.assertRaisesRegex(WorkflowError, "版本不同"):
+            ORIGINAL_PROFILE(self.flow, "default")
+        with patch("review_queue.profile", side_effect=ORIGINAL_PROFILE):
+            self.assertTrue(queue.pause(self.flow, "default", True)["paused"])
+            planned = review_service.removal_plan(self.flow, "default", self.root / "remove.json")
+        self.assertEqual(read(planned["plan"])["installation"]["install_dir"], str(directory))
+
+    def test_new_install_refuses_active_old_profile_before_native_enrollment(self):
+        import review_service
+        profile_path = self.root / "profile.json"
+        write(profile_path, {"install_dir": "old", "manifest_sha256": "old", "helper_sha256": "old"})
+        plan = {"action": "install", "profile_path": str(profile_path), "install_dir": "new",
+                "manifest_sha256": "new", "helper_sha256": "new"}
+        with patch("review_service.authorize_plan", return_value=plan), \
+             patch("review_service.subprocess.run") as native, self.assertRaisesRegex(WorkflowError, "先按绑定计划移除"):
+            review_service.install(self.flow, "synthetic", "A1")
+        native.assert_not_called()
 
     def test_native_worker_refuses_wrong_key_before_any_network(self):
         job = self.enqueue()
