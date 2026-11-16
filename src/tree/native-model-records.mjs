@@ -32,12 +32,20 @@ export class NativeModelRecords {
     this.write(requestId, { kind: 'dsh-native-response-v1', requestId, status: 'started',
       provider: options.provider, model: options.model, reasoningEffort: options.reasoningEffort ?? null,
       maxTokens: options.maxTokens ?? null, startedAt: this.repo.now(), usage: null, usageStatus: 'missing',
-      cost: null, priceStatus: 'unknown', finish: null });
-    let finish = null, usage = null, usageStatus = 'missing', exhausted = false;
+      usageSource: 'dsh-native-adapter', adapterUsage: null, cost: null, priceStatus: 'unknown', finish: null });
+    let finish = null, usage = null, adapterUsage = null, usageStatus = 'missing', exhausted = false;
     try {
       for await (const chunk of next()) {
         if (finish) fail('NATIVE_STREAM_PROTOCOL', 'Native provider returned data after its terminal result');
-        if (chunk.type === 'usage') { usage = reportedUsage(chunk.usage); usageStatus = usage ? 'reported' : 'invalid'; }
+        if (chunk.type === 'usage') {
+          adapterUsage = reportedUsage(chunk.usage);
+          // Some native adapters initialize omitted provider counters to zero.
+          // Keep their values for inspection, but do not turn ambiguous zero
+          // input/output into a confirmed usage record or a free request.
+          const complete = adapterUsage && adapterUsage.inputTokens + (adapterUsage.cacheReadTokens ?? 0) + (adapterUsage.cacheWriteTokens ?? 0) > 0 && adapterUsage.outputTokens > 0;
+          usage = complete ? adapterUsage : null;
+          usageStatus = complete ? 'reported' : adapterUsage ? 'unconfirmed' : 'invalid';
+        }
         if (chunk.type === 'finish') finish = chunk.reason?.kind ?? 'unknown';
         yield chunk;
       }
@@ -45,7 +53,7 @@ export class NativeModelRecords {
     } finally {
       const status = exhausted && ['stop', 'tool-calls', 'max-tokens'].includes(finish) ? 'response_received'
         : finish === 'error' ? 'failed' : finish === 'aborted' || options.signal?.aborted ? 'cancelled' : 'unknown';
-      this.write(requestId, { status, finish, usage, usageStatus, endedAt: this.repo.now() });
+      this.write(requestId, { status, finish, usage, usageStatus, adapterUsage, endedAt: this.repo.now() });
     }
   }
   recover() {

@@ -16,6 +16,7 @@ test('native request records distinguish response, usage and billing, and never 
     ['reported', [{ type: 'usage', usage: { inputTokens: 8, outputTokens: 2, secret: 'discard' } }, { type: 'finish', reason: { kind: 'stop' } }], 'response_received', 'reported'],
     ['missing', [{ type: 'finish', reason: { kind: 'stop' } }], 'response_received', 'missing'],
     ['invalid', [{ type: 'usage', usage: { inputTokens: -1, outputTokens: 2 } }, { type: 'finish', reason: { kind: 'stop' } }], 'response_received', 'invalid'],
+    ['zero', [{ type: 'usage', usage: { inputTokens: 8, outputTokens: 0 } }, { type: 'finish', reason: { kind: 'stop' } }], 'response_received', 'unconfirmed'],
     ['failed', [{ type: 'finish', reason: { kind: 'error' } }], 'failed', 'missing'],
     ['cancelled', [{ type: 'finish', reason: { kind: 'aborted' } }], 'cancelled', 'missing'],
     ['partial', [{ type: 'text-delta', delta: 'partial' }], 'unknown', 'missing'],
@@ -66,4 +67,14 @@ test('native invalid JSON and output limits preserve originals without retrying 
     await f.owner.run(job.id); await f.owner.recover(); assert.equal(f.requests.length, 1);
     assert.equal(f.nativeRecords.summary().complete, 1);
   });
+});
+
+test('a native adapter default zero for missing output usage stays unconfirmed while the valid result is retained', async t => {
+  const f = await nativeFixture(t, () => minimal.verification, { nativeModels: true, sseOptions: { usage: false } });
+  const result = await f.owner.run(f.enqueue('verification').id);
+  assert.equal(result.status, 'committed');
+  const receipt = f.nativeRecords.summary().records[0];
+  assert.equal(receipt.adapterUsage.inputTokens, 100); assert.equal(receipt.adapterUsage.outputTokens, 0);
+  assert.equal(receipt.usage, null); assert.equal(receipt.usageStatus, 'unconfirmed'); assert.equal(receipt.cost, null);
+  await f.owner.recover(); assert.equal(f.requests.length, 1);
 });
