@@ -38,7 +38,7 @@ class WorkflowTests(unittest.TestCase):
     @patch.dict("os.environ", {"ARCFOLD_AGENT_ID": "other-agent", "CODEX_THREAD_ID": ""})
     def test_missing_decision_blocks_even_with_registered_contributor(self):
         self.new()
-        with self.assertRaisesRegex(WorkflowError, "Problem"):
+        with self.assertRaisesRegex(WorkflowError, "问题"):
             self.flow.start("simple-change")
         self.repo.main.assert_not_called()
         self.repo.fetch.assert_not_called()
@@ -50,7 +50,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(fields["observed_in_version"], "0.4.0")
         self.assertEqual(fields["criteria"], ["要检查的行为"])
         with self.assertRaises(WorkflowError):
-            decision_note(filled.replace("## Problem", "<!-- ## Problem -->").encode())
+            decision_note(filled.replace("## 问题", "<!-- ## 问题 -->").encode())
 
     def test_scope_and_secret(self):
         self.assertTrue(inside_scope("src/real.mjs", ["src/"]))
@@ -238,7 +238,7 @@ class WorkflowTests(unittest.TestCase):
     def test_merge_uses_matched_head_then_checks_squash_tree(self):
         open_pr = {**self.repo.pr.return_value, "draft": False}
         merged = {**open_pr, "merge_commit_sha": OTHER, "merged": True}
-        target = {"head": HEAD, "base": BASE, "tree": "tree", "ci": CI, "release": None}
+        target = {"head": HEAD, "base": BASE, "tree": "tree", "ci": CI, "release": None, "decision": "simple-change"}
         self.repo.pr.side_effect = [open_pr, open_pr, open_pr, merged]
         self.repo.main.side_effect = [BASE, BASE, OTHER]
         self.repo.commit.return_value = {"tree": {"sha": "tree"}, "parents": [{"sha": BASE}]}
