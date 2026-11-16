@@ -236,6 +236,8 @@ class WorkflowTests(unittest.TestCase):
         self.repo.gh.assert_not_called()
 
     def test_merge_uses_matched_head_then_checks_squash_tree(self):
+        write(self.flow.state / "tasks" / "simple-change" / "task.json",
+              {"id": "simple-change", "title": "Synthetic legacy task", "phase": "open"})
         open_pr = {**self.repo.pr.return_value, "draft": False}
         merged = {**open_pr, "merge_commit_sha": OTHER, "merged": True}
         target = {"head": HEAD, "base": BASE, "tree": "tree", "ci": CI, "release": None, "decision": "simple-change"}

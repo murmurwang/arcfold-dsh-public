@@ -10,6 +10,8 @@ import re
 import sys
 import uuid
 
+import delivery
+
 from common import Repository, WorkflowError, canonical, command, digest, git, git_line, locked, read, require, timestamp, write
 
 HERE = Path(__file__).resolve().parent
@@ -91,7 +93,8 @@ def decision_note(raw):
         text_field(sections.get(name), name)
     criteria = re.findall(r"(?m)^- (.+)$", sections[names[5]])
     require(criteria and len(set(criteria)) == len(criteria), "验收标准至少需要一条独立的检查项。")
-    return {"title": text.splitlines()[0].removeprefix(prefix), "criteria": criteria, **fields}
+    title = re.sub(r"^\[" + delivery.NUMBER + r"-D[1-9][0-9]*\] ", "", text.splitlines()[0].removeprefix(prefix))
+    return {"title": title, "criteria": criteria, **fields}
 
 
 def registered_scope(scope):
@@ -184,29 +187,18 @@ class Workflow:
         self.state = Path(state).expanduser().resolve() / repo.name
 
     def task(self, key):
+        key = delivery.resolve_task(self, key)
         path = self.state / "tasks" / task_id(key)
         require((path / "task.json").is_file(), f"缺少问题 {key} 的入口登记。")
-        return path, read(path / "task.json")
+        return path, delivery.task_metadata(self, read(path / "task.json"))
 
     def new(self, request):
-        key = task_id(request["id"])
-        title = text_field(request["title"], "问题标题")
-        source = text_field(request["authorization_ref"], "问题来源")
-        observed = text_field(request["observed_in_version"], "问题发生时的版本")
-        require("\n" not in title and "\n" not in observed, "问题标题和发生版本分别使用一行。")
-        scope = registered_scope(request["scope"])
-        path = self.state / "tasks" / key
-        with locked(self.state, "registration"):
-            require(not path.exists(), "同编号已登记。")
-            template = (HERE / "decision-template.md").read_text()
-            write(path / "decision.md", template.format(title=title, observed=observed, source=source).encode())
-            write(path / "task.json", {"id": key, "title": title, "scope": scope, "repository": self.repo.name,
-                                       "contributors": [actor()], "phase": "draft", "created_at": timestamp()})
-        return {"decision": str(path / "decision.md")}
+        return delivery.register(self, request)
 
     def check(self, key):
         path, record = self.task(key)
         raw = (path / "decision.md").read_bytes()
+        delivery.check_frozen(self, record, raw)
         fields = decision_note(raw)
         require(fields["title"] == record["title"], "决策标题与登记不一致。")
         return {"sha256": digest(raw), **fields}
@@ -215,6 +207,8 @@ class Workflow:
         path, _ = self.task(key)
         with locked(path, "task"):
             _, record = self.task(key)
+            key = record["id"]
+            delivery.ensure_current(self, record)
             note = self.check(key)
             require(record["phase"] == "draft", "此任务已启动。先核对已登记的工作目录。")
             from collab import open_decisions, require_alignment
@@ -237,12 +231,15 @@ class Workflow:
             record.update(phase="open", checkout=str(checkout), branch=branch,
                           contributors=sorted({*record["contributors"], actor()}))
             write(path / "task.json", record)
+            delivery.event(self, record.get("delivery"), "started", evidence=str(path / "task.json"), decision=record.get("decision_id"), base=base, checkout=str(checkout))
             return {"checkout": str(checkout), "base": base, "decision": str(decision)}
 
     def submit(self, key, body_path=None):
         directory, _ = self.task(key)
         with locked(directory, "task"):
             _, task = self.task(key)
+            key = task["id"]
+            delivery.ensure_current(self, task)
             require(task["phase"] == "open" and task["repository"] == self.repo.name, "任务须从入口启动。")
             checkout = Path(task["checkout"])
             require(not git_line(checkout, "status", "--porcelain"), "先提交候选的全部改动。")
@@ -278,19 +275,22 @@ class Workflow:
             if not pulls:
                 require(attempt.get("phase") not in ("creating", "confirmed"), "上次创建提案结果未知。先到 GitHub 核对。")
                 write(journal, {"phase": "creating", "head": head})
-                pr = self.repo.api("/pulls", {"title": task["title"], "head": branch, "base": "main", "body": body, "draft": True})
+                pr = self.repo.api("/pulls", {"title": (f"[交付 {task['delivery']}] " if task.get("delivery") else "") + task["title"], "head": branch, "base": "main", "body": body, "draft": True})
             else:
                 pr = self.repo.pr(pulls[0]["number"])
             require(pr["head"]["sha"] == head and pr["base"]["sha"] == base and
                     pr["body"].splitlines()[0] == f"Decision: docs/notes/{key}.md", "远端提案与入口候选不一致。")
             result = {"phase": "confirmed", "pr": pr["number"], "url": pr["html_url"], "head": head, "base": base}
             write(journal, result)
+            delivery.event(self, task.get("delivery"), "submitted", evidence=str(journal), **result)
             return result
 
     def rebase(self, key):
         directory, _ = self.task(key)
         with locked(directory, "task"):
             _, task = self.task(key)
+            key = task["id"]
+            delivery.ensure_current(self, task)
             require(task["phase"] == "open", "任务尚未进入开发。先核对任务记录。")
             checkout = Path(task["checkout"])
             require(not git_line(checkout, "status", "--porcelain"), "先整理独立目录中的改动。")
@@ -306,6 +306,8 @@ class Workflow:
                     "重新组合后 main 已变化。")
             task.update(base=base, contributors=sorted({*task["contributors"], actor()}))
             write(directory / "task.json", task)
+            delivery.event(self, task.get("delivery"), "rebased", evidence=str(directory / "task.json"),
+                           old_base=old_base, base=base, head=git_line(checkout, "rev-parse", "HEAD"))
             return {"checkout": str(checkout), "base": base, "changed": True}
 
     def pair(self, number):
@@ -335,6 +337,7 @@ class Workflow:
         return ci
 
     def material(self, checkout, task, head, base):
+        delivery.ensure_current(self, task)
         require(git_line(checkout, "merge-base", base, head) == base, "候选须包含当前 main，先重新组合。")
         path = f"docs/notes/{task['id']}.md"
         raw = blob(checkout, head, path)
@@ -399,6 +402,8 @@ class Workflow:
         target = {"repo": self.repo.name, "pr": number, "head": head, "base": base,
                   "tree": git_line(checkout, "rev-parse", f"{head}^{{tree}}"), "decision": task["id"],
                   "decision_sha256": task["decision_sha256"], "ci": ci, "release": release}
+        if task.get("delivery"):
+            target.update(delivery=task["delivery"], decision_id=task["decision_id"])
         files["review/verification.json"] = json.dumps(
             {"target": target, "checks": {"exact_head_ci": True, "decision": True, "scope": True,
                                          "release_metadata": True, "secret_scan": True}, "changes": changes},
@@ -417,7 +422,11 @@ class Workflow:
 
     def close_loop(self, key, version, observation, outcome, feedback=None):
         from collab import load_feedback, route
+        import delivery_feedback
         from release import published
+        directory, task = self.task(key)
+        key = task["id"]
+        delivery.ensure_current(self, task)
         require(outcome in OUTCOMES, "验收结论写 pass、fail 或 unconfirmed。")
         require((observation is None) != (feedback is None), "观察来自文件或一条已登记的反馈，二选一。")
         if feedback is not None:
@@ -433,7 +442,9 @@ class Workflow:
             published(release)
             result = {"observed_in_version": fields["observed_in_version"], "fixed_in": version,
                       "user_verified": text_field(observation, "开发者的实际观察"), "outcome": outcome, "at": timestamp(),
-                      "decision": key, "source": release["source"], "packages": release["packages"]}
+                      "sequence": len(list((directory / "observations").glob("*.json"))) + 1,
+                      "decision": key, "decision_id": task.get("decision_id"), "source": release["source"], "packages": release["packages"],
+                      "author": item.get("provider", "开发者") if feedback else "开发者", "recorded_by": actor()}
             if feedback is not None:
                 result["feedback"] = feedback
             name = directory / "observations" / (uuid.uuid4().hex + ".json")
@@ -441,6 +452,8 @@ class Workflow:
             write(directory / "user-verification.json", result)
         if feedback is not None:
             route(self, feedback, "close-loop:" + key)
+            delivery_feedback.resolved(self, feedback, str(name), outcome)
+        delivery.event(self, task.get("delivery"), "accepted", evidence=str(name), outcome=outcome)
         return {"observation": str(name), **result}
 
     def ensure_comment(self, number, run_dir, receipt, body):
@@ -489,7 +502,7 @@ class Workflow:
                 else:
                     require(not phase.exists(), "上次写入 Issue 结果未知，先核对。")
                     write(phase, {"phase": "posting", "review": receipt["sha256"]})
-                    item = self.repo.api("/issues", {"title": row["title"][:160], "body": content})
+                    item = self.repo.api("/issues", {"title": ((f"[交付 {receipt['target']['delivery']}] " if receipt["target"].get("delivery") else "") + row["title"])[:160], "body": content})
                 require(item["body"] == content, "Issue 与审阅发现不一致。")
                 answer = {"phase": "confirmed", "url": item["html_url"]}
                 write(phase, answer)
@@ -500,6 +513,15 @@ class Workflow:
 
     @staticmethod
     def previous_review_uncertainty(run_dir):
+        from collab import amount
+
+        def known_cost(value):
+            try:
+                amount(value, allow_zero=True)
+                return True
+            except WorkflowError:
+                return False
+
         uncertain = []
         for path in sorted(run_dir.parent.glob("*/attempt.json")):
             if path.parent == run_dir:
@@ -510,19 +532,23 @@ class Workflow:
             response = path.parent / "response.json"
             if response.is_file():
                 returned = read(response)
-                if isinstance(returned.get("response", {}).get("usage"), dict) and (
-                    attempt.get("provider") != "lmuai" or "billing" in returned
-                ):
+                usage = returned.get("response", {}).get("usage") or {}
+                known_tokens = all(type(usage.get(key)) is int and usage[key] >= 0
+                                   for key in ("input_tokens", "output_tokens"))
+                if (attempt.get("provider") == "lmuai" and
+                    known_cost((returned.get("billing") or {}).get("actual_cost_usd"))) or (
+                    attempt.get("provider") != "lmuai" and known_tokens):
                     continue
             resolution_path = path.parent / "billing-reconciliation.json"
             resolution = read(resolution_path) if resolution_path.is_file() else {}
             if (resolution.get("client_request_id") != attempt["client_request_id"]
                 or resolution.get("outcome") not in ("no_usage", "usage_confirmed")
-                or not resolution.get("evidence")):
+                or not resolution.get("evidence")
+                or resolution.get("outcome") == "usage_confirmed" and not known_cost(resolution.get("actual_cost_usd"))):
                 uncertain.append({"request": attempt["client_request_id"], "started_at": attempt["started_at"]})
         return uncertain
 
-    def review(self, number, approval=None, provider="openai"):
+    def review(self, number, approval=None, provider="openai", new_attempt=False):
         import desktop_review_request as reviewer
 
         def run_worker(run_dir, key, *, settle=False):
@@ -537,6 +563,8 @@ class Workflow:
 
         with locked(self.state / "prs", str(number)):
             run_dir, target, files, _ = self.preflight(number)
+            preliminary = reviewer.packet_for(target, files, provider)
+            run_dir, target = delivery.prepare_review(self, run_dir, target, preliminary, new=new_attempt)
             packet = reviewer.packet_for(target, files, provider)
             path = run_dir / "request.json"
             attempt_path = run_dir / "attempt.json"
@@ -549,7 +577,7 @@ class Workflow:
                     run_worker(run_dir, reviewer.review_key(provider), settle=True)
             else:
                 write(path, packet)
-                preview = {"packet": packet["id"], "target": target, "material": str(path), **reviewer.estimate(packet)}
+                preview = {"packet": packet["id"], "review_id": target.get("review_id"), "target": target, "material": str(path), **reviewer.estimate(packet)}
                 uncertain = self.previous_review_uncertainty(run_dir)
                 if uncertain:
                     preview["prior_usage_pending"] = uncertain
@@ -581,7 +609,7 @@ class Workflow:
             findings = "\n\n".join(
                 f"**{row['title']} · {row['impact']}**\n\n{row['description']}\n\n{self.evidence_text(row)}"
                 for row in issues_result["findings"])
-            body = (f"## 独立审阅 · {receipt['verdict']}\n\n"
+            body = (f"## {target.get('review_id', '独立审阅')} · {receipt['verdict']}\n\n"
                     f"- PR 提交 `{target['head']}`\n- main 基线 `{target['base']}`\n"
                     f"- 审阅服务 `{provider}` · 模型 `{validated['model']}`\n"
                     f"- [GitHub 检查]({target['ci']['url']})\n- 回执摘要 `{receipt['sha256']}`\n\n"
@@ -589,13 +617,14 @@ class Workflow:
             comment = self.ensure_comment(number, run_dir, receipt, body)
             issues = self.advisory_issues(number, run_dir, receipt)
             write(run_dir / "advisories.json", issues)
+            delivery.event(self, target.get("delivery"), "review-returned", evidence=str(receipt_path), review=target.get("review_id"), verdict=receipt["verdict"])
             return {"verdict": receipt["verdict"], "receipt": str(receipt_path), "comment": comment["url"],
                     "blocking": blocking, "issues": issues, "usage": validated["usage"]}
 
     def verify_receipt(self, number, head, base):
         from desktop_review_request import blockers, validate
 
-        run_dir = self.state / "prs" / str(number) / (head + "-" + base)
+        run_dir = delivery.review_directory(self, number, head, base)
         required = [run_dir / (name + ".json") for name in ("receipt", "attempt", "request", "response", "comment")]
         require(all(path.is_file() for path in required), "当前 PR 和 main 缺少脚本发起并登记的独立审阅。")
         receipt, attempt, packet, response, comment = map(read, required)
@@ -630,6 +659,7 @@ class Workflow:
             receipt, comment = self.verify_receipt(number, head, base)
             from collab import open_decisions
             decision = receipt["target"]["decision"]
+            delivery.ensure_current(self, self.task(decision)[1])
             pending = open_decisions(self, decision)
             require(not pending, f"任务 {decision} 还有未答的决定单 {'、'.join(pending)}，先请开发者答复。")
             if pr["draft"]:
@@ -666,6 +696,7 @@ class Workflow:
             else:
                 write(path, result)
         write(journal, result)
+        delivery.event(self, target.get("delivery"), "merged", evidence=str(journal), source=commit_sha, pr=number)
         return result
 
 
@@ -683,6 +714,50 @@ def parse_args():
     new = sub.add_parser("new")
     new.add_argument("--input", required=True)
     new.add_argument("--from-feedback", metavar="F编号", help="从一条已登记的反馈预填来源和发生版本")
+    show = sub.add_parser("show", help="只读查询总号、完整材料号或 dev 反馈视图")
+    show.add_argument("id")
+    revise = sub.add_parser("revise", help="修订草稿；已确认内容变化会创建下一份 D")
+    revise.add_argument("id")
+    revise.add_argument("--input", required=True, help="决策 Markdown 文件")
+    revise.add_argument("--scope", action="append", help="新决策的完整源码范围，可多次指定")
+    reopen = sub.add_parser("reopen", help="同一决策下保留旧执行并重新开发")
+    reopen.add_argument("id")
+    reopen.add_argument("--reason", required=True)
+    migration = sub.add_parser("migrate", help="先预览旧记录归属，核对后追加映射，不改写旧文件")
+    migration.add_argument("--write", help="保存只读归属对照")
+    migration.add_argument("--apply", help="应用已经核对的原对照文件")
+    migration.add_argument("--text", help="核对确认原话，应用时必填")
+    state = sub.add_parser("delivery-state", help="按明确指示登记暂停、恢复或取消")
+    state.add_argument("id")
+    state.add_argument("--status", choices=("active", "paused", "cancelled"), required=True)
+    state.add_argument("--reason", required=True)
+    state.add_argument("--text", required=True)
+    reference = sub.add_parser("link", help="关联已有材料；引用不转移授权")
+    reference.add_argument("id", help="交付总号")
+    reference.add_argument("material")
+    reference.add_argument("--relation", choices=sorted(delivery.RELATIONS), required=True)
+    reference.add_argument("--note", required=True)
+    classify = sub.add_parser("classify", help="纠正反馈对象，保留原号与分类历史")
+    classify.add_argument("id")
+    classify.add_argument("--target", choices=("product", "dev", "unknown"), required=True)
+    classify.add_argument("--reason", required=True)
+    feedback_link = sub.add_parser("feedback-link", help="增补或纠正反馈关联，不改原号")
+    feedback_link.add_argument("id")
+    feedback_link.add_argument("--delivery", required=True)
+    feedback_link.add_argument("--relation", choices=sorted(delivery.RELATIONS), required=True)
+    feedback_link.add_argument("--note", required=True)
+    feedback_link.add_argument("--remove", action="store_true")
+    attachment = sub.add_parser("feedback-attach", help="补充附件并保留时间与来源")
+    attachment.add_argument("id")
+    attachment.add_argument("--attach", action="append", required=True)
+    attachment.add_argument("--source", required=True)
+    resolution = sub.add_parser("feedback-resolve", help="以本交付已通过的实际验收解决旧反馈")
+    resolution.add_argument("id")
+    resolution.add_argument("--acceptance", required=True)
+    accept = sub.add_parser("accept-dev", help="按实际反馈验收不发行安装包的交付")
+    accept.add_argument("id")
+    accept.add_argument("--feedback", required=True)
+    accept.add_argument("--outcome", choices=OUTCOMES, required=True)
     for name in ("check", "start", "rebase", "submit", "close-loop"):
         cmd = sub.add_parser(name)
         cmd.add_argument("id")
@@ -698,6 +773,9 @@ def parse_args():
     ask.add_argument("--input", required=True)
     asks = sub.add_parser("asks", help="列出未答的请求单")
     asks.add_argument("--all", action="store_true", help="包括已答的请求单")
+    cancel = sub.add_parser("cancel-ask", help="撤销请求，保留正文与历史答复")
+    cancel.add_argument("id")
+    cancel.add_argument("--reason", required=True)
     reply = sub.add_parser("answer", help="按原话登记开发者对请求单的回复")
     reply.add_argument("id")
     reply.add_argument("--verdict", required=True, choices=("yes", "no", "other"))
@@ -706,6 +784,14 @@ def parse_args():
     align.add_argument("id")
     feedback = sub.add_parser("feedback", help="登记开发者的体验反馈")
     feedback.add_argument("--attach", action="append", default=[], metavar="PATH")
+    feedback.add_argument("--delivery")
+    feedback.add_argument("--target", choices=("product", "dev", "unknown"), default="unknown")
+    feedback.add_argument("--provider", default="开发者")
+    feedback.add_argument("--subject", help="具体命令、界面、文档或规则")
+    feedback.add_argument("--context", help="实际场景与输出；未提供时明确记为未知")
+    feedback.add_argument("--source")
+    feedback.add_argument("--corrects", help="实质更正原反馈，在原序列分配新号")
+    feedback.add_argument("--related", help="相关交付发生场景；不会改变 dev-F 或 F 编号")
     for cmd in (reply, align, feedback):
         words = cmd.add_mutually_exclusive_group(required=True)
         words.add_argument("--text")
@@ -722,6 +808,7 @@ def parse_args():
     review.add_argument("--pr", type=int, required=True)
     review.add_argument("--provider", choices=("openai", "lmuai"), default="openai")
     review.add_argument("--approval", metavar="A编号", help="开发者已同意的审阅费用授权单")
+    review.add_argument("--new-attempt", action="store_true", help="旧请求核对后准备新的独立审阅 R；重复查询不使用")
     merge = sub.add_parser("merge")
     merge.add_argument("--pr", type=int, required=True)
     release = sub.add_parser("release")
@@ -751,6 +838,32 @@ def main():
         if action == "new":
             request = read(args.input)
             result = collab.new_from_feedback(flow, request, args.from_feedback) if args.from_feedback else flow.new(request)
+        elif action == "show":
+            result = delivery.show(flow, args.id)
+        elif action == "revise":
+            result = delivery.revise(flow, args.id, Path(args.input).read_bytes(), args.scope)
+        elif action == "reopen":
+            directory, _ = flow.task(args.id)
+            result = delivery.revise(flow, args.id, (directory / "decision.md").read_bytes(), restart_reason=args.reason)
+        elif action == "migrate":
+            require(not (args.apply and args.write), "应用与导出预览分开执行。")
+            result = delivery.migrate(flow, read(args.apply), words) if args.apply else delivery.migration_preview(flow)
+            if args.write:
+                write(Path(args.write), result)
+        elif action == "delivery-state":
+            result = delivery.set_state(flow, args.id, args.status, args.reason, words)
+        elif action == "link":
+            result = delivery.reference(flow, args.id, args.material, args.relation, args.note)
+        elif action == "classify":
+            result = collab.delivery_feedback.classify(flow, args.id, args.target, args.reason)
+        elif action == "feedback-link":
+            result = collab.delivery_feedback.link(flow, args.id, args.delivery, args.relation, args.note, args.remove)
+        elif action == "feedback-attach":
+            result = collab.delivery_feedback.add_attachments(flow, args.id, args.attach, args.source)
+        elif action == "feedback-resolve":
+            result = collab.delivery_feedback.resolve_from_acceptance(flow, args.id, args.acceptance)
+        elif action == "accept-dev":
+            result = delivery.accept_dev(flow, args.id, args.feedback, args.outcome)
         elif action == "status":
             result = flow.status()
         elif action == "next":
@@ -762,12 +875,16 @@ def main():
             result = collab.create_ask(flow, read(args.input))
         elif action == "asks":
             result = [row for row in collab.all_asks(flow) if args.all or row["status"] == "open"]
+        elif action == "cancel-ask":
+            result = collab.cancel_ask(flow, args.id, args.reason)
         elif action == "answer":
             result = collab.answer(flow, args.id, args.verdict, words, args.step)
         elif action == "align":
             result = collab.align(flow, args.id, words)
         elif action == "feedback":
-            result = collab.record_feedback(flow, words, args.attach)
+            result = collab.record_feedback(flow, words, args.attach, total=args.delivery, target=args.target,
+                                           provider=args.provider, subject=args.subject, context=args.context,
+                                           source=args.source, corrects=args.corrects, related=args.related)
         elif action == "route":
             result = collab.route(flow, args.id, args.to, args.note)
         elif action == "retire":
@@ -778,7 +895,7 @@ def main():
         elif action == "submit":
             result = flow.submit(args.id, args.body_file)
         elif action == "review":
-            result = flow.review(args.pr, args.approval, args.provider)
+            result = flow.review(args.pr, args.approval, args.provider, args.new_attempt)
         elif action == "merge":
             result = flow.merge(args.pr)
         elif action == "release":

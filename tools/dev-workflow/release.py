@@ -126,6 +126,8 @@ def prepare(flow, directory, version, merge):
                "build_manifest_sha256": digest((directory / "build-manifest.json").read_bytes()),
                "npm_dry_run_sha256": digest((directory / "npm-dry-run.json").read_bytes()),
                "dependency_lock_sha256": digest((directory / "dependency-lock.json").read_bytes())}
+    if target.get("delivery"):
+        receipt["release_notes"] += f"\n\n[交付 {target['delivery']}] · PR #{target['pr']}"
     write(directory / "release.json", receipt)
     return receipt
 
@@ -205,10 +207,13 @@ def verify_isolated(path, receipt):
 
 
 def release(flow, version, local_only, finalize, isolated):
+    import delivery
     with locked(flow.state, "main"):
         merged = flow.state / "merges" / f"{version}.json"
         require(merged.is_file(), "此版本尚无已确认的受管 main 合入。")
         merge = read(merged)
+        if merge["target"].get("delivery"):
+            delivery.ensure_current(flow, flow.task(merge["target"]["decision"])[1])
         require(merge["phase"] == "confirmed" and flow.repo.main() == merge["source"],
                 "发行使用经过受管合入的当前 main。")
         directory = flow.state / "releases" / version
@@ -218,6 +223,7 @@ def release(flow, version, local_only, finalize, isolated):
                 "既有发行回执与当前合入不一致。")
         verify_release(directory, receipt)
         result = {"record": str(path), **receipt}
+        delivery.event(flow, merge["target"].get("delivery"), "release-prepared", evidence=str(path), version=version)
         if local_only:
             return result
         require(flow.repo.main() == merge["source"], "GitHub 发行前 main 已变化。")
@@ -234,6 +240,8 @@ def release(flow, version, local_only, finalize, isolated):
             result["github"] = ensure_github_release(flow, directory, receipt)
             require(result["github"]["phase"] == "published", "GitHub Release 公开状态尚未确认。")
             write(journal, result["github"])
+        delivery.event(flow, merge["target"].get("delivery"), "release-checked", evidence=str(directory / "github.json"),
+                       version=version, published=result["github"]["phase"] == "published")
         return result
 
 

@@ -14,14 +14,17 @@ from pathlib import Path
 import re
 import shutil
 
+import delivery
+import delivery_feedback
+
 from common import WorkflowError, digest, git_line, locked, read, require, timestamp, write
 from workflow import ID, OUTCOMES, SHA, VERSION, actor, text_field
 
 HERE = Path(__file__).resolve().parent
 ASK_KINDS = {"approve": "授权单", "decide": "决定单", "act": "操作单"}
 VERDICTS = ("yes", "no", "other")
-ASK_ID = re.compile(r"A[1-9][0-9]{0,5}")
-FEEDBACK_ID = re.compile(r"F[1-9][0-9]{0,5}")
+ASK_ID = delivery.ASK
+FEEDBACK_ID = delivery.FEEDBACK
 DIGEST = re.compile(r"[a-f0-9]{64}")
 ROUTE = re.compile(rf"(close-loop|new):({ID})|issue:[1-9][0-9]*|note")
 BINDS = {"packet", "pr", "repo", "cap_usd", "packages", "files", "version", "commit"}
@@ -31,6 +34,7 @@ MARK_START = "<!-- arcfold-next:start -->"
 MARK_END = "<!-- arcfold-next:end -->"
 SKIP_DIRS = {"workspaces", "source", "cache", "node_modules", ".git"}
 IN_FLIGHT = {
+    "migration-attempt.json": ({"applying"}, "编号迁移，使用已核对的同一对照恢复"),
     "submit.json": ({"pushing", "creating"}, "推送分支或创建 PR"),
     "comment.json": ({"posting"}, "写 PR 审阅评论"),
     "merge-attempt.json": ({"marking-ready", "merging"}, "合入 PR"),
@@ -75,23 +79,42 @@ def asks_dir(flow):
 
 
 def load_ask(flow, ask):
-    require(isinstance(ask, str) and ASK_ID.fullmatch(ask), "请求单编号形如 A3。")
-    path = asks_dir(flow) / f"{ask}.json"
+    require(isinstance(ask, str) and ASK_ID.fullmatch(ask), "请求单编号形如 001-A3；旧 A3 仍可查询。")
+    mapping = delivery.mappings(flow).get("materials", {}).get(ask)
+    path = flow.state / mapping["path"] if mapping else asks_dir(flow) / f"{ask}.json"
     require(path.is_file(), f"没有请求单 {ask}。")
-    return path, read(path)
+    row = read(path)
+    if mapping:
+        row = {**row, "reference": ask, "delivery": mapping["delivery"]}
+    if row.get("task") and not row.get("delivery"):
+        try:
+            row["delivery"] = delivery.owner(flow, row["task"])
+        except WorkflowError:
+            row["association_note"] = "原任务记录不存在，待核对归属"
+    references = {ask, row["id"], row.get("reference")}
+    replacements = [read(p) for p in asks_dir(flow).glob("*.json") if ASK_ID.fullmatch(p.stem)]
+    superseding = [r["id"] for r in replacements if r.get("supersedes") and r["supersedes"] in references]
+    if superseding:
+        row.update(status="superseded", superseded_by=superseding)
+    return path, row
 
 
 def all_asks(flow):
     directory = asks_dir(flow)
-    if not directory.is_dir():
-        return []
-    rows = [read(path) for path in directory.glob("A*.json") if ASK_ID.fullmatch(path.stem)]
-    return sorted(rows, key=lambda row: int(row["id"][1:]))
+    rows = [load_ask(flow, path.stem)[1] for path in directory.glob("*.json") if ASK_ID.fullmatch(path.stem)]
+    reverse = {value["legacy"]: key for key, value in delivery.mappings(flow).get("materials", {}).items()}
+    for row in rows:
+        if row["id"] in reverse:
+            row["reference"] = reverse[row["id"]]
+    return sorted(rows, key=lambda row: (row.get("created_at", ""), row["id"]))
 
 
 def open_decisions(flow, key):
-    return [row["id"] for row in all_asks(flow)
-            if row["kind"] == "decide" and row.get("task") == key and row["status"] == "open"]
+    _, task = flow.task(key)
+    total = task.get("delivery")
+    return [row.get("reference", row["id"]) for row in all_asks(flow)
+            if row["kind"] == "decide" and (row.get("delivery") == total if total else row.get("task") == task["id"])
+            and row["status"] == "open"]
 
 
 def digests(value, label):
@@ -132,7 +155,7 @@ def suggested_replies(ask, kind, steps):
     if kind == "decide":
         return [f"{ask} 选……", f"{ask} 按你建议"]
     if steps:
-        return [f"{ask}.{index} 好了" for index in range(1, len(steps) + 1)]
+        return [f"{ask} 的第 {index} 步好了" for index in range(1, len(steps) + 1)]
     return [f"{ask} 做完了，再说看到的结果"]
 
 
@@ -143,9 +166,21 @@ def create_ask(flow, request):
     title = text_field(request.get("title"), "请求单标题")
     require("\n" not in title, "请求单标题使用一行。")
     body = text_field(request.get("body"), "请求单说明")
-    key = request.get("task")
-    if key is not None:
-        flow.task(key)
+    key = request.get("delivery") or request.get("task")
+    require(key is not None, "新请求单须指定所属交付；先 new 或核对旧任务迁移。")
+    _, task = flow.task(key)
+    key = task["id"]
+    total = task.get("delivery")
+    require(total, "旧任务先核对迁移对照，再为所属交付创建新请求单。")
+    supersedes = request.get("supersedes")
+    previous = load_ask(flow, supersedes) if supersedes else None
+    if previous:
+        require((previous[1].get("delivery") == total if total else previous[1].get("task") == key),
+                "请求只能取代本次交付的请求；跨交付引用不转移授权。")
+    references = request.get("references", [])
+    require(isinstance(references, list), "关联材料须使用完整编号列表。")
+    for ref in references:
+        delivery.show(flow, ref)
     binds = request.get("binds") or {}
     if kind == "approve":
         validate_binds(flow, binds)
@@ -160,11 +195,19 @@ def create_ask(flow, request):
         lists[field] = [row.strip() for row in values]
     directory = asks_dir(flow)
     with locked(directory, "numbering"):
-        ask = f"A{next_number([path.stem for path in directory.glob('A*.json')], 'A')}"
-        record = {"id": ask, "kind": kind, "title": title, "body": body, "task": key, "binds": binds, **lists,
+        ask = delivery.allocate(flow, total + "-A")
+        record = {"id": ask, "kind": kind, "title": f"[{ask}] {title}", "body": body, "task": key, "delivery": total, "binds": binds, **lists,
+                  "references": references, "supersedes": supersedes, **delivery.provenance(request.get("source", "developer request")),
                   "replies": suggested_replies(ask, kind, lists["steps"]), "status": "open",
                   "created_at": timestamp(), "created_by": actor(), "answers": []}
         write(directory / f"{ask}.json", record)
+        if total:
+            delivery.complete(flow, ask, directory / f"{ask}.json")
+        if previous:
+            old = read(previous[0])
+            old.update(status="superseded", superseded_by=ask)
+            write(previous[0], old)
+        delivery.event(flow, total, "asked", evidence=str(directory / f"{ask}.json"), ask=ask)
     return record
 
 
@@ -172,9 +215,10 @@ def answer(flow, ask, verdict, text, step=None):
     require(verdict in VERDICTS, "答复标注为 yes、no 或 other。")
     words = text_field(text, "开发者的原话")
     with locked(asks_dir(flow), "answers"):
-        path, record = load_ask(flow, ask)
+        path, metadata = load_ask(flow, ask)
+        record = read(path)
         require(record["status"] == "open", f"{ask} 已经答过。情况变了就另开一张。")
-        row = {"verdict": verdict, "text": words, "at": timestamp(), "recorded_by": actor()}
+        row = {"verdict": verdict, "text": text, "at": timestamp(), "author": "开发者", "recorded_by": actor(), "source": ask}
         if step is not None:
             steps = record.get("steps") or []
             require(record["kind"] == "act" and steps, f"{ask} 没有分步骤。")
@@ -193,11 +237,25 @@ def answer(flow, ask, verdict, text, step=None):
         if record["status"] == "answered":
             record["answered_at"] = row["at"]
         write(path, record)
+        delivery.event(flow, metadata.get("delivery"), "answered", evidence=str(path), ask=ask, verdict=verdict)
     return record
 
 
 def granted(record):
     return record["kind"] == "approve" and record["status"] == "answered" and record["answers"][-1]["verdict"] == "yes"
+
+
+def cancel_ask(flow, ask, reason):
+    text_field(reason, "撤销请求的原因")
+    with locked(asks_dir(flow), "answers"):
+        path, current = load_ask(flow, ask)
+        require(current["status"] not in ("cancelled", "superseded"), "请求已撤销或被取代。")
+        record = read(path)
+        record["status"] = "cancelled"
+        record["cancellation"] = {"reason": reason, **delivery.provenance(ask)}
+        write(path, record)
+        delivery.event(flow, current.get("delivery"), "ask-cancelled", ask=ask, reason=reason, evidence=str(path))
+        return record
 
 
 def review_spent(flow, number):
@@ -279,12 +337,14 @@ def align(flow, key, text):
     with locked(directory, "task"):
         _, record = flow.task(key)
         require(record["phase"] == "draft", "任务已经启动，决策已冻结。方案要变时另开任务。")
+        delivery.ensure_current(flow, record)
         note = flow.check(key)
         path = directory / "alignment.json"
-        result = {"decision_sha256": note["sha256"], "text": words, "at": timestamp(), "recorded_by": actor()}
+        result = {"decision_sha256": note["sha256"], "text": text, "at": timestamp(), "author": "开发者", "recorded_by": actor(), "source": record.get("decision_id", key)}
         if path.is_file():
             previous = read(path)
             result["previous"] = [*previous.pop("previous", []), previous]
+        delivery.freeze(flow, record, (directory / "decision.md").read_bytes(), result)
         write(path, result)
     return {"task": key, **result}
 
@@ -296,80 +356,39 @@ def feedback_dir(flow):
 
 
 def load_feedback(flow, item):
-    require(isinstance(item, str) and FEEDBACK_ID.fullmatch(item), "反馈编号形如 F3。")
-    path = feedback_dir(flow) / item / "feedback.json"
-    require(path.is_file(), f"没有反馈 {item}。")
-    return path, read(path)
+    return delivery_feedback.load(flow, item)
 
 
-def record_feedback(flow, text, attachments=()):
-    words = text_field(text, "反馈内容")
-    sources = [Path(name).expanduser() for name in attachments]
-    for source in sources:
-        require(source.is_file(), f"找不到附件 {source.name}。")
-    root = feedback_dir(flow)
-    with locked(root, "numbering"):
-        item = f"F{next_number([path.name for path in root.iterdir() if path.is_dir()], 'F')}"
-        directory = root / item
-        files = []
-        for index, source in enumerate(sources, 1):
-            name = f"{index:02d}-{source.name}"
-            target = directory / "attachments" / name
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            shutil.copyfile(source, target)
-            data = target.read_bytes()
-            files.append({"file": name, "sha256": digest(data), "bytes": len(data)})
-        record = {"id": item, "text": words, "at": timestamp(), "recorded_by": actor(), "daily": daily_version(),
-                  "attachments": files, "routes": []}
-        write(directory / "feedback.json", record)
-    return record
+def record_feedback(flow, text, attachments=(), **options):
+    return delivery_feedback.record(flow, text, attachments, **options)
 
 
 def route(flow, item, to, note=None):
-    match = ROUTE.fullmatch(to or "")
-    require(match, "去向写成 close-loop:任务、new:任务、issue:编号 或 note。")
-    if match[2]:
-        flow.task(match[2])
-    note = note.strip() if isinstance(note, str) else ""
-    require(to != "note" or note, "只记录不处理时，写明原因。")
-    with locked(feedback_dir(flow), "routes"):
-        path, record = load_feedback(flow, item)
-        require(all(row["to"] != to for row in record["routes"]), f"{item} 已经记过去向 {to}。")
-        row = {"to": to, "at": timestamp(), "recorded_by": actor()}
-        if note:
-            row["note"] = note
-        record["routes"].append(row)
-        write(path, record)
-    return record
+    return delivery_feedback.route(flow, item, to, note)
 
 
 def new_from_feedback(flow, request, item):
     _, record = load_feedback(flow, item)
     request = dict(request)
-    # The decision is committed to the repository. Keep the developer's words in the local
-    # feedback record and let the Agent write the reviewed summary in the decision.
     request.setdefault("authorization_ref", f"开发者反馈 {item}（{record['at']} 登记）")
     if not request.get("observed_in_version"):
-        version = record["daily"]["packages"].get(PACKAGES[0])
-        require(version and version != "unknown", f"{item} 没有读到日常版本，请在输入里写明 observed_in_version。")
-        request["observed_in_version"] = version
+        if record["target"] == "dev":
+            version = record.get("version", {})
+            request["observed_in_version"] = "dev " + (version.get("commit") or "unknown")
+            if version.get("commit") in (None, "unknown"):
+                request["observed_in_version"] += "；" + version.get("reason", "原反馈未记录 dev 源码")
+            elif version.get("dirty"):
+                request["observed_in_version"] += "; working files sha256:" + digest(version.get("files", {}))
+        else:
+            version = record.get("daily", {}).get("packages", {}).get(PACKAGES[0])
+            request["observed_in_version"] = version or "unknown（反馈未记录产品安装版本）"
     result = flow.new(request)
-    route(flow, item, "new:" + request["id"])
+    route(flow, item, "new:" + result["id"])
     return {**result, "feedback": item}
 
 
 def unrouted_feedback(flow):
-    root = feedback_dir(flow)
-    rows = []
-    if root.is_dir():
-        paths = [path for path in root.glob("F*/feedback.json") if FEEDBACK_ID.fullmatch(path.parent.name)]
-        for path in sorted(paths, key=lambda row: int(row.parent.name[1:])):
-            record = read(path)
-            if not record["routes"]:
-                summary = record["text"].strip().splitlines()[0][:120]
-                rows.append({"id": record["id"], "at": record["at"], "summary": summary,
-                             "daily": record["daily"]["packages"]})
-    return rows
+    return delivery_feedback.summaries(flow)
 
 
 # Retirement -----------------------------------------------------------------
@@ -476,7 +495,7 @@ class Row:
         self.mine = mine
 
     def __call__(self, stage, step, waiting, closed=False, **extra):
-        return {"id": self.task["id"], "title": self.task.get("title"), "stage": stage, "next": step,
+        return {"id": self.task.get("delivery", self.task["id"]), "task": self.task["id"], "title": self.task.get("title"), "stage": stage, "next": step,
                 "waiting_on": waiting, "closed": closed, "asks": [row["id"] for row in self.mine], **extra}
 
     def wait(self, agent_step, murphy_step):
@@ -488,6 +507,10 @@ class Row:
 def review_progress(flow, run, number, row):
     extra = {"pr": number}
     if (run / "receipt.json").is_file():
+        if row.task.get("delivery"):
+            linked = [r for r in delivery.reviews(flow, row.task["delivery"]) if flow.state / r["run"] == run]
+            if linked and delivery.review_view(flow, linked[-1])["conclusion"] is None:
+                return row("D4", f"PR #{number} 的独立报告与固定材料尚未核对通过", "核对", **extra)
         receipt = read(run / "receipt.json")
         if receipt.get("verdict") == "pass":
             if load_json(run / "comment.json").get("phase") != "confirmed":
@@ -520,6 +543,14 @@ def review_progress(flow, run, number, row):
 def after_merge(flow, directory, merge, number, row):
     release = (merge.get("target") or {}).get("release")
     if not release:
+        if row.task.get("delivery"):
+            observations = [read(p) for p in (directory / "observations").glob("*.json")]
+            latest = max(observations, key=delivery.observation_order, default={})
+            outcome = latest.get("outcome", "unconfirmed")
+            passed = outcome == "pass"
+            step = "已通过开发者的实际入口验收" if passed else "已合入，待实际使用入口并用 accept-dev 登记验收"
+            return row("D6", step, "无" if passed else "开发者", closed=passed, pr=number,
+                       published=False, accepted=passed, outcome=outcome)
         return row("D5", f"已合入 main（{merge.get('source', '')[:7]}），不涉及发行", "无", closed=True, pr=number)
     version = release["version"]
     folder = flow.state / "releases" / version
@@ -540,7 +571,7 @@ def after_merge(flow, directory, merge, number, row):
         step, who = row.wait(f"{version} 已在 GitHub 发行，待 npm 发布（需授权单和通行密钥）", "等开发者答复")
         return row("D5", step, who, **extra)
     observations = sorted((read(path) for path in (directory / "observations").glob("*.json")),
-                          key=lambda item: item.get("at", ""))
+                          key=delivery.observation_order)
     if not observations:
         step, who = row.wait(f"{version} 已上架 npm，开日常更新操作单", "等开发者在日常 DSH 更新并回报")
         return row("D6", step, who, **extra)
@@ -555,7 +586,11 @@ def after_merge(flow, directory, merge, number, row):
 
 def task_progress(flow, directory, task, open_asks):
     key = task["id"]
-    row = Row(task, [item for item in open_asks if item.get("task") == key])
+    row = Row(task, [item for item in open_asks if (item.get("delivery") == task["delivery"] if task.get("delivery") else item.get("task") == key)])
+    if task.get("delivery"):
+        state = delivery.delivery_state(flow, task["delivery"])
+        if state["status"] != "active":
+            return row(state["status"], state["reason"], "开发者", closed=False)
     if (directory / "retired.json").is_file():
         info = read(directory / "retired.json")
         return row("retired", "已退场：" + info["reason"], "无", closed=True, reason=info["reason"],
@@ -590,13 +625,13 @@ def task_progress(flow, directory, task, open_asks):
     head = local_head(task)
     if head and head != submit["head"]:
         return row("D3", f"独立目录有 PR #{number} 之后的新提交，待重新 submit", "Agent", pr=number)
-    return review_progress(flow, flow.state / "prs" / str(number) / f"{submit['head']}-{submit['base']}", number, row)
+    return review_progress(flow, delivery.review_directory(flow, number, submit["head"], submit["base"]), number, row)
 
 
 def ask_summary(record):
     steps = record.get("steps") or []
     done = len({item["step"] for item in record["answers"] if "step" in item})
-    summary = {"id": record["id"], "kind": ASK_KINDS[record["kind"]], "title": record["title"],
+    summary = {"id": record.get("reference", record["id"]), "kind": ASK_KINDS[record["kind"]], "title": record["title"],
                "task": record.get("task"), "replies": record["replies"]}
     if steps:
         summary["steps_done"] = f"{done}/{len(steps)}"
@@ -636,11 +671,23 @@ def progress(flow, remote=False):
     open_asks = [row for row in all_asks(flow) if row["status"] == "open"]
     tasks, retired = [], []
     for path in sorted((flow.state / "tasks").glob("*/task.json")):
-        row = task_progress(flow, path.parent, read(path), open_asks)
+        task = delivery.task_metadata(flow, read(path))
+        if task.get("delivery"):
+            try:
+                master = delivery.load(flow, task["delivery"])[1]
+            except WorkflowError:
+                tasks.append(Row(task, [])("D2", "交付登记未完成，先核对预留编号与原写入", "核对"))
+                continue
+            if master["task"] != task["id"]:
+                continue
+        row = task_progress(flow, path.parent, task, open_asks)
         (retired if row["stage"] == "retired" else tasks).append(row)
     result = {"repo": flow.repo.name, "daily": daily_version(), "tasks": tasks,
               "asks": [ask_summary(row) for row in open_asks], "feedback": unrouted_feedback(flow),
-              "pending_writes": pending_writes(flow.state), "retired": retired}
+              "pending_writes": pending_writes(flow.state), "retired": retired,
+              "incomplete_records": delivery.reservations(flow),
+              "unassigned_feedback": [r for r in delivery_feedback.summaries(flow, pending=False) if not r["links"]],
+              "dev_feedback": delivery_feedback.summaries(flow, pending=False, target="dev")}
     if remote:
         result["remote"] = remote_facts(flow, tasks)
     return result
@@ -664,7 +711,7 @@ def render(result):
         ("等开发者回复的请求单", [f"{row['id']} {row['kind']}：{row['title']}" for row in result["asks"]]),
         ("结果未知的写入，先核对", [f"{row['file']}：{row['what']}（{row['field']} = {row['phase']}）"
                                   for row in result["pending_writes"]]),
-        ("还没有去向的反馈", [f"{row['id']}（{row['at']}）：{row['summary']}" for row in result["feedback"]]),
+        ("待处理反馈（关联交付不等于解决）", [f"{row['id']}（{row['at']}）：{row['summary']}" for row in result["feedback"]]),
         ("已退场的任务", [f"{row['id']}：{row['reason']}" + (f"（由 {row['replaced_by']} 取代）" if row["replaced_by"] else "")
                          for row in result["retired"]]),
     )

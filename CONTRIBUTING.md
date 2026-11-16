@@ -2,6 +2,8 @@
 
 先用 Issue 说明实际场景与预期，再在独立分支修改；提交 Pull Request 时按照“动机、改动、测试、AI 参与”说明。故障、功能和普通任务分别使用仓库提供的模板。
 
+受管交付从 `tools/dev-workflow/Arcfold-DSH-Development next` 开始，按[入口规则](tools/dev-workflow/AGENTS.md)登记、确认、开发和提交。一个交付总号串起 F 反馈、D 决策、A 请求及 R 独立报告；用 `show 总号` 查看全过程。编号、修订、反馈关联及旧记录迁移见[操作说明](tools/dev-workflow/delivery-numbering.md)。工作流离线检查使用 `python3 -B -m unittest discover -s tools/dev-workflow -v`，包含本地 Git 演练，不调用付费模型。
+
 不要在仓库、日志、截图或问题记录中放入密钥、私人对话、用户文件或真实请求内容。测试使用独立目录、合成材料和模拟模型；真实付费模型请求必须先有明确授权，不自动重发结果未知的请求。
 
 Desktop 专项检查使用 macOS Apple Silicon、Node.js 24.15 和 Python 3.12。先按锁定文件安装依赖并禁用安装脚本，再将 `ARCFOLD_PATCH_TEST_INSTALLATION` 指向该依赖目录、`ARCFOLD_TREE_ENCODING_PYTHON` 指向 Python 可执行文件，运行 `node scripts/test-isolated.mjs test/desktop-adapter.test.mjs test/desktop-configuration.test.mjs test/desktop-setup.test.mjs test/desktop-tree-integration.test.mjs`。脚本只在独立副本装配依赖并运行模拟检查。完整检查还需要项目维护的冻结资源与不公开的历史测试材料；缺少这些材料时，应记录未运行的范围，不能将专项通过称为完整通过。

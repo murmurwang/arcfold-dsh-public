@@ -9,6 +9,7 @@ from collab import (
     MARK_START, align, answer, create_ask, load_ask, load_feedback, new_from_feedback, progress, record_feedback,
     render, retire, review_approval, route, write_section,
 )
+import delivery
 from common import WorkflowError, digest, read, write
 from workflow import SECTIONS, Workflow, decision_note, parse_args
 
@@ -83,67 +84,75 @@ class CollabTests(unittest.TestCase):
 
     def test_start_requires_alignment_with_the_current_decision_and_no_open_decisions(self):
         decision = self.register()
+        original = decision.read_bytes()
         with self.assertRaisesRegex(WorkflowError, "对齐"):
-            self.flow.start("sample-task")
-        align(self.flow, "sample-task", "决策对齐了")
-        decision.write_text(decision.read_text().replace("具体内容", "改过的内容", 1))
+            self.flow.start("001")
+        align(self.flow, "001", "决策对齐了")
+        changed = original.replace("具体内容".encode(), "改过的内容".encode(), 1)
+        decision.write_bytes(changed)
         with self.assertRaisesRegex(WorkflowError, "重新确认"):
-            self.flow.start("sample-task")
-        aligned = align(self.flow, "sample-task", "改过的也对齐了")
-        self.assertEqual(aligned["previous"][0]["text"], "决策对齐了")
-        ask = create_ask(self.flow, {"kind": "decide", "title": "进度怎么显示", "body": "两种方式的实际后果", "task": "sample-task",
-                                     "options": ["显示下载进度", "提前放进缓存"]})
+            self.flow.start("001")
+        with self.assertRaisesRegex(WorkflowError, "revise"):
+            align(self.flow, "001", "不能覆盖旧确认")
+        revision = delivery.revise(self.flow, "001", changed)
+        self.assertEqual(revision["decision_id"], "001-D2")
+        self.assertEqual(delivery.show(self.flow, "001-D1")["body"].encode(), original)
+        align(self.flow, "001", "改过的也对齐了")
+        ask = create_ask(self.flow, {"delivery": "001", "kind": "decide", "title": "进度怎么显示",
+                                     "body": "两种方式的实际后果", "options": ["显示下载进度", "提前放进缓存"]})
         with self.assertRaisesRegex(WorkflowError, "决定单"):
-            self.flow.start("sample-task")
+            self.flow.start("001")
         self.repo.main.assert_not_called()
         self.repo.fetch.assert_not_called()
         self.assertEqual(progress(self.flow)["tasks"][0]["waiting_on"], "开发者")
         answer(self.flow, ask["id"], "other", "选显示下载进度")
         with self.assertRaises((WorkflowError, OSError)):
-            self.flow.start("sample-task")
+            self.flow.start("001")
         self.repo.main.assert_called()
         with self.assertRaisesRegex(WorkflowError, "冻结"):
-            align(self.flow, "sample-task", "再对齐一次")
+            align(self.flow, "001", "再对齐一次")
 
     def test_answer_refuses_missing_and_already_answered_requests(self):
-        ask = create_ask(self.flow, {"kind": "approve", "title": "PR #5 的审阅费用", "body": "估算 0.26 美元",
+        self.register()
+        ask = create_ask(self.flow, {"delivery": "001", "kind": "approve", "title": "PR #5 的审阅费用", "body": "估算 0.26 美元",
                                      "binds": {"packet": "a" * 64}})
-        self.assertEqual((ask["id"], ask["replies"]), ("A1", ["批准 A1", "不批准 A1"]))
-        with self.assertRaisesRegex(WorkflowError, "没有请求单 A9"):
-            answer(self.flow, "A9", "yes", "批准 A9")
-        self.assertEqual(answer(self.flow, "A1", "other", "等我看看")["status"], "open")
-        self.assertEqual(answer(self.flow, "A1", "yes", "批准 A1")["status"], "answered")
+        self.assertEqual((ask["id"], ask["replies"]), ("001-A1", ["批准 001-A1", "不批准 001-A1"]))
+        with self.assertRaisesRegex(WorkflowError, "没有请求单 001-A9"):
+            answer(self.flow, "001-A9", "yes", "批准 001-A9")
+        self.assertEqual(answer(self.flow, "001-A1", "other", "等我看看")["status"], "open")
+        self.assertEqual(answer(self.flow, "001-A1", "yes", "批准 001-A1")["status"], "answered")
         with self.assertRaisesRegex(WorkflowError, "已经答过"):
-            answer(self.flow, "A1", "no", "不批准 A1")
+            answer(self.flow, "001-A1", "no", "不批准 001-A1")
         with self.assertRaisesRegex(WorkflowError, "绑定"):
-            create_ask(self.flow, {"kind": "approve", "title": "没有对象", "body": "缺少绑定"})
+            create_ask(self.flow, {"delivery": "001", "kind": "approve", "title": "没有对象", "body": "缺少绑定"})
         plan = self.root / "plan.json"
         plan.write_text("{}")
         with self.assertRaisesRegex(WorkflowError, "不一致"):
-            create_ask(self.flow, {"kind": "approve", "title": "写入日常缓存", "body": "按计划",
+            create_ask(self.flow, {"delivery": "001", "kind": "approve", "title": "写入日常缓存", "body": "按计划",
                                    "binds": {"files": {str(plan): "0" * 64}}})
-        steps = create_ask(self.flow, {"kind": "act", "title": "隔离验收", "body": "按步骤操作", "steps": ["切换账户", "安装插件"]})
-        self.assertEqual(steps["replies"], ["A2.1 好了", "A2.2 好了"])
-        answer(self.flow, "A2", "yes", "A2.1 好了", step=1)
+        steps = create_ask(self.flow, {"delivery": "001", "kind": "act", "title": "隔离验收", "body": "按步骤操作", "steps": ["切换账户", "安装插件"]})
+        self.assertEqual(steps["replies"], ["001-A2 的第 1 步好了", "001-A2 的第 2 步好了"])
+        answer(self.flow, "001-A2", "yes", "001-A2.1 好了", step=1)
         with self.assertRaisesRegex(WorkflowError, "已经答过"):
-            answer(self.flow, "A2", "yes", "A2.1 又好了", step=1)
-        self.assertEqual(answer(self.flow, "A2", "yes", "A2.2 好了", step=2)["status"], "answered")
+            answer(self.flow, "001-A2", "yes", "001-A2.1 又好了", step=1)
+        self.assertEqual(answer(self.flow, "001-A2", "yes", "001-A2.2 好了", step=2)["status"], "answered")
 
     def test_review_approval_must_match_the_material_or_stay_under_the_pr_cap(self):
+        self.register()
         packet, estimate = "b" * 64, {"estimated_usd_at_output_limit": "0.20"}
         with self.assertRaisesRegex(WorkflowError, "没有请求单"):
-            review_approval(self.flow, "A1", 5, packet, estimate)
-        exact = create_ask(self.flow, {"kind": "approve", "title": "审阅", "body": "估算", "binds": {"packet": packet}})
+            review_approval(self.flow, "001-A1", 5, packet, estimate)
+        exact = create_ask(self.flow, {"delivery": "001", "kind": "approve", "title": "审阅", "body": "估算", "binds": {"packet": packet}})
         with self.assertRaisesRegex(WorkflowError, "还没有"):
             review_approval(self.flow, exact["id"], 5, packet, estimate)
         answer(self.flow, exact["id"], "no", "不批准")
         with self.assertRaisesRegex(WorkflowError, "没有获得同意"):
             review_approval(self.flow, exact["id"], 5, packet, estimate)
-        other = create_ask(self.flow, {"kind": "approve", "title": "审阅", "body": "估算", "binds": {"packet": "c" * 64}})
+        other = create_ask(self.flow, {"delivery": "001", "kind": "approve", "title": "审阅", "body": "估算", "binds": {"packet": "c" * 64}})
         answer(self.flow, other["id"], "yes", "批准")
         with self.assertRaisesRegex(WorkflowError, "另一份"):
             review_approval(self.flow, other["id"], 5, packet, estimate)
-        capped = create_ask(self.flow, {"kind": "approve", "title": "PR #5 审阅累计", "body": "累计不超过 0.40 美元",
+        capped = create_ask(self.flow, {"delivery": "001", "kind": "approve", "title": "PR #5 审阅累计", "body": "累计不超过 0.40 美元",
                                         "binds": {"pr": 5, "cap_usd": "0.40"}})
         answer(self.flow, capped["id"], "yes", "PR #5 的审阅累计批到 0.4 美元")
         write(self.flow.state / "prs" / "5" / "old" / "response.json", {"billing": {"actual_cost_usd": "0.30"}, "response": {}})
@@ -155,8 +164,9 @@ class CollabTests(unittest.TestCase):
             review_approval(self.flow, capped["id"], 6, packet, estimate)
 
     def test_pr_cap_counts_every_earlier_request_and_refuses_unknown_spending(self):
+        self.register()
         packet, estimate = "b" * 64, {"estimated_usd_at_output_limit": "0.05"}
-        capped = create_ask(self.flow, {"kind": "approve", "title": "PR #5 审阅累计", "body": "累计不超过 1 美元",
+        capped = create_ask(self.flow, {"delivery": "001", "kind": "approve", "title": "PR #5 审阅累计", "body": "累计不超过 1 美元",
                                         "binds": {"pr": 5, "cap_usd": "1.00"}})
         answer(self.flow, capped["id"], "yes", "PR #5 的审阅累计批到 1 美元")
         prs = self.flow.state / "prs" / "5"
@@ -191,9 +201,10 @@ class CollabTests(unittest.TestCase):
             review_approval(self.flow, capped["id"], 5, packet, estimate)
 
     def test_review_without_a_granted_request_never_launches_the_reviewer(self):
+        self.register()
         run_dir = self.flow.state / "prs" / "5" / (HEAD + "-" + BASE)
         target = {"repo": REPO, "pr": 5, "head": HEAD, "base": BASE}
-        ask = create_ask(self.flow, {"kind": "approve", "title": "审阅", "body": "估算", "binds": {"packet": "d" * 64}})
+        ask = create_ask(self.flow, {"delivery": "001", "kind": "approve", "title": "审阅", "body": "估算", "binds": {"packet": "d" * 64}})
         with patch.object(Workflow, "preflight", return_value=(run_dir, target, {"src/a.mjs": "export {};\n"}, None)), \
                 patch("workflow.command") as launch:
             self.assertIn("estimated_usd_at_output_limit", self.flow.review(5))
@@ -219,7 +230,7 @@ class CollabTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkflowError, "去向"):
             route(self.flow, item["id"], "somewhere")
         route(self.flow, item["id"], "issue:7")
-        self.assertEqual(progress(self.flow)["feedback"], [])
+        self.assertEqual([r["id"] for r in progress(self.flow)["feedback"]], [item["id"]])
         with self.assertRaisesRegex(WorkflowError, "已经记过"):
             route(self.flow, item["id"], "issue:7")
         shutil.rmtree(self.profile)
@@ -230,10 +241,10 @@ class CollabTests(unittest.TestCase):
         item = record_feedback(self.flow, "更新时看不出进度")
         result = new_from_feedback(self.flow, {"id": "slow-update", "title": "更新时看不出进度", "scope": ["src/"]}, item["id"])
         text = Path(result["decision"]).read_text()
-        self.assertTrue(text.startswith("# 决策：更新时看不出进度\n"))
+        self.assertTrue(text.startswith("# 决策：[001-D1] 更新时看不出进度\n"))
         self.assertIn("observed_in_version: 0.4.0", text)
         self.assertIn(item["id"], text)
-        self.assertEqual([row["to"] for row in load_feedback(self.flow, item["id"])[1]["routes"]], ["new:slow-update"])
+        self.assertEqual([row["to"] for row in load_feedback(self.flow, item["id"])[1]["routes"]], ["new:001"])
 
     def test_close_loop_requires_an_outcome_and_records_it(self):
         decision = self.register()
@@ -266,7 +277,7 @@ class CollabTests(unittest.TestCase):
         self.register("second-task")
         retire(self.flow, "first-task", "被 second-task 取代", "second-task")
         result = progress(self.flow)
-        self.assertEqual([row["id"] for row in result["tasks"]], ["second-task"])
+        self.assertEqual([row["id"] for row in result["tasks"]], ["002"])
         self.assertEqual(result["tasks"][0]["next"], "决策已写完，等开发者读完全文后确认对齐")
         self.assertEqual(result["retired"][0]["replaced_by"], "second-task")
         with self.assertRaisesRegex(WorkflowError, "已经退场"):
@@ -274,12 +285,12 @@ class CollabTests(unittest.TestCase):
 
     def test_merge_refuses_while_the_task_has_an_open_decision(self):
         self.register()
-        create_ask(self.flow, {"kind": "decide", "title": "要不要改范围", "body": "两种后果", "task": "sample-task"})
+        create_ask(self.flow, {"delivery": "001", "kind": "decide", "title": "要不要改范围", "body": "两种后果", "task": "sample-task"})
         self.repo.pr.return_value = {"state": "open", "draft": False, "head": {"sha": HEAD},
                                      "base": {"sha": BASE, "ref": "main", "repo": {"full_name": REPO}}}
         receipt = {"target": {"decision": "sample-task"}, "sha256": "receipt"}
         with patch.object(self.flow, "verify_receipt", return_value=(receipt, {"url": "comment"})), \
-                self.assertRaisesRegex(WorkflowError, "决定单 A1"):
+                self.assertRaisesRegex(WorkflowError, "决定单 001-A1"):
             self.flow.merge(10)
         self.repo.gh.assert_not_called()
 

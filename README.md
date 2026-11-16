@@ -9,3 +9,5 @@ Arcfold 在 DSH Desktop 中提供目标与长期协作界面。当前版本为�
 当前测试面向 macOS Apple Silicon、DSH 0.2.2-rc.1 和 Node.js 24.15。原生模型调用不需要 Python；旧实验和兼容检查仍使用随包计数环境。安装、更新和真实模型效果尚待最终验收。开发和离线检查见 [参与开发](CONTRIBUTING.md)。
 
 本项目采用 MIT 许可证，见 [LICENSE](LICENSE)。第三方组件的版权和许可声明保留在其对应目录。
+
+开发协作使用[交付总号与 F／D／A／R 材料编号](tools/dev-workflow/delivery-numbering.md)，可按总号查看决策、反馈、审阅、执行、上线和实际验收的分别状态。
