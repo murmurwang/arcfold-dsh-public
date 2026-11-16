@@ -526,8 +526,8 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(delivery.delivery_state(self.flow, "001")["status"], "active")
         self.assertEqual([r["text"] for r in delivery.history(self.flow, "001") if r["action"] == "state"], ["先停", "继续"])
 
-    def test_merged_dev_work_does_not_pass_acceptance_without_actual_matching_feedback(self):
-        registration = self.register()
+    def merged_dev(self):
+        self.register()
         collab.align(self.flow, "001", "对齐")
         folder, task = self.flow.task("001")
         task.update(phase="open", base=BASE)
@@ -535,15 +535,90 @@ class DeliveryTests(unittest.TestCase):
         write(folder / "submit.json", {"phase": "confirmed", "pr": 5, "head": HEAD, "base": BASE})
         write(self.flow.state / "prs" / "5" / "merge-attempt.json",
               {"phase": "confirmed", "source": HEAD, "target": {"decision": task["id"], "release": None}})
+        return folder
+
+    def test_same_version_feedback_is_not_automatically_an_acceptance(self):
+        self.merged_dev()
+        for relation in (None, "context", "source", "reference", "acceptance"):
+            with self.subTest(relation=relation):
+                observation = feedback.record(self.flow, "仍然失败，另有一条无关建议", target="dev",
+                                              version={"commit": HEAD, "dirty": False})
+                if relation:
+                    feedback.link(self.flow, observation["id"], "001", relation, "测试关联")
+                before = snapshot(self.flow.state)
+                with self.assertRaises(WorkflowError):
+                    delivery.accept_dev(self.flow, "001", observation["id"], "pass",
+                                        basis="存在版本记录" if relation != "acceptance" else None)
+                self.assertEqual(snapshot(self.flow.state), before)
+
+    def test_other_acceptance_does_not_resolve_every_feedback_in_a_delivery(self):
+        folder = self.merged_dev()
+        actual = feedback.record(self.flow, "已试过编号查询，结果符合约定", target="dev",
+                                 version={"commit": HEAD, "dirty": False})
+        feedback.link(self.flow, actual["id"], "001", "acceptance", "实际核对本交付查询行为")
+        delivery.accept_dev(self.flow, "001", actual["id"], "pass", basis="本次验收只验证编号查询")
+        receipt = next((folder / "observations").glob("*.json"))
+        for relation in ("context", "reference", "source"):
+            with self.subTest(relation=relation):
+                old = feedback.record(self.flow, "另一处问题仍未验证")
+                feedback.link(self.flow, old["id"], "001", relation, "只关联到本交付")
+                before = snapshot(self.flow.state)
+                with self.assertRaises(WorkflowError):
+                    feedback.resolve_from_acceptance(self.flow, old["id"], receipt)
+                self.assertEqual(snapshot(self.flow.state), before)
+
+    def test_resolution_requires_declared_source_feedback_and_latest_passing_acceptance(self):
+        self.merged_dev()
+        old = [feedback.record(self.flow, "待验证的问题 " + str(i)) for i in range(2)]
+        for row in old:
+            feedback.link(self.flow, row["id"], "001", "source", "本交付处理的问题")
+        actual = feedback.record(self.flow, "实际入口的编号和查询均符合约定", target="dev",
+                                 version={"commit": HEAD, "dirty": False})
+        feedback.link(self.flow, actual["id"], "001", "acceptance", "实际核对本交付两项标准")
+        unrelated = feedback.record(self.flow, "发生场景，不是本交付要解决的问题", total="001")
+        before = snapshot(self.flow.state)
+        for kwargs in ({"basis": " "}, {"basis": "已核对", "resolves": [unrelated["id"]]}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(WorkflowError):
+                delivery.accept_dev(self.flow, "001", actual["id"], "pass", **kwargs)
+            self.assertEqual(snapshot(self.flow.state), before)
+        words = actual["text"]
+        result = delivery.accept_dev(self.flow, "001", actual["id"], "pass", basis="已逐项核对编号与查询标准，两个旧问题均复测通过",
+                                     resolves=[row["id"] for row in old])
+        self.assertEqual(result["user_verified"], words)
+        self.assertEqual(result["author"], "开发者")
+        self.assertEqual(result["judged_by"], "fixture-agent")
+        self.assertNotEqual(result["basis"], words)
+        self.assertEqual(feedback.load(self.flow, old[0]["id"])[1]["status"], "pending")
+        feedback.resolve_from_acceptance(self.flow, old[0]["id"], result["observation"])
+        self.assertEqual(feedback.load(self.flow, old[0]["id"])[1]["status"], "resolved")
+        later = feedback.record(self.flow, "重试时查询失败", target="dev", version={"commit": HEAD, "dirty": False})
+        feedback.link(self.flow, later["id"], "001", "acceptance", "同一验收的后续失败观察")
+        for outcome in ("fail", "unconfirmed"):
+            with self.subTest(outcome=outcome):
+                delivery.accept_dev(self.flow, "001", later["id"], outcome, basis="新观察未能证明查询符合标准")
+                self.assertFalse(delivery.show(self.flow, "001")["accepted"])
+                before = snapshot(self.flow.state)
+                with self.assertRaisesRegex(WorkflowError, "最新验收"):
+                    feedback.resolve_from_acceptance(self.flow, old[1]["id"], result["observation"])
+                self.assertEqual(snapshot(self.flow.state), before)
+                self.assertEqual(feedback.load(self.flow, old[1]["id"])[1]["status"], "pending")
+                self.assertEqual(feedback.load(self.flow, later["id"])[1]["status"], "pending")
+
+    def test_merged_dev_work_does_not_pass_acceptance_without_actual_matching_feedback(self):
+        folder = self.merged_dev()
         state = delivery.show(self.flow, "001")
         self.assertFalse(state["accepted"])
         self.assertFalse(state["progress"]["closed"])
         unknown = feedback.record(self.flow, "确实试过，但版本不明", target="dev", version={"commit": "unknown"})
+        feedback.link(self.flow, unknown["id"], "001", "acceptance", "本次验收的未知观察")
         with self.assertRaisesRegex(WorkflowError, "通过须有"):
             delivery.accept_dev(self.flow, "001", unknown["id"], "pass")
-        delivery.accept_dev(self.flow, "001", unknown["id"], "unconfirmed")
+        delivery.accept_dev(self.flow, "001", unknown["id"], "unconfirmed", basis="不能确认实际入口版本")
+        feedback.link(self.flow, unknown["id"], "001", "source", "本交付继续验证该问题")
         actual = feedback.record(self.flow, "实际入口行为符合约定", target="dev", version={"commit": HEAD, "dirty": False})
-        delivery.accept_dev(self.flow, "001", actual["id"], "pass")
+        feedback.link(self.flow, actual["id"], "001", "acceptance", "明确验证本交付约定的行为")
+        delivery.accept_dev(self.flow, "001", actual["id"], "pass", basis="核对合入版本及原问题对应的行为，实际观察符合标准",
+                            resolves=[unknown["id"]])
         state = delivery.show(self.flow, "001")
         self.assertTrue(state["accepted"])
         self.assertFalse(state["published"])
@@ -551,6 +626,22 @@ class DeliveryTests(unittest.TestCase):
         receipt = next(p for p in (folder / "observations").glob("*.json") if read(p)["outcome"] == "pass")
         feedback.resolve_from_acceptance(self.flow, unknown["id"], receipt)
         self.assertEqual(feedback.load(self.flow, unknown["id"])[1]["status"], "resolved")
+
+    def test_package_acceptance_also_records_explicit_old_feedback_scope(self):
+        self.register()
+        folder, task = self.flow.task("001")
+        old = feedback.record(self.flow, "安装后旧问题仍在")
+        feedback.link(self.flow, old["id"], "001", "source", "由本次发行修复")
+        actual = feedback.record(self.flow, "更新后已实际验证旧问题解决", target="product")
+        write(self.flow.state / "releases/0.4.1/release.json",
+              {"target": {"decision": task["id"]}, "source": HEAD, "packages": {}})
+        with patch.object(self.flow, "check", return_value={"fixed_in": "0.4.1", "observed_in_version": "0.4.0"}), \
+                patch("release.published"):
+            result = self.flow.close_loop("001", "0.4.1", None, "pass", actual["id"],
+                                          basis="实际更新后重现原场景，旧问题已消失", resolves=[old["id"]])
+        self.assertEqual(result["resolves"], [old["id"]])
+        feedback.resolve_from_acceptance(self.flow, old["id"], result["observation"])
+        self.assertEqual(feedback.load(self.flow, old["id"])[1]["status"], "resolved")
 
     def test_queries_do_not_write_or_contact_remote_and_cli_uses_complete_ids(self):
         registration = self.register()

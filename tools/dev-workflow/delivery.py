@@ -594,8 +594,9 @@ def show(flow, item):
                         "writes": pending, "review_findings": [r["records"].get("receipt", {}).get("review", {}).get("result", {}).get("findings", []) for r in reports]}}
 
 
-def accept_dev(flow, key, feedback_id, outcome):
+def accept_dev(flow, key, feedback_id, outcome, *, basis=None, resolves=()):
     import delivery_feedback as feedback
+    from workflow import actor, text_field
     require(outcome in ("pass", "fail", "unconfirmed"), "验收结论须为 pass、fail 或 unconfirmed。")
     directory, task = flow.task(key)
     ensure_current(flow, task)
@@ -611,9 +612,15 @@ def accept_dev(flow, key, feedback_id, outcome):
         require(observation["target"] == "dev" and observation.get("version", {}).get("commit") == source
                 and observation.get("version", {}).get("dirty") is False,
                 "通过须有对应已合入入口版本的实际 dev 反馈；版本未知或有改动时保持未确认。")
+    require(feedback.related(observation, task["delivery"], "acceptance"),
+            "先将实际观察明确关联为本交付的验收依据；同版本、发生场景或参考不代表验收。")
+    basis = text_field(basis, "对照已确认验收标准的判断依据")
+    resolves = feedback.resolution_scope(flow, task["delivery"], resolves, basis)
+    require(feedback_id not in resolves, "实际验收反馈由本次结论处理，旧反馈清单不要重复包含它。")
     with locked(directory, "task"):
         result = {"decision": task["id"], "decision_id": task["decision_id"], "source": source,
                   "feedback": feedback_id, "outcome": outcome, "user_verified": observation["text"],
+                  "basis": basis, "judged_by": actor(), "resolves": resolves,
                   "sequence": len(list((directory / "observations").glob("*.json"))) + 1,
                   **provenance(feedback_id, observation["provider"])}
         # Source identifies the actual code; feedback source remains explicit.
@@ -621,7 +628,6 @@ def accept_dev(flow, key, feedback_id, outcome):
         path = directory / "observations" / (uuid.uuid4().hex + ".json")
         write(path, result)
         write(directory / "user-verification.json", result)
-    feedback.link(flow, feedback_id, task["delivery"], "acceptance", "实际入口验收")
     feedback.resolved(flow, feedback_id, str(path), outcome)
     event(flow, task["delivery"], "accepted", evidence=str(path), outcome=outcome, feedback=feedback_id)
-    return result
+    return {"observation": str(path), **result}

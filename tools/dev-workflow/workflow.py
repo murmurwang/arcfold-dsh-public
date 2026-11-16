@@ -421,7 +421,7 @@ class Workflow:
         rows = [read(path) for path in sorted(directory.glob("*/task.json"))]
         return {"repo": self.repo.name, "main": self.repo.main(), "tasks": rows}
 
-    def close_loop(self, key, version, observation, outcome, feedback=None):
+    def close_loop(self, key, version, observation, outcome, feedback=None, *, basis=None, resolves=()):
         from collab import load_feedback, route
         import delivery_feedback
         from release import published
@@ -434,6 +434,9 @@ class Workflow:
             _, item = load_feedback(self, feedback)
             require(all(row["to"] != "close-loop:" + key for row in item["routes"]), f"{feedback} 已经关联到 {key}。")
             observation = item["text"]
+        require(not resolves or feedback is not None, "解决旧反馈须引用已登记的实际验收反馈。")
+        resolves = delivery_feedback.resolution_scope(self, task.get("delivery"), resolves, basis)
+        require(feedback not in resolves, "旧反馈清单不要重复包含实际验收反馈。")
         directory, _ = self.task(key)
         with locked(directory, "task"):
             fields = self.check(key)
@@ -445,6 +448,7 @@ class Workflow:
                       "user_verified": text_field(observation, "开发者的实际观察"), "outcome": outcome, "at": timestamp(),
                       "sequence": len(list((directory / "observations").glob("*.json"))) + 1,
                       "decision": key, "decision_id": task.get("decision_id"), "source": release["source"], "packages": release["packages"],
+                      "basis": basis, "judged_by": actor(), "resolves": resolves,
                       "author": item.get("provider", "开发者") if feedback else "开发者", "recorded_by": actor()}
             if feedback is not None:
                 result["feedback"] = feedback
@@ -798,6 +802,8 @@ def parse_args():
     accept.add_argument("id")
     accept.add_argument("--feedback", required=True)
     accept.add_argument("--outcome", choices=OUTCOMES, required=True)
+    accept.add_argument("--basis", required=True, help="对照验收标准，说明实际观察为何支持此结论")
+    accept.add_argument("--resolves", action="append", default=[], help="本次实际验证并解决的旧反馈，可重复")
     for name in ("check", "start", "rebase", "submit", "close-loop"):
         cmd = sub.add_parser(name)
         cmd.add_argument("id")
@@ -806,6 +812,8 @@ def parse_args():
         if name == "close-loop":
             cmd.add_argument("--version", required=True)
             cmd.add_argument("--outcome", required=True, choices=OUTCOMES)
+            cmd.add_argument("--basis", help="验收及旧反馈解决的判断依据，与观察原话分开")
+            cmd.add_argument("--resolves", action="append", default=[], help="本次实际验证并解决的旧反馈，可重复")
             observed = cmd.add_mutually_exclusive_group(required=True)
             observed.add_argument("--observation-file")
             observed.add_argument("--feedback", metavar="F编号")
@@ -903,7 +911,7 @@ def main():
         elif action == "feedback-resolve":
             result = collab.delivery_feedback.resolve_from_acceptance(flow, args.id, args.acceptance)
         elif action == "accept-dev":
-            result = delivery.accept_dev(flow, args.id, args.feedback, args.outcome)
+            result = delivery.accept_dev(flow, args.id, args.feedback, args.outcome, basis=args.basis, resolves=args.resolves)
         elif action == "status":
             result = flow.status()
         elif action == "next":
@@ -943,7 +951,8 @@ def main():
             result = release(flow, args.version, args.prepare, args.finalize, args.isolated_receipt)
         elif action == "close-loop":
             observation = Path(args.observation_file).read_text() if args.observation_file else None
-            result = flow.close_loop(args.id, args.version, observation, args.outcome, args.feedback)
+            result = flow.close_loop(args.id, args.version, observation, args.outcome, args.feedback,
+                                     basis=args.basis, resolves=args.resolves)
         else:
             result = getattr(flow, action)(args.id)
         print(json.dumps(result, ensure_ascii=False, indent=2))

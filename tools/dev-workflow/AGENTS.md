@@ -12,9 +12,9 @@
 
 旧报告须绑定原请求及材料并通过完整校验；只有账单或用量不算结果已核对。报告没有取得或响应无效时，先核对证据，在原目录另存 `result-reconciliation.json`，写原请求号、`unavailable` 或 `invalid_response`、原因、证据、时间与记录者。它只记录执行失败，不代写独立结论；费用仍另用 `billing-reconciliation.json` 核对。具体格式见 [交付编号与查询](delivery-numbering.md)。
 
-`feedback` 默认分配独立 F；`--target dev` 分配 dev-F，`--delivery 总号` 分配交付内 F。dev 反馈保存实际入口提交、工作文件摘要或明确未知原因，日常产品版本只作背景。`--related` 仅关联发生场景。用 `classify` 更正对象、`feedback-link` 增补或纠正关联，保留原号和历史。关联交付或 Issue 后反馈仍待处理，后来添加 note 也不隐藏它；note 不改变已经实际验收解决的状态。`feedback-resolve --acceptance FILE` 才能按同一交付的实际通过回执解决旧反馈。
+`feedback` 默认分配独立 F；`--target dev` 分配 dev-F，`--delivery 总号` 分配交付内 F。dev 反馈保存实际入口提交、工作文件摘要或明确未知原因，日常产品版本只作背景。`--related` 仅关联发生场景。用 `classify` 更正对象、`feedback-link` 增补或纠正关联，保留原号和历史。关联交付或 Issue 后反馈仍待处理，后来添加 note 也不隐藏它；note 不改变已经实际验收解决的状态。`feedback-resolve --acceptance FILE` 只接受当前执行的最新通过回执，且旧反馈必须是本交付的处理来源，并明确列在该次验收的 `--resolves` 清单中。
 
-不发行安装包的 dev 交付合入后仍需实际反馈，使用 `accept-dev ID --feedback F编号 --outcome pass|fail|unconfirmed`；通过须对应已合入的实际入口版本。合入和发布成功均不能代替实际验收。
+不发行安装包的 dev 交付合入后仍需实际反馈。先用 `feedback-link --relation acceptance` 明确本交付的验收观察，再用 `accept-dev ID --feedback F编号 --outcome pass|fail|unconfirmed --basis 判断依据` 对照已确认标准登记结论；通过须对应已合入的实际入口版本。观察原话、提供者与 Agent 的判断依据、判断者分开保存。程序检查关联和依据是否具备，不替操作者判断原话的含义；失败或证据不足须登记 fail 或 unconfirmed。只有本次实际验证解决的旧问题才加入可重复的 `--resolves F编号`，依据中说明它与本次观察的关系；`close-loop` 也支持这两个参数。合入和发布成功均不能代替实际验收。
 
 开工先运行 `next`。它只读本机记录，列出每个任务所处的环节、下一步和等谁，并汇总日常版本、未答的请求单、结果未知的写入、未处理的反馈和已退场的任务。`--remote` 另查 GitHub 上的 main、提案、检查和入口代码所在提交。`--write FILE` 把结果写入文件中的 `arcfold-next` 标记段。
 

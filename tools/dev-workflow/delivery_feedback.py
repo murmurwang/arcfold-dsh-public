@@ -201,17 +201,41 @@ def resolved(flow, item, evidence, outcome):
                   evidence=evidence, outcome=outcome)
 
 
+def related(record, total, relation):
+    return any(link["delivery"] == total and link["relation"] == relation for link in record["links"])
+
+
+def resolution_scope(flow, total, items, basis):
+    from workflow import text_field
+    items = list(items)
+    require(len(items) == len(set(items)), "待解决旧反馈不能重复。")
+    if items:
+        text_field(basis, "本次实际验收解决这些旧反馈的判断依据")
+        require(total, "先核对旧任务编号迁移，再登记旧反馈解决范围。")
+    for item in items:
+        _, record = load(flow, item)
+        require(related(record, total, "source"),
+                f"{item} 须明确由本交付处理；发生场景、参考和验收关联不能代替处理来源。")
+    return items
+
+
 def resolve_from_acceptance(flow, item, acceptance):
     path = Path(acceptance).resolve()
     require(path.is_relative_to(flow.state / "tasks") and path.parent.name == "observations" and path.is_file(),
             "使用本仓库入口保存的实际验收记录。")
     receipt = read(path)
     require(receipt.get("outcome") == "pass" and receipt.get("feedback"), "验收必须通过且引用实际反馈。")
+    directory, task = flow.task(receipt["decision"])
+    delivery.ensure_current(flow, task)
+    require(path.parent.parent == directory and receipt == delivery.json_or(directory / "user-verification.json")
+            and receipt.get("decision_id") == task.get("decision_id"),
+            "使用本交付当前执行的最新验收；旧通过记录不能覆盖后来的失败或未确认。")
+    require(item in receipt.get("resolves", []) and receipt.get("basis"),
+            "此验收没有明确验证并解决这条旧反馈；不能仅凭同交付的通过回执归档。")
     _, record = load(flow, item)
     _, accepted = load(flow, receipt["feedback"])
     total = delivery.owner(flow, receipt["decision"])
-    require(total and any(link["delivery"] == total for link in record["links"])
-            and any(link["delivery"] == total and link["relation"] == "acceptance" for link in accepted["links"]),
+    require(total and related(record, total, "source") and related(accepted, total, "acceptance"),
             "此验收与待解决反馈不属于同一交付。")
     return resolved(flow, item, str(path), "pass")
 
