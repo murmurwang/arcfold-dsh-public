@@ -77,7 +77,8 @@ def validate_merge(flow, checkout, row):
     require(git_line(checkout, "rev-parse", row["source"] + "^{tree}") == target["tree"] and
             git_line(checkout, "show", "-s", "--format=%P", row["source"]).split() == [target["base"]],
             "源码合入的实际文件或父提交与回执不一致。")
-    directory = flow.state / "prs" / str(target["pr"]) / (target["head"] + "-" + target["base"])
+    from task_access import review_directory
+    directory = review_directory(flow, target)
     paths = [directory / (name + ".json") for name in ("receipt", "request", "attempt", "response", "comment")]
     require(all(path.is_file() for path in paths), "源码来源缺少可回查的完整独立审阅证据。")
     receipt, packet, attempt, response, comment = map(read, paths)

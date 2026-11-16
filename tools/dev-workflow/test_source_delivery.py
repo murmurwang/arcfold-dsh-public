@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 import tempfile
+import shutil
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from collab import Row, after_merge
 from common import WorkflowError, digest, git, git_line, read, write
@@ -134,6 +136,23 @@ class SourceDeliveryTests(unittest.TestCase):
         (directory / "response.json").unlink()
         with self.assertRaisesRegex(WorkflowError, "完整独立审阅"):
             sources.plan(self.flow, self.checkout, item["source"], self.base)
+
+    def test_numbered_review_resolves_the_exact_archived_report_not_a_later_one(self):
+        item = self.source("feature-one")
+        target = item["target"]
+        target.update(delivery="001", review_id="001-R1")
+        self.review_fixture(item)
+        original = self.flow.state / "prs" / str(target["pr"]) / (target["head"] + "-" + target["base"])
+        archived = original.with_name(original.name + "-001-R1")
+        shutil.move(str(original), str(archived))
+        records = [{"id": "001-R1", "target": target, "run": str(archived.relative_to(self.flow.state))},
+                   {"id": "001-R2", "target": {**target, "review_id": "001-R2"}, "run": "unreturned-new-review"}]
+        adapter = SimpleNamespace(reviews=lambda flow, total: records)
+        with patch.dict("sys.modules", {"delivery": adapter}):
+            sources.validate_merge(self.flow, self.checkout, item)
+            records.pop(0)
+            with self.assertRaisesRegex(WorkflowError, "原独立审阅"):
+                sources.validate_merge(self.flow, self.checkout, item)
 
     def test_waiting_release_is_not_closed_and_assembly_has_no_hidden_sources(self):
         source = self.source("feature-one")
