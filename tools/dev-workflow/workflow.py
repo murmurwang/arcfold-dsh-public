@@ -443,7 +443,7 @@ class Workflow:
             route(self, feedback, "close-loop:" + key)
         return {"observation": str(name), **result}
 
-    def ensure_comment(self, number, run_dir, receipt, body):
+    def ensure_comment(self, number, run_dir, receipt, body, *, publish=True):
         phase = run_dir / "comment.json"
         marker = f"<!-- arcfold-review:{receipt['sha256']} -->"
         content = marker + "\n\n" + body
@@ -452,6 +452,7 @@ class Workflow:
         found = [row for row in comments if row["body"].startswith(marker)]
         require(len(found) <= 1, "同一回执出现多条 PR 评论。先核对。")
         if not found:
+            require(publish, "原评论写入尚未核对，公开授权已撤回；不会新增评论。")
             require(not phase.exists(), "上次写入 PR 评论结果未知。先到 GitHub 核对。")
             write(phase, {"phase": "posting", "sha256": receipt["sha256"]})
             posted = self.repo.api(f"/issues/{number}/comments", {"body": content})
@@ -466,7 +467,7 @@ class Workflow:
     def evidence_text(row):
         return "\n".join(f"- `{item['path']}:{item['line']}` · {item['note']}" for item in row["evidence"])
 
-    def advisory_issues(self, number, run_dir, receipt):
+    def advisory_issues(self, number, run_dir, receipt, *, publish=True):
         result = receipt["review"]["result"]
         advisory = [row for row in result["findings"] if row["impact"] == "advisory"]
         if not advisory and result["checks"]["advisory"]["status"] != "pass":
@@ -477,6 +478,8 @@ class Workflow:
         issues = []
         for index, row in enumerate(advisory):
             phase = run_dir / f"advisory-{index}.json"
+            if not publish and not phase.exists():
+                continue
             marker = f"<!-- arcfold-advisory:{receipt['sha256']}:{index} -->"
             content = f"{marker}\n\n来自 PR #{number} 的独立审阅。\n\n{row['description']}\n\n{self.evidence_text(row)}"
             try:
@@ -487,6 +490,7 @@ class Workflow:
                 if matches:
                     item = matches[0]
                 else:
+                    require(publish, "原 Issue 写入尚未核对，公开授权已撤回；不会新增 Issue。")
                     require(not phase.exists(), "上次写入 Issue 结果未知，先核对。")
                     write(phase, {"phase": "posting", "review": receipt["sha256"]})
                     item = self.repo.api("/issues", {"title": row["title"][:160], "body": content})
@@ -526,6 +530,7 @@ class Workflow:
         import desktop_review_request as reviewer
 
         def run_worker(run_dir, key, *, settle=False):
+            from review_policy import check_unsettled, key_root
             # Keep every unrelated credential out of the review process.
             inherited = ("PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "LANG", *reviewer.PROXY_ENV)
             child_env = {k: os.environ[k] for k in inherited if k in os.environ}
@@ -533,7 +538,19 @@ class Workflow:
             argv = [sys.executable, "-B", str(HERE / "desktop_review_request.py"), str(run_dir)]
             if settle:
                 argv.append("--settle-billing")
-            command(argv, timeout=1030, env=child_env)
+            if provider == "lmuai":
+                key_id = digest(key.encode())
+                with locked(key_root(self, key_id), "dispatch"):
+                    reservation = key_root(self, key_id) / "reservation.json"
+                    require(not reservation.is_file() or not read(reservation).get("job"),
+                            "同一密钥的后台任务尚未结算，不能改用手动入口发送或核对。")
+                    check_unsettled(self, key_id, run_dir)
+                    attempt = read(run_dir / "attempt.json")
+                    attempt["key_id"] = key_id
+                    write(run_dir / "attempt.json", attempt)
+                    command(argv, timeout=1030, env=child_env)
+            else:
+                command(argv, timeout=1030, env=child_env)
 
         with locked(self.state / "prs", str(number)):
             run_dir, target, files, _ = self.preflight(number)
@@ -557,6 +574,9 @@ class Workflow:
                 if not approval:
                     return preview
                 from collab import review_approval
+                from collab import load_ask
+                require(not load_ask(self, approval)[1].get("execution"),
+                        "后台执行授权请用 review --enqueue，不能改用手动密钥入口。")
                 granted = review_approval(self, approval, number, packet["id"], preview)
                 require(not uncertain, "此提案还有用量未核对的旧审阅尝试，先查 OpenAI 的用量或请求记录。")
                 key = reviewer.review_key(provider)
@@ -564,33 +584,43 @@ class Workflow:
                 attempt = {**reviewer.make_attempt(packet), "approval": granted}
                 write(attempt_path, attempt)
                 run_worker(run_dir, key)
-            validated = reviewer.validate(packet, read(output))
-            require(self.pair(number)[1:] == (target["head"], target["base"]) and
-                    self.successful_ci(target["head"]) == target["ci"], "审阅期间候选或检查已变化，回执只供历史核对。")
-            issues_result = validated["result"]
-            blocking = sorted(set(reviewer.blockers(issues_result)))
-            receipt = {"target": target, "packet": packet["id"], "attempt": attempt["client_request_id"],
-                       "review": validated, "blocking_checks": blocking,
-                       "verdict": "fail" if blocking else "pass"}
-            receipt["sha256"] = digest(receipt)
-            receipt_path = run_dir / "receipt.json"
-            write(receipt_path, receipt)
-            statuses = "\n\n".join(
-                f"**{reviewer.CHECKS[name]} · {row['status']}**\n\n{row['summary']}\n\n{self.evidence_text(row)}"
-                for name, row in issues_result["checks"].items())
-            findings = "\n\n".join(
-                f"**{row['title']} · {row['impact']}**\n\n{row['description']}\n\n{self.evidence_text(row)}"
-                for row in issues_result["findings"])
-            body = (f"## 独立审阅 · {receipt['verdict']}\n\n"
-                    f"- PR 提交 `{target['head']}`\n- main 基线 `{target['base']}`\n"
-                    f"- 审阅服务 `{provider}` · 模型 `{validated['model']}`\n"
-                    f"- [GitHub 检查]({target['ci']['url']})\n- 回执摘要 `{receipt['sha256']}`\n\n"
-                    f"{statuses}\n\n{findings}").strip()
-            comment = self.ensure_comment(number, run_dir, receipt, body)
-            issues = self.advisory_issues(number, run_dir, receipt)
-            write(run_dir / "advisories.json", issues)
-            return {"verdict": receipt["verdict"], "receipt": str(receipt_path), "comment": comment["url"],
-                    "blocking": blocking, "issues": issues, "usage": validated["usage"]}
+            return self.review_result(run_dir, packet, target, attempt, provider)
+
+    def review_result(self, run_dir, packet, target, attempt, provider, *, publish=True):
+        import desktop_review_request as reviewer
+        output = run_dir / "response.json"
+        number = target["pr"]
+        validated = reviewer.validate(packet, read(output))
+        require(self.pair(number)[1:] == (target["head"], target["base"]) and
+                self.successful_ci(target["head"]) == target["ci"], "审阅期间候选或检查已变化，回执只供历史核对。")
+        issues_result = validated["result"]
+        blocking = sorted(set(reviewer.blockers(issues_result)))
+        receipt = {"target": target, "packet": packet["id"], "attempt": attempt["client_request_id"],
+                   "review": validated, "blocking_checks": blocking,
+                   "verdict": "fail" if blocking else "pass"}
+        receipt["sha256"] = digest(receipt)
+        receipt_path = run_dir / "receipt.json"
+        write(receipt_path, receipt)
+        pending_publication = (run_dir / "comment.json").is_file() or any(run_dir.glob("advisory-*.json"))
+        if not publish and not pending_publication:
+            return {"verdict": receipt["verdict"], "receipt": str(receipt_path), "blocking": blocking,
+                    "usage": validated["usage"], "publication": "local_only"}
+        statuses = "\n\n".join(
+            f"**{reviewer.CHECKS[name]} · {row['status']}**\n\n{row['summary']}\n\n{self.evidence_text(row)}"
+            for name, row in issues_result["checks"].items())
+        findings = "\n\n".join(
+            f"**{row['title']} · {row['impact']}**\n\n{row['description']}\n\n{self.evidence_text(row)}"
+            for row in issues_result["findings"])
+        body = (f"## 独立审阅 · {receipt['verdict']}\n\n"
+                f"- PR 提交 `{target['head']}`\n- main 基线 `{target['base']}`\n"
+                f"- 审阅服务 `{provider}` · 模型 `{validated['model']}`\n"
+                f"- [GitHub 检查]({target['ci']['url']})\n- 回执摘要 `{receipt['sha256']}`\n\n"
+                f"{statuses}\n\n{findings}").strip()
+        comment = self.ensure_comment(number, run_dir, receipt, body, publish=publish)
+        issues = self.advisory_issues(number, run_dir, receipt, publish=publish)
+        write(run_dir / "advisories.json", issues)
+        return {"verdict": receipt["verdict"], "receipt": str(receipt_path), "comment": comment["url"],
+                "blocking": blocking, "issues": issues, "usage": validated["usage"]}
 
     def verify_receipt(self, number, head, base):
         from desktop_review_request import blockers, validate
@@ -702,11 +732,13 @@ def parse_args():
     reply.add_argument("id")
     reply.add_argument("--verdict", required=True, choices=("yes", "no", "other"))
     reply.add_argument("--step", type=int)
+    revoke = sub.add_parser("revoke-approval", help="按开发者原话撤回后续执行授权")
+    revoke.add_argument("id")
     align = sub.add_parser("align", help="登记开发者对当前决策的对齐确认")
     align.add_argument("id")
     feedback = sub.add_parser("feedback", help="登记开发者的体验反馈")
     feedback.add_argument("--attach", action="append", default=[], metavar="PATH")
-    for cmd in (reply, align, feedback):
+    for cmd in (reply, align, feedback, revoke):
         words = cmd.add_mutually_exclusive_group(required=True)
         words.add_argument("--text")
         words.add_argument("--text-file")
@@ -722,6 +754,18 @@ def parse_args():
     review.add_argument("--pr", type=int, required=True)
     review.add_argument("--provider", choices=("openai", "lmuai"), default="openai")
     review.add_argument("--approval", metavar="A编号", help="开发者已同意的审阅费用授权单")
+    review.add_argument("--enqueue", action="store_true", help="把已批准的固定材料交给本机后台执行")
+    review.add_argument("--profile", default="default")
+    queue = sub.add_parser("review-queue", help="查看和控制已批准的后台审阅")
+    queue.add_argument("operation", choices=("status", "run", "resume", "cancel", "pause", "unpause", "reconcile"))
+    queue.add_argument("--job")
+    queue.add_argument("--profile", default="default")
+    service = sub.add_parser("review-service", help="准备或按授权安装本机审阅程序")
+    service.add_argument("operation", choices=("prepare", "install", "prepare-remove", "remove"))
+    service.add_argument("--profile", default="default")
+    service.add_argument("--output")
+    service.add_argument("--plan")
+    service.add_argument("--approval")
     merge = sub.add_parser("merge")
     merge.add_argument("--pr", type=int, required=True)
     release = sub.add_parser("release")
@@ -764,6 +808,9 @@ def main():
             result = [row for row in collab.all_asks(flow) if args.all or row["status"] == "open"]
         elif action == "answer":
             result = collab.answer(flow, args.id, args.verdict, words, args.step)
+        elif action == "revoke-approval":
+            from review_policy import revoke
+            result = revoke(flow, args.id, words)
         elif action == "align":
             result = collab.align(flow, args.id, words)
         elif action == "feedback":
@@ -778,7 +825,34 @@ def main():
         elif action == "submit":
             result = flow.submit(args.id, args.body_file)
         elif action == "review":
-            result = flow.review(args.pr, args.approval, args.provider)
+            if args.enqueue:
+                from review_queue import enqueue
+                require(args.provider == "lmuai" and args.approval, "排队需指定灵眸服务和已批准的执行授权单。")
+                result = enqueue(flow, args.pr, args.approval, args.profile)
+            else:
+                result = flow.review(args.pr, args.approval, args.provider)
+        elif action == "review-queue":
+            import review_queue as queue
+            if args.operation == "status":
+                result = queue.status(flow)
+            elif args.operation == "run":
+                result = queue.run_once(flow, args.profile)
+            elif args.operation in ("pause", "unpause"):
+                result = queue.pause(flow, args.profile, args.operation == "pause")
+            elif args.operation == "reconcile":
+                result = queue.reconcile(flow, args.job)
+            else:
+                result = queue.control(flow, args.job, args.operation)
+        elif action == "review-service":
+            import review_service as service
+            if args.operation in ("prepare", "prepare-remove"):
+                require(args.output, "准备计划需要 --output。")
+                result = (service.prepare(flow, args.output, args.profile) if args.operation == "prepare"
+                          else service.removal_plan(flow, args.profile, args.output))
+            else:
+                require(args.plan and args.approval, "本机变更需要 --plan 和 --approval。")
+                result = (service.install(flow, args.plan, args.approval) if args.operation == "install"
+                          else service.remove(flow, args.plan, args.approval))
         elif action == "merge":
             result = flow.merge(args.pr)
         elif action == "release":

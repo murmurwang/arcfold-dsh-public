@@ -175,7 +175,7 @@ def relay_usage(key):
     return {"requests": count, "actual_cost_usd": str(cost), "checked_at": timestamp()}
 
 
-def relay_preflight(key):
+def relay_preflight(key, strict=False):
     rows = relay_get(key, "/v1/models")["data"]
     require(any(row.get("id") == RELAY_MODEL for row in rows), "这把灵眸密钥的分组缺少 GPT‑6.1 Terra。")
     limits = relay_get(key, "/v1/user/balance")
@@ -184,7 +184,12 @@ def relay_preflight(key):
     total = Decimal(str(limits["total"]))
     require(total.is_finite() and 0 < total <= MAX_COST,
             "灵眸为此密钥返回的总额度须在 0 和 3.50 美元之间。")
-    return {"key_limit_usd": str(total), **relay_usage(key)}
+    result = {"key_limit_usd": str(total), **relay_usage(key)}
+    if strict:
+        from review_policy import dollars
+        result.update(balance_usd=str(dollars(limits.get("balance"), zero=True)),
+                      key_used_usd=str(dollars(limits.get("used"), zero=True)))
+    return result
 
 
 def relay_bill(key, directory):
@@ -283,11 +288,21 @@ def review_key(provider):
     return key
 
 
-def worker(directory, settle_only=False):
+def worker(directory, settle_only=False, observe_only=False):
     attempt = read(directory / "attempt.json")
     packet = read(directory / "request.json")
     provider = packet.get("provider", "openai")
     key = review_key(provider)
+    if attempt.get("key_id"):
+        require(digest(key.encode()) == attempt["key_id"], "保存的密钥与授权对象不一致。")
+    if attempt.get("execution"):
+        require(packet.get("reviewer_sha256") == digest(Path(__file__).read_bytes()) and
+                packet["id"] == digest({k: v for k, v in packet.items() if k != "id"}),
+                "固定材料或独立审阅程序不一致。")
+    if observe_only:
+        require(provider == "lmuai", "只读核对仅用于灵眸审阅。")
+        write(directory / "reconciliation-observation.json", relay_usage(key))
+        return
     if settle_only:
         require(provider == "lmuai" and attempt["packet"] == packet["id"], "仅核对已送出的同一审阅回执。")
         return relay_bill(key, directory)
@@ -296,15 +311,40 @@ def worker(directory, settle_only=False):
     body = request(packet)
     try:
         if provider == "lmuai":
-            attempt["billing_before"] = relay_preflight(key)
+            policy = attempt.get("execution")
+            attempt["billing_before"] = relay_preflight(key, strict=True) if policy else relay_preflight(key)
+            if policy:
+                from review_policy import check_balance, execution_approval
+                from workflow import Workflow
+                from common import Repository
+                context = attempt["automation"]
+                flow = Workflow(Repository(packet["target"]["repo"]), context["state_root"])
+                current = execution_approval(flow, context["approval"], packet["id"], attempt["key_id"])
+                require(current == policy, "执行授权在发送前变化。")
+                check_balance(attempt["billing_before"], policy, context.get("previous_usage"))
         connection = connect(RELAY_HOST if provider == "lmuai" else HOST)
     except (OSError, http.client.HTTPException, WorkflowError, ValueError, KeyError, ArithmeticError):
         attempt.update(phase="not-sent", request_sent=False)
         write(directory / "attempt.json", attempt)
         raise
     try:
-        attempt["phase"] = "sending"
-        write(directory / "attempt.json", attempt)
+        if attempt.get("execution"):
+            from common import locked
+            from review_policy import key_root
+            # Serialize the last consent/cancel/pause check with the sending marker.
+            with locked(key_root(flow, attempt["key_id"]), "control"):
+                current = execution_approval(flow, context["approval"], packet["id"], attempt["key_id"])
+                require(current == attempt["execution"], "发送前授权已经变化。")
+                reservation = read(key_root(flow, attempt["key_id"]) / "reservation.json")
+                require(not reservation.get("paused") and reservation.get("job") == context["job"],
+                        "队列已暂停或任务占用不符。")
+                cancelled = flow.state / "review-automation" / "cancellations" / (context["job"] + ".json")
+                require(not cancelled.exists(), "任务已取消。")
+                attempt.update(phase="sending", request_sent=True)
+                write(directory / "attempt.json", attempt)
+        else:
+            attempt.update(phase="sending", request_sent=True)
+            write(directory / "attempt.json", attempt)
         write(directory / "response.json", post(connection, key, body, attempt["client_request_id"]))
     finally:
         connection.close()
@@ -316,14 +356,15 @@ def make_attempt(packet):
     require(maximum_cost() <= MAX_COST, "此审阅模型的请求上限超过已授权费用。")
     return {"phase": "connecting", "packet": packet["id"], "provider": packet.get("provider", "openai"),
             "client_request_id": "arcfold-review-" + uuid.uuid4().hex,
-            "started_at": timestamp()}
+            "started_at": timestamp(), "request_sent": False}
 
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) != 2 and not (len(sys.argv) == 3 and sys.argv[2] == "--settle-billing"):
+        if len(sys.argv) != 2 and not (len(sys.argv) == 3 and sys.argv[2] in ("--settle-billing", "--observe-usage")):
             raise WorkflowError("审阅子进程缺少本机固定请求。")
-        worker(Path(sys.argv[1]), settle_only=len(sys.argv) == 3)
+        worker(Path(sys.argv[1]), settle_only="--settle-billing" in sys.argv, observe_only="--observe-usage" in sys.argv)
     except (OSError, http.client.HTTPException, WorkflowError, ValueError, KeyError, ArithmeticError) as exc:
-        print(str(exc), file=sys.stderr)
+        # Never echo provider content or a native credential operation to the chat.
+        print("审阅进程停止；请核对本机尝试、回执及用量。", file=sys.stderr)
         sys.exit(1)

@@ -151,6 +151,11 @@ def create_ask(flow, request):
         validate_binds(flow, binds)
     else:
         require(not binds, "只有授权单绑定对象。")
+    execution = request.get("execution")
+    if execution is not None:
+        from review_policy import validate_execution
+        require(kind == "approve", "只有授权单可声明后台执行条件。")
+        validate_execution(execution, binds)
     lists = {}
     for field, owner, label in (("options", "decide", "选项"), ("steps", "act", "操作步骤")):
         values = request.get(field) or []
@@ -164,6 +169,8 @@ def create_ask(flow, request):
         record = {"id": ask, "kind": kind, "title": title, "body": body, "task": key, "binds": binds, **lists,
                   "replies": suggested_replies(ask, kind, lists["steps"]), "status": "open",
                   "created_at": timestamp(), "created_by": actor(), "answers": []}
+        if execution is not None:
+            record["execution"] = execution
         write(directory / f"{ask}.json", record)
     return record
 
@@ -197,7 +204,8 @@ def answer(flow, ask, verdict, text, step=None):
 
 
 def granted(record):
-    return record["kind"] == "approve" and record["status"] == "answered" and record["answers"][-1]["verdict"] == "yes"
+    return (record["kind"] == "approve" and record["status"] == "answered" and
+            record["answers"][-1]["verdict"] == "yes" and not record.get("revoked"))
 
 
 def review_spent(flow, number):
@@ -487,6 +495,13 @@ class Row:
 
 def review_progress(flow, run, number, row):
     extra = {"pr": number}
+    from review_queue import status
+    queued = [item for item in status(flow) if item["pr"] == number]
+    if queued and queued[-1]["status"] not in ("complete", "cancelled"):
+        latest = queued[-1]
+        who = "后台程序" if latest["status"] in ("queued", "running", "billing_pending", "publication_pending") else "核对"
+        return row("D4", latest["next"] + ("：" + latest["note"] if latest.get("note") else ""), who,
+                   review_job=latest["id"], **extra)
     if (run / "receipt.json").is_file():
         receipt = read(run / "receipt.json")
         if receipt.get("verdict") == "pass":
@@ -641,6 +656,8 @@ def progress(flow, remote=False):
     result = {"repo": flow.repo.name, "daily": daily_version(), "tasks": tasks,
               "asks": [ask_summary(row) for row in open_asks], "feedback": unrouted_feedback(flow),
               "pending_writes": pending_writes(flow.state), "retired": retired}
+    from review_queue import status
+    result["review_queue"] = status(flow)
     if remote:
         result["remote"] = remote_facts(flow, tasks)
     return result

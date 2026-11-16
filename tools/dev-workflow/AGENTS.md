@@ -12,6 +12,8 @@
 
 npm 正式发布还需核对安装包之外的公开发布信息，见 [发布隐私核对](npm-publication-privacy.md)。
 
+本机审阅后台执行见 [审阅自动化](review-automation.md)。先 prepare 安装材料，再用绑定计划的授权安装；密钥只在本机设置窗口输入。逐次费用授权必须包含绑定材料、服务、模型、密钥标识、有效期、一次发送次数、经过核对的费用依据与公开写回权限。登记 answer 后用 review --enqueue 排队，旧的人工终端授权不能自动转换。next 同时显示队列状态；不明请求保留占用，不能靠另一提案或手动入口绕过。只增加排队和恢复，不增加模型自审或改变独立审阅标准。
+
 需要开发者处理的事都用请求单。`ask --input FILE` 读取 `kind`、`title`、`body`，以及可选的 `task`、`binds`、`options`、`steps`。`approve` 授权单必须绑定对象：`packet`、`pr` 加 `cap_usd`、`packages`（包名到 sha256）、`files`（绝对路径到 sha256，登记时核对内容）、`version` 或 `commit`。`decide` 决定单写清场景、各选项的实际后果、建议和只需决定什么。`act` 操作单逐条写步骤和做完要回报什么。每张单附上可以照抄的回复。`answer A编号 --verdict yes|no|other --text 原话 [--step N]` 按原话登记回复；授权单的 other 只记录，不算同意；已答的单不能再答，情况变了就另开一张。`asks` 列出未答的请求单，`--all` 包括已答的。
 
 `feedback --text-file FILE [--attach PATH]` 登记开发者的观察，自动记下当时的日常版本，附件只留在本机。`route F编号 --to close-loop:任务|new:任务|issue:编号|note [--note 说明]` 记下去向，只记录不处理时要写明原因。`retire ID --reason 文字 [--replaced-by ID]` 标记被取代或放弃的任务。日常 DSH 资料目录默认是 `~/.dsh/profiles/desktop`，可用 `ARCFOLD_DAILY_PROFILE` 指定，入口只读取其中两份 Arcfold 包的版本。
