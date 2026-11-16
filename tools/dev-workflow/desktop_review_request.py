@@ -49,6 +49,8 @@ INSTRUCTIONS = """你是本次 GitHub 提案唯一的独立审阅者。你从新
 - unknown 用于有可能影响相应边界而证据不足的情况。没有覆盖的真实体验或模型效果不能当成已验证。
 - 隔离界面和正式发布在后续验收。判断当前候选有无已知阻碍以及检查与候选是否相符。列明后续验收仍需核对的行为。
 只在安装、对话、更新、数据、权限、费用、体验版本、检查与代码对应有问题时使用相应阻塞类别。其他发现使用 advisory。
+另外在 release_requirements 中列出必须在对外发布前完成、但不阻止本次源码合入的具体事项，例如第三方许可材料补齐。
+普通维护建议不放入 release_requirements；没有发布前待办时返回空数组。此列表不会把本次未做的验收记为通过。
 引用给定的路径及每行开头标出的行号，每项给出至少一个证据。遵守所给 JSON 格式，填写 packet 标识。"""
 
 
@@ -70,8 +72,10 @@ def schema():
     result = schema_object({"status": {"type": "string", "enum": STATES}, "summary": string, "evidence": evidence})
     finding = schema_object({"impact": {"type": "string", "enum": list(CHECKS)}, "title": string,
                              "description": string, "evidence": evidence})
+    requirement = schema_object({"title": string, "description": string, "evidence": evidence})
     return schema_object({"packet": string, "checks": schema_object({name: result for name in CHECKS}),
-                          "findings": {"type": "array", "items": finding}})
+                          "findings": {"type": "array", "items": finding},
+                          "release_requirements": {"type": "array", "items": requirement}})
 
 
 def request(packet):
@@ -240,7 +244,14 @@ def validate(packet, response):
     for row in result["findings"]:
         require(row["impact"] in CHECKS and row["title"].strip() and row["description"].strip(),
                 "审阅发现缺少类别、标题或说明。")
-    for row in [*result["checks"].values(), *result["findings"]]:
+    release_requirements = result.get("release_requirements", [])
+    require(isinstance(release_requirements, list) and
+            (not packet.get("release_checks") or "release_requirements" in result),
+            "审阅缺少发布前待办的明确结论。")
+    for row in release_requirements:
+        require(isinstance(row, dict) and row.get("title", "").strip() and row.get("description", "").strip(),
+                "发布前待办缺少标题或说明。")
+    for row in [*result["checks"].values(), *result["findings"], *release_requirements]:
         require(row["evidence"], "每项审阅都必须给出证据。")
         for evidence in row["evidence"]:
             path, line, note = (evidence[key] for key in ("path", "line", "note"))
@@ -263,7 +274,7 @@ def validate(packet, response):
 
 def packet_for(target, files, provider="openai"):
     require(provider in PROVIDERS, "无法识别的审阅服务。")
-    material = {"target": target, "files": files, "provider": provider,
+    material = {"target": target, "files": files, "provider": provider, "release_checks": 1,
                 "reviewer_sha256": digest(Path(__file__).read_bytes())}
     return {"id": digest(material), **material}
 

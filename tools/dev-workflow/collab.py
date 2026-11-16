@@ -24,7 +24,7 @@ ASK_ID = re.compile(r"A[1-9][0-9]{0,5}")
 FEEDBACK_ID = re.compile(r"F[1-9][0-9]{0,5}")
 DIGEST = re.compile(r"[a-f0-9]{64}")
 ROUTE = re.compile(rf"(close-loop|new):({ID})|issue:[1-9][0-9]*|note")
-BINDS = {"packet", "pr", "repo", "cap_usd", "packages", "files", "version", "commit"}
+BINDS = {"packet", "pr", "repo", "cap_usd", "packages", "files", "version", "commit", "candidate"}
 PACKAGES = ("@arcfold/dsh", "@arcfold/dsh-method-ui")
 DAILY_PROFILE = "~/.dsh/profiles/desktop"
 MARK_START = "<!-- arcfold-next:start -->"
@@ -36,6 +36,8 @@ IN_FLIGHT = {
     "merge-attempt.json": ({"marking-ready", "merging"}, "合入 PR"),
     "github.json": ({"tagging", "creating", "uploading"}, "建 Git 标签或 GitHub 发行"),
     "finalize.json": ({"finalizing"}, "公开 GitHub 发行"),
+    "publication.json": ({"publishing"}, "发布固定候选"),
+    "npm-publish.json": ({"publishing"}, "发布候选的 npm 安装包"),
 }
 ADVISORY = ({"posting", "check_github"}, "创建后续 Issue")
 
@@ -122,6 +124,11 @@ def validate_binds(flow, binds):
                     f"文件 {path.name} 的内容和绑定的摘要不一致。")
     if "version" in binds:
         require(isinstance(binds["version"], str) and re.fullmatch(VERSION, binds["version"]), "版本使用三段数字。")
+    if "candidate" in binds:
+        require(isinstance(binds["candidate"], str) and DIGEST.fullmatch(binds["candidate"]) and
+                binds.get("repo") == flow.repo.name and "version" in binds and
+                set(binds.get("packages", {})) == set(PACKAGES),
+                "候选授权同时绑定仓库、版本和两份安装包。")
     if "commit" in binds:
         require(isinstance(binds["commit"], str) and re.fullmatch(SHA, binds["commit"]), "提交使用 40 位编号。")
 
@@ -524,8 +531,33 @@ def after_merge(flow, directory, merge, number, row):
     version = release["version"]
     folder = flow.state / "releases" / version
     extra = {"pr": number, "version": version}
-    github, final, npm = (load_json(folder / name) for name in ("github.json", "finalize.json", "npm-publish.json"))
-    if not (folder / "release.json").is_file():
+    import release_candidates as candidates
+    if candidates.index(flow, version):
+        candidate_dir, candidate = candidates.current(flow, version)
+        extra.update(candidate=candidate["id"], candidate_number=candidate["number"])
+        if candidate["source"] != merge["source"] and candidates.publication_record(flow, candidate, "npm-publish.json").get("phase") != "published":
+            return row("D5", f"原候选已被第 {candidate['number']} 次候选取代；运行 candidate --version {version} 查看当前待办",
+                       "Agent", **extra)
+        folder = candidates.publication_directory(flow, candidate)
+        built = (candidates.artifacts(flow, candidate) / "release.json").is_file()
+        if not built:
+            return row("D5", f"第 {candidate['number']} 次候选待构建，运行 release --version {version} --prepare",
+                       "Agent", **extra)
+        github = candidates.publication_record(flow, candidate, "github.json")
+        if not github:
+            pending = candidates.readiness(candidate_dir, candidate)
+            if pending:
+                return row("D5", "发布前待办：" + "；".join(pending), "Agent", **extra)
+            if candidates.frozen_reasons(flow, version):
+                return row("D5", "本候选已有对外写入记录，先核对远端结果", "核对", **extra)
+            step, who = row.wait("候选已通过发布前验证，准备绑定本候选及整组包的发布授权", "等开发者答复发布授权")
+            return row("D5", step, who, **extra)
+    else:
+        built = (folder / "release.json").is_file()
+    names = ("github.json", "finalize.json", "npm-publish.json")
+    github, final, npm = (candidates.publication_record(flow, candidate, name) for name in names) if candidates.index(flow, version) else (
+        load_json(folder / name) for name in names)
+    if not built:
         return row("D5", f"已合入，待 release --version {version} 构建发行包", "Agent", **extra)
     if github.get("phase") in IN_FLIGHT["github.json"][0]:
         return row("D5", f"{version} 的 GitHub 发行写入结果未知，先核对", "核对", **extra)

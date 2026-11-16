@@ -4,6 +4,8 @@
 
 不要在仓库、日志、截图或问题记录中放入密钥、私人对话、用户文件或真实请求内容。测试使用独立目录、合成材料和模拟模型；真实付费模型请求必须先有明确授权，不自动重发结果未知的请求。
 
+发布前发现问题时，未对外写入的版本可按[同版本修补流程](tools/dev-workflow/release-candidates.md)保留原包和失败证据，另开修补决策、取得新审阅并重新验收。普通 `release` 仅准备本机包；最终发布须明确选择已验收候选，并持有绑定整组包的授权。已有 GitHub 标签或草稿、任一 npm 包时不得同版本换内容。
+
 Desktop 专项检查使用 macOS Apple Silicon、Node.js 24.15 和 Python 3.12。先按锁定文件安装依赖并禁用安装脚本，再将 `ARCFOLD_PATCH_TEST_INSTALLATION` 指向该依赖目录、`ARCFOLD_TREE_ENCODING_PYTHON` 指向 Python 可执行文件，运行 `node scripts/test-isolated.mjs test/desktop-adapter.test.mjs test/desktop-configuration.test.mjs test/desktop-setup.test.mjs test/desktop-tree-integration.test.mjs`。脚本只在独立副本装配依赖并运行模拟检查。完整检查还需要项目维护的冻结资源与不公开的历史测试材料；缺少这些材料时，应记录未运行的范围，不能将专项通过称为完整通过。
 
 自动检查工作流是候选配置；实际仓库的运行环境、权限和保护规则需在发布前演练。对无法复现的结果，列出缺少的条件和失败日志，不将跳过或未验证记为通过。

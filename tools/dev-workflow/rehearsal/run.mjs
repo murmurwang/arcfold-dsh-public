@@ -160,6 +160,7 @@ switch (action) {
     const current = evidence('readback', { ...readback, uiSha256: hash(body), version: newer, restart });
     const gitProof = join(stateDir, 'github-source.json');
     const receipt = { account: 'arcfold-test', host: hostVersion, older, newer, source: candidate,
+      candidate: bundle.release_candidate,
       packages: Object.fromEntries(bundle.packages.filter(row => row.name.startsWith('@arcfold/') && row.version === newer)
         .map(row => [row.name, row.sha256])),
       checks: { fresh_install: restored, synthetic_dialogue: restored, failed_download_restored: restored,

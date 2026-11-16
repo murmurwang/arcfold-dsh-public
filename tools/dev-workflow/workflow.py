@@ -79,6 +79,14 @@ def decision_note(raw):
         values = re.findall(rf"(?m)^{key}: ([^\n]+)$", header)
         require(len(values) == 1, f"决策记录必须填写唯一的 {key}。")
         fields[key] = text_field(values[0], key)
+    for key in ("repair_of", "repair_reason"):
+        values = re.findall(rf"(?m)^{key}: ([^\n]+)$", header)
+        require(len(values) <= 1, f"决策记录中的 {key} 不能重复。")
+        if values:
+            fields[key] = text_field(values[0], key)
+    require(("repair_of" in fields) == ("repair_reason" in fields), "同版修补须同时写原候选和原因。")
+    if "repair_of" in fields:
+        require(re.fullmatch(r"[a-f0-9]{64}", fields["repair_of"]), "repair_of 使用完整候选标识。")
     require(fields["fixed_in"] == "pending" or re.fullmatch(VERSION, fields["fixed_in"]), "fixed_in 须为发行版本或 pending。")
     require(fields["user_verified"] == "pending", "候选中的用户验收字段须为 pending，实际观察通过 close-loop 登记。")
     sections = {}
@@ -91,7 +99,9 @@ def decision_note(raw):
         text_field(sections.get(name), name)
     criteria = re.findall(r"(?m)^- (.+)$", sections[names[5]])
     require(criteria and len(set(criteria)) == len(criteria), "验收标准至少需要一条独立的检查项。")
-    return {"title": text.splitlines()[0].removeprefix(prefix), "criteria": criteria, **fields}
+    requirements = re.findall(r"(?m)^- (.+)$", sections.get("发布前待办", ""))
+    return {"title": text.splitlines()[0].removeprefix(prefix), "criteria": criteria,
+            "release_requirements": requirements, **fields}
 
 
 def registered_scope(scope):
@@ -168,14 +178,19 @@ def release_notes(path, head, base, paths, fields):
     match = re.search(rf"(?ms)^## {re.escape(version)}[ \t]*\n(.+?)(?=^## |\Z)", notes)
     require(match and match[1].strip(), "更新记录中缺少版本号对应的说明。")
     previous = json.loads(blob(path, base, "package.json"))["version"]
-    require(tuple(map(int, version.split("."))) > tuple(map(int, previous.split("."))), "发行版本须高于 main 中的版本。")
+    comparison = (tuple(map(int, version.split("."))), tuple(map(int, previous.split("."))))
+    require(comparison[0] >= comparison[1], "发行版本不能低于 main 中的版本。")
+    repair = {key: fields[key] for key in ("repair_of", "repair_reason") if key in fields}
+    require(comparison[0] != comparison[1] or len(repair) == 2, "同版本修补须引用原候选并写明原因。")
+    require(comparison[0] == comparison[1] or not repair, "新发行不能冒用同版本修补的候选。")
     core = json.loads(blob(path, head, "package.json"))
     ui = json.loads(blob(path, head, "packages/method-ui/package.json"))
     lockfile = json.loads(blob(path, head, "package-lock.json"))
     require(all(row["version"] == version for row in (core, ui, lockfile, lockfile["packages"][""])),
             "源码、锁文件、核心包和界面包的发行版本须一致。")
     require(core["engines"]["dsh"] == COMPATIBLE_DSH, "DSH 兼容范围变化，需要先完成宿主验证。")
-    return {"version": version, "notes": match[1].strip(), "engines_dsh": core["engines"]["dsh"]}
+    return {"version": version, "notes": match[1].strip(), "engines_dsh": core["engines"]["dsh"],
+            "requirements": fields.get("release_requirements", []), **repair}
 
 
 class Workflow:
@@ -248,7 +263,9 @@ class Workflow:
             require(not git_line(checkout, "status", "--porcelain"), "先提交候选的全部改动。")
             base, head = self.repo.main(), git_line(checkout, "rev-parse", "HEAD")
             require(base == task["base"], "main 已前进。重新组合到当前 main 后再提交。")
-            self.material(checkout, task, head, base)
+            _, _, release, _ = self.material(checkout, task, head, base)
+            from release_candidates import begin_repair
+            begin_repair(self, release, key, head)
             branch = task["branch"]
             extra = Path(body_path).read_text().strip() if body_path else "改动范围和验收条件见决策记录。"
             body = f"Decision: docs/notes/{key}.md\n\n{extra}\n"
@@ -348,6 +365,12 @@ class Workflow:
         files = {}
         paths = [name for _, name in pairs]
         release = release_notes(checkout, head, base, paths, note)
+        if release and release.get("repair_of"):
+            from release_candidates import check_repair
+            check_repair(self, release, base)
+        elif release:
+            from release_candidates import require_unpublished
+            require_unpublished(self, release["version"])
         for status, name in pairs:
             require(inside_scope(name, scope), f"改动超出登记范围 {name}。")
             # For deletions include the preceding text as review evidence.
@@ -427,13 +450,22 @@ class Workflow:
         directory, _ = self.task(key)
         with locked(directory, "task"):
             fields = self.check(key)
-            release = read(self.state / "releases" / version / "release.json")
-            require(release["target"]["decision"] == key and fields["fixed_in"] == version,
+            import release_candidates as candidates
+            candidate = None
+            if candidates.index(self, version):
+                _, candidate = candidates.current(self, version)
+                release = read(candidates.artifacts(self, candidate) / "release.json")
+            else:
+                release = read(self.state / "releases" / version / "release.json")
+            decisions = candidate["decisions"] if candidate else [release["target"]["decision"]]
+            require(key in decisions and fields["fixed_in"] == version,
                     "观察须关联此问题实际修复的发行版本。")
             published(release)
             result = {"observed_in_version": fields["observed_in_version"], "fixed_in": version,
                       "user_verified": text_field(observation, "开发者的实际观察"), "outcome": outcome, "at": timestamp(),
                       "decision": key, "source": release["source"], "packages": release["packages"]}
+            if candidate:
+                result["candidate"] = candidate["id"]
             if feedback is not None:
                 result["feedback"] = feedback
             name = directory / "observations" / (uuid.uuid4().hex + ".json")
@@ -632,6 +664,13 @@ class Workflow:
             decision = receipt["target"]["decision"]
             pending = open_decisions(self, decision)
             require(not pending, f"任务 {decision} 还有未答的决定单 {'、'.join(pending)}，先请开发者答复。")
+            release = receipt["target"].get("release")
+            if release and release.get("repair_of"):
+                from release_candidates import check_repair
+                check_repair(self, release, base)
+            elif release:
+                from release_candidates import require_unpublished
+                require_unpublished(self, release["version"])
             if pr["draft"]:
                 require(not known, "上次退出草稿结果未知，先到 GitHub 核对。")
                 write(journal, {"phase": "marking-ready", "head": head, "base": base})
@@ -641,6 +680,10 @@ class Workflow:
                     self.successful_ci(head) == receipt["target"]["ci"], "合入前的提交或检查已变化。")
             known = {"phase": "merging", "target": receipt["target"], "review_sha256": receipt["sha256"],
                      "review_comment": comment["url"], "started_at": timestamp()}
+            if release:
+                result = receipt["review"]["result"]
+                known.update(release_requirements=result.get("release_requirements", []),
+                             release_requirements_confirmed="release_requirements" in result)
             write(journal, known)
             self.repo.gh("pr", "merge", str(number), "--repo", self.repo.name, "--squash", "--match-head-commit", head)
             return self.confirm_merge(number, known, self.repo.pr(number), journal)
@@ -659,12 +702,8 @@ class Workflow:
         result = {**known, "phase": "confirmed", "source": commit_sha, "confirmed_at": timestamp(), "pr": number}
         release = target["release"]
         if release:
-            version = release["version"]
-            path = self.state / "merges" / f"{version}.json"
-            if path.exists():
-                require(read(path)["source"] == commit_sha, "此版本已经关联另一提交。")
-            else:
-                write(path, result)
+            from release_candidates import register_merge
+            register_merge(self, result)
         write(journal, result)
         return result
 
@@ -730,6 +769,20 @@ def parse_args():
     mode.add_argument("--prepare", action="store_true", help="只构建、核对依赖和 npm dry-run")
     mode.add_argument("--finalize", action="store_true", help="从隔离验收回执确认后发布 GitHub Release")
     release.add_argument("--isolated-receipt")
+    release.add_argument("--candidate", help="最终发布必须显式指定候选")
+    release.add_argument("--approval", help="绑定本候选及整组安装包的发布授权单")
+    candidate = sub.add_parser("candidate", help="查询候选，登记验证证据或核对未发生的远端写入")
+    candidate.add_argument("--version", required=True)
+    candidate.add_argument("--id", help="登记证据时指定候选")
+    candidate.add_argument("--reason", help="构建输入变化的实际原因")
+    candidate.add_argument("--approval", help="实际 npm 发布准备使用的绑定授权")
+    operation = candidate.add_mutually_exclusive_group()
+    operation.add_argument("--import-legacy", action="store_true")
+    operation.add_argument("--evidence", metavar="FILE")
+    operation.add_argument("--reconcile-no-write", metavar="FILE")
+    operation.add_argument("--rebuild", action="store_true")
+    operation.add_argument("--begin-npm", action="store_true")
+    operation.add_argument("--check-npm", action="store_true")
     return parser.parse_args()
 
 
@@ -783,7 +836,23 @@ def main():
             result = flow.merge(args.pr)
         elif action == "release":
             from release import release
-            result = release(flow, args.version, args.prepare, args.finalize, args.isolated_receipt)
+            result = release(flow, args.version, args.prepare, args.finalize, args.isolated_receipt,
+                             args.candidate, args.approval)
+        elif action == "candidate":
+            import release_candidates as candidates
+            if any((args.import_legacy, args.evidence, args.reconcile_no_write, args.rebuild, args.begin_npm, args.check_npm)):
+                with locked(flow.state, "main"):
+                    if args.import_legacy:
+                        candidates.import_legacy(flow, args.version)
+                    elif args.evidence:
+                        candidates.record_evidence(flow, args.version, args.id, read(args.evidence))
+                    elif args.rebuild:
+                        candidates.rebuild(flow, args.version, args.id, args.reason)
+                    elif args.begin_npm or args.check_npm:
+                        candidates.npm_publication(flow, args.version, args.id, args.approval, args.begin_npm)
+                    else:
+                        candidates.reconcile(flow, args.version, read(args.reconcile_no_write))
+            result = candidates.view(flow, args.version)
         elif action == "close-loop":
             observation = Path(args.observation_file).read_text() if args.observation_file else None
             result = flow.close_loop(args.id, args.version, observation, args.outcome, args.feedback)

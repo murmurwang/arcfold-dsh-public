@@ -4,6 +4,8 @@
 
     python3 -B prepare.py --older OLD_DIR --newer NEW_DIR --npm-cache CACHE_DIR --output NEW_SHARED_DIR
 
+新版候选的 `NEW_DIR` 使用 `candidate --version X` 返回的原包目录。`release.json` 中的候选身份与两份包校验值进入测试包身份；每次候选必须使用全新的输出目录，账户内资料与缓存也按测试包身份隔离。旧发行回执尚无候选字段时，先建立候选索引，再为 `prepare.py` 显式传 `--candidate 完整候选标识`。最终 `result.json` 同时记录源码、发行版本、候选和实际两份包校验值，不能因版本号相同沿用上次结果。
+
 1. 用 macOS 快速用户切换登录普通账户 `arcfold-test`。在 Finder 打开新制备的测试目录，双击 `Run-DSH.command`。
 2. 在打开的 DSH 里选择「插件」→「添加插件」，输入 `@arcfold/dsh`，启用并完成首次设置。按 ⌘Q 退出 DSH。
 3. 再双击同一入口。按终端给出的测试文字发一条消息。看到合成回复和目标后，在插件详情选中新版并确认。第一次下载会返回模拟错误，等旧版恢复。出现错误后运行 `Run-DSH.command restored`，它会核对旧包、对话和失败请求，然后恢复下载。

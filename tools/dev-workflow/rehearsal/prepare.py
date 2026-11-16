@@ -24,9 +24,13 @@ def package_rows(directory):
     return receipt["version"], source, receipt["packages"]
 
 
-def prepare(older, newer, output, cache):
+def prepare(older, newer, output, cache, candidate=None):
     old_version, _, _ = package_rows(older)
     new_version, source, _ = package_rows(newer)
+    release_record = read(newer / "release.json") if (newer / "release.json").is_file() else {}
+    if release_record.get("candidate"):
+        require(candidate is None or candidate == release_record["candidate"], "演练候选标识与发行记录不符。")
+        candidate = release_record["candidate"]
     require(tuple(map(int, old_version.split("."))) < tuple(map(int, new_version.split("."))), "演练的两个版本须由旧到新。")
     output.mkdir(mode=0o755)
     packages = []
@@ -83,7 +87,8 @@ def prepare(older, newer, output, cache):
         packages.append({"name": name, "version": version, "file": filename, "manifest": manifest,
                          "integrity": row["integrity"], "sha256": digest(data)})
     require(not missing, "演练镜像缺少锁定依赖 " + ", ".join(missing))
-    kit = {"older": old_version, "newer": new_version, "candidate": source, "packages": packages}
+    kit = {"older": old_version, "newer": new_version, "candidate": source, "packages": packages,
+           "release_candidate": candidate}
     kit["id"] = digest(kit)[:12]
     write(output / "bundle.json", kit)
     for name in ("fixture.mjs", "registry.mjs", "model.mjs", "desktop.mjs", "run.mjs", "Run-DSH.command", "README.md"):
@@ -97,5 +102,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     for label in ("older", "newer", "output", "npm-cache"):
         parser.add_argument("--" + label, type=Path, required=True)
+    parser.add_argument("--candidate", help="旧发行记录的候选索引标识；新记录会自动读取")
     args = parser.parse_args()
-    print(json.dumps(prepare(args.older, args.newer, args.output, args.npm_cache), ensure_ascii=False))
+    print(json.dumps(prepare(args.older, args.newer, args.output, args.npm_cache, args.candidate), ensure_ascii=False))

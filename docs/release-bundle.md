@@ -2,6 +2,8 @@
 
 发行把 Arcfold 业务与网页面板装进固定官方 DSH，不另造聊天、审批或任务执行器。本文是实现及交付要求；每份发行是否完成实际安装、浏览器和数据保留验收，以该发行清单为准。
 
+受管 Desktop 发行先在本机准备一份候选，即绑定源码、审阅、两份包和验证记录的一次交付尝试。许可待办与隔离验收通过后才创建版本标签及公开发行。未对外写入的版本可以保留原证据后修补；已有标签、草稿或任一 npm 包时锁定内容。操作和恢复边界见[候选与同版本修补](../tools/dev-workflow/release-candidates.md)。
+
 ## 同一份源码产生两包
 
 `@arcfold/dsh` 是核心，`@arcfold/dsh-method-ui` 是唯一网页插件。核心声明有序 `dsh.bundle.patch`：先 `cordis.patch.yml`，再 `presets/arcfold.patch.yml`。宿主按 `@deepseek-ai/dsh-base → @deepseek-ai/dsh-web-app → @arcfold/dsh` 装配；UI 用包名加载一次，不能引用开发工作目录。主包不嵌入第二份网页包。

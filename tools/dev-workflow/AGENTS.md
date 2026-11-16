@@ -3,10 +3,10 @@
 开工先运行 `next`。它只读本机记录，列出每个任务所处的环节、下一步和等谁，并汇总日常版本、未答的请求单、结果未知的写入、未处理的反馈和已退场的任务。`--remote` 另查 GitHub 上的 main、提案、检查和入口代码所在提交。`--write FILE` 把结果写入文件中的 `arcfold-next` 标记段。
 
 1. 通过 `new --input FILE` 登记问题、发生版本和改动范围；来自开发者反馈时加 `--from-feedback F编号`，来源和发生版本自动预填。在返回的决策中用中文写真实场景、方案、预期、备选、验收和风险，一份决策只写一个问题。用 `check ID` 核对。把决策全文给开发者看，按开发者的意见修改，开发者确认后用 `align ID --text 原话` 登记。`start ID` 只接受与当前决策内容一致的对齐确认，本任务有未答的决定单时也会拒绝；通过后从当前 GitHub main 开独立工作目录。当前用户安装、资料、配置和凭据属于用户自己的环境。
-2. 在独立目录提交改动，再用 `submit ID` 推送并创建提案。版本变更同时提交两份包的版本、锁文件、更新说明和依赖核对。若 main 已前进，用 `rebase ID` 重新组合，再提交检查。每次写远端后核对实际结果。结果未知时保留本机尝试记录，先查询远端和服务用量。
+2. 在独立目录提交改动，再用 `submit ID` 推送并创建提案。版本变更同时提交两份包的版本、锁文件、更新说明和依赖核对。同版本修补在决策头部写 `repair_of` 和 `repair_reason`；入口在准备审阅材料及合入前查询 GitHub 与 npm，已有对外记录或结果未知时拒绝换包。若 main 已前进，用 `rebase ID` 重新组合，再提交检查。每次写远端后核对实际结果。结果未知时保留本机尝试记录，先查询远端和服务用量。
 3. `review --pr N` 先查 GitHub 自动检查、代码中的已登记决策、范围、发行元数据和密钥扫描，再准备审阅材料和费用。材料附上当前提交的 GitHub 作业和实际测试结果。仅更新锁文件版本时，附完整差异和逐项比较。核对需要送出的源码，用 `ask` 开审阅费用授权单，写明估算和密钥剩余额度。授权单绑定本次材料编号（`binds.packet`），或绑定此提案的累计金额上限（`binds.pr` 和 `binds.cap_usd`）。开发者同意后用 `review --pr N --approval A编号`。专用密钥由操作者通过 `ARCFOLD_REVIEW_API_KEY` 提供，审阅进程从一条新请求开始。摘要把两侧提交、核对证据和回执关联起来。独立结论有放行、阻塞和后续问题。作者身份字段只记录贡献者。
 4. `merge --pr N` 复核代码、检查和独立审阅，本任务有未答的决定单时拒绝。使用 GitHub squash 合入，再核验 main 的文件树和基线。新任务基于合入后的 main。
-5. `release --version X` 从已合入源码两次构建并核对同批包，保存 npm dry-run 和许可，建立 Git 标签与 GitHub 发行草稿。隔离账户验证安装、发消息、更新、失败恢复和重启读回后，用 `--finalize --isolated-receipt FILE` 完成 GitHub 发行。首次公开仓库和真实 npm 发布按用户明确授权执行。
+5. 合入时登记一份候选，绑定源码与审阅；`release --version X --prepare`（或普通 `release`）只在本机两次构建、核对同批包，保存 npm dry-run 和许可，不创建标签或发行草稿。用 `candidate --version X` 查看候选及发布前待办。隔离账户验证安装、发消息、更新、失败恢复和重启读回后，用 `candidate --version X --id 候选 --evidence FILE` 登记逐项证据；有失败、未确认或未答决定单时不能发布。发布授权须绑定仓库、版本、候选与两份包的校验值，之后 `release --version X --candidate 候选 --finalize --approval A编号` 才创建标签、上传原包并公开 GitHub 发行。npm 发布前运行 `candidate --version X --id 候选 --begin-npm --approval A编号`，实际发布后 `--check-npm` 核对结果；这里只登记与核对，不执行 npm 上传。首次公开仓库和真实 npm 发布仍按用户明确授权执行。完整字段及旧记录接续见 [候选与同版本修补](release-candidates.md)。
 6. `export --output DIR` 生成当前 main 的无历史导出及逐文件检查清单。为用户核对可能的个人资料、凭据、真实数据和许可，再请用户批准创建公开仓库。公开后 main 要求最近的自动检查成功并与 main 同步。
 7. 开发者更新并提供观察后，先用 `feedback` 登记，再用 `close-loop ID --version X --outcome pass|fail|unconfirmed --feedback F编号`（或 `--observation-file FILE`）核对 npm 上的两份包并关联观察。验收只描述实际发生的情况，只有 pass 算闭环。
 

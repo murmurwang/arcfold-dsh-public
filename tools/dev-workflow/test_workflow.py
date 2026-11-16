@@ -268,6 +268,25 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkflowError, "无法定位"):
             validate(packet, response)
 
+    def test_new_review_requires_explicit_and_locatable_publication_requirements(self):
+        evidence = [{"path": "THIRD_PARTY_NOTICES.md", "line": 1, "note": "Synthetic license inventory"}]
+        result = {"packet": "one", "checks": {
+            name: {"status": "pass", "summary": "Covered", "evidence": evidence} for name in CHECKS
+        }, "findings": []}
+        packet = {"id": "one", "release_checks": 1, "files": {"THIRD_PARTY_NOTICES.md": "synthetic inventory\n"}}
+        def response():
+            return {"provider_request_id": "req_example", "response": {
+                "id": "resp_example", "model": "gpt-5.4-2026-03-05", "status": "completed", "service_tier": "flex",
+                "usage": {"input_tokens": 500, "output_tokens": 25},
+                "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": json.dumps(result)}]}]}}
+        with self.assertRaisesRegex(WorkflowError, "发布前待办"):
+            validate(packet, response())
+        result["release_requirements"] = [{"title": "补齐许可", "description": "Publish the inventory", "evidence": evidence}]
+        self.assertFalse(blockers(validate(packet, response())["result"]))
+        result["release_requirements"][0]["evidence"] = [{"path": "missing.md", "line": 1, "note": "not supplied"}]
+        with self.assertRaisesRegex(WorkflowError, "无法定位"):
+            validate(packet, response())
+
     def test_releases_require_same_archives_and_real_rehearsal_versions(self):
         directory = Path(self.temp.name)
         release = {"source": HEAD, "version": "0.4.0", "reproduced": True, "engines_dsh": "0.2.2-rc.1",

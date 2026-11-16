@@ -7,10 +7,11 @@ from pathlib import Path
 import shutil
 import tarfile
 import tempfile
+import uuid
 from urllib.parse import quote
 from urllib.request import urlopen
 
-from common import command, digest, git, git_line, locked, read, require, timestamp, write
+from common import WorkflowError, command, digest, git, git_line, locked, read, require, timestamp, write
 from workflow import COMPATIBLE_DSH
 
 
@@ -85,7 +86,7 @@ def verify_package(path, row, version, notes, env):
     return result
 
 
-def prepare(flow, directory, version, merge):
+def prepare(flow, directory, version, merge, candidate=None):
     target = merge["target"]
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.TemporaryDirectory(prefix="build-", dir=directory) as local:
@@ -126,6 +127,9 @@ def prepare(flow, directory, version, merge):
                "build_manifest_sha256": digest((directory / "build-manifest.json").read_bytes()),
                "npm_dry_run_sha256": digest((directory / "npm-dry-run.json").read_bytes()),
                "dependency_lock_sha256": digest((directory / "dependency-lock.json").read_bytes())}
+    if candidate:
+        from release_candidates import build_recipe
+        receipt.update(candidate=candidate, builder_recipe=build_recipe())
     write(directory / "release.json", receipt)
     return receipt
 
@@ -146,17 +150,26 @@ def release_assets(directory, receipt):
         "release.json": digest((directory / "release.json").read_bytes())}
 
 
-def ensure_github_release(flow, directory, receipt):
+def ensure_github_release(flow, directory, receipt, artifact_directory=None):
+    artifact_directory = artifact_directory or directory
     tag = "v" + receipt["version"]
     source = receipt["source"]
     phase = directory / "github.json"
     pending = read(phase) if phase.exists() else {}
+    from release_candidates import folder, reconciled_journals
+    if phase.exists():
+        relative = str(phase.relative_to(folder(flow, receipt["version"])))
+        if reconciled_journals(flow, receipt["version"]).get(relative) == digest(phase.read_bytes()):
+            pending = {}
+    publication = read(directory / "publication.json")
+    def journal(value):
+        write(phase, {**value, "attempt": publication["attempt"]})
     require(not pending or pending["source"] == source, "旧 GitHub 发行步骤使用了不同源码。")
     tags = flow.repo.api(f"/git/matching-refs/tags/{tag}")
     ref = next((row for row in tags if row["ref"] == f"refs/tags/{tag}"), None)
     if not ref:
         require(not pending, "上次 Git 标签写入未确认。先到 GitHub 核对。")
-        write(phase, {"phase": "tagging", "source": source})
+        journal({"phase": "tagging", "source": source})
         ref = flow.repo.api("/git/refs", {"ref": f"refs/tags/{tag}", "sha": source})
     require(ref["object"]["type"] == "commit" and ref["object"]["sha"] == source, "Git 标签指向不同提交。")
     releases = flow.repo.api("/releases?per_page=100", paginate=True)
@@ -169,17 +182,17 @@ def ensure_github_release(flow, directory, receipt):
     else:
         require(pending.get("phase") not in ("creating", "uploading", "confirmed", "finalizing", "published"),
                 "上次 GitHub Release 创建结果未知，先核对。")
-        write(phase, {"phase": "creating", "source": source})
+        journal({"phase": "creating", "source": source})
         remote = flow.repo.api("/releases", {"tag_name": tag, "name": "Arcfold " + receipt["version"], "draft": True,
                                              "body": receipt["release_notes"], "target_commitish": source})
-    expected = release_assets(directory, receipt)
+    expected = release_assets(artifact_directory, receipt)
     uploaded = {row["name"]: row for row in remote.get("assets", [])}
     require(set(uploaded) <= set(expected), "GitHub 发行包含未登记的附件。")
     for name, sha in expected.items():
         if name not in uploaded:
             require(pending.get("asset") != name, "上次附件上传结果未知。先到 GitHub 核对。")
-            write(phase, {"phase": "uploading", "source": source, "asset": name})
-            flow.repo.gh("release", "upload", tag, str(directory / name), "--repo", flow.repo.name, timeout=180)
+            journal({"phase": "uploading", "source": source, "asset": name})
+            flow.repo.gh("release", "upload", tag, str(artifact_directory / name), "--repo", flow.repo.name, timeout=180)
         else:
             require(uploaded[name].get("digest") == "sha256:" + sha, "GitHub 附件摘要与本地记录不一致。")
     info = flow.repo.api(f"/releases/{remote['id']}")
@@ -191,50 +204,88 @@ def ensure_github_release(flow, directory, receipt):
     return result
 
 
-def verify_isolated(path, receipt):
-    proof = read(path)
+def verify_isolated(path, receipt, require_pass=True):
+    proof = path if isinstance(path, dict) else read(path)
     require(proof["account"] == "arcfold-test" and proof["host"] == COMPATIBLE_DSH and
             proof["newer"] == receipt["version"] and proof["source"] == receipt["source"],
             "隔离验收与本次发行不一致。")
     require(proof["packages"] == {row["name"]: row["sha256"] for row in receipt["packages"]},
             "隔离环境实测的包与本次发行不一致。")
+    if receipt.get("candidate"):
+        require(proof.get("candidate") == receipt["candidate"], "隔离验收属于另一候选，不能因同版本沿用。")
     for check in REHEARSAL_CHECKS:
         row = proof["checks"][check]
-        require(row["status"] == "pass" and row["evidence"], f"缺少隔离验收 {check} 的实际结果。")
+        require(row["status"] in ("pass", "fail", "unknown", "unconfirmed") and row["evidence"],
+                f"缺少隔离验收 {check} 的实际结果。")
+        require(not require_pass or row["status"] == "pass", f"隔离验收 {check} 未通过。")
     return proof
 
 
-def release(flow, version, local_only, finalize, isolated):
+def release(flow, version, local_only, finalize, isolated, candidate=None, approval=None):
+    import release_candidates as candidates
     with locked(flow.state, "main"):
-        merged = flow.state / "merges" / f"{version}.json"
-        require(merged.is_file(), "此版本尚无已确认的受管 main 合入。")
-        merge = read(merged)
-        require(merge["phase"] == "confirmed" and flow.repo.main() == merge["source"],
-                "发行使用经过受管合入的当前 main。")
-        directory = flow.state / "releases" / version
-        path = directory / "release.json"
-        receipt = read(path) if path.exists() else prepare(flow, directory, version, merge)
-        require(receipt["source"] == merge["source"] and receipt["review_sha256"] == merge["review_sha256"],
-                "既有发行回执与当前合入不一致。")
-        verify_release(directory, receipt)
-        result = {"record": str(path), **receipt}
-        if local_only:
-            return result
-        require(flow.repo.main() == merge["source"], "GitHub 发行前 main 已变化。")
-        journal = directory / "finalize.json"
-        if finalize:
-            require(isolated, "发布 GitHub Release 前要有隔离账户的实际验收。")
-            verify_isolated(isolated, receipt)
-        result["github"] = ensure_github_release(flow, directory, receipt)
-        if finalize and result["github"]["phase"] != "published":
-            require(not journal.exists(), "上次发布 GitHub Release 结果未知，先核对。")
-            write(directory / "isolated.json", read(isolated))
-            write(journal, {"phase": "finalizing", "at": timestamp(), "source": receipt["source"]})
-            flow.repo.gh("release", "edit", result["github"]["tag"], "--repo", flow.repo.name, "--draft=false")
-            result["github"] = ensure_github_release(flow, directory, receipt)
-            require(result["github"]["phase"] == "published", "GitHub Release 公开状态尚未确认。")
+        if not candidates.index(flow, version):
+            candidates.import_legacy(flow, version)
+        with locked(candidates.folder(flow, version), "candidate"):
+            directory, row = candidates.current(flow, version, candidate)
+            merge = row["merge"]
+            require(merge["phase"] == "confirmed" and flow.repo.main() == merge["source"],
+                    "发行使用经过受管合入的当前 main。")
+            artifact_directory = candidates.artifacts(flow, row)
+            path = artifact_directory / "release.json"
+            if not path.exists():
+                require(not row["legacy"], "旧候选尚未构建，先显式重建为新候选。")
+                require(row["identity"]["recipe"] == candidates.build_recipe(), "构建输入已变化，须另存候选。")
+                try:
+                    prepare(flow, directory, version, merge, row["id"])
+                except (WorkflowError, OSError, ValueError, KeyError) as exc:
+                    failure = {"at": timestamp(), "candidate": row["id"], "outcome": "fail", "error": str(exc)}
+                    candidates.once(directory / "build-failures" / (digest(failure) + ".json"), failure)
+                    raise
+            _, receipt = candidates.built_receipt(flow, row)
+            result = {"record": str(path), **receipt, "candidate": row["id"],
+                      "pending": candidates.readiness(directory, row)}
+            if not finalize:
+                return result
+            require(candidate == row["id"], "最终发布须显式指定实际验证的候选。")
+            proof = candidates.publication_evidence(directory, row, receipt)
+            if isolated:
+                require(verify_isolated(isolated, {**receipt, "candidate": row["id"]}) == proof,
+                        "提供的验收回执与已登记证据不一致。")
+            candidates.publication_approval(flow, approval, row, receipt)
+            remote = candidates.probe(flow, version)
+            candidates.check_remote_packages(remote, receipt)
+            publication = candidates.optional(directory / "publication.json")
+            publication_path = directory / "publication.json"
+            if publication and candidates.reconciled_journals(flow, version).get(
+                    str(publication_path.relative_to(candidates.folder(flow, version)))) == digest(publication_path.read_bytes()):
+                publication = {}
+            if not publication:
+                handoff = candidates.legacy_handoff(flow, directory, row, remote)
+                require(handoff or (not remote["external"] and not candidates.frozen_reasons(flow, version)),
+                        "此版本已有对外记录或结果未知的写入，先核对。")
+                publication = {"phase": "publishing", "attempt": uuid.uuid4().hex,
+                               "candidate": row["id"], "source": row["source"],
+                               "packages": {p["name"]: p["sha256"] for p in receipt["packages"]},
+                               "approval": approval, "at": timestamp()}
+                candidates.once(directory / "publication-attempts" / (digest(publication) + ".json"), publication)
+                write(directory / "publication.json", publication)
+            require(publication["candidate"] == row["id"] and
+                    publication["packages"] == {p["name"]: p["sha256"] for p in receipt["packages"]},
+                    "已有发布尝试绑定另一候选或安装包。")
+            require(flow.repo.main() == merge["source"], "GitHub 发行前 main 已变化。")
+            journal = directory / "finalize.json"
+            result["github"] = ensure_github_release(flow, directory, receipt, artifact_directory)
+            if result["github"]["phase"] != "published":
+                require(not journal.exists(), "上次发布 GitHub Release 结果未知，先核对。")
+                write(directory / "isolated.json", proof)
+                write(journal, {"phase": "finalizing", "at": timestamp(), "source": receipt["source"]})
+                flow.repo.gh("release", "edit", result["github"]["tag"], "--repo", flow.repo.name, "--draft=false")
+                result["github"] = ensure_github_release(flow, directory, receipt, artifact_directory)
+                require(result["github"]["phase"] == "published", "GitHub Release 公开状态尚未确认。")
             write(journal, result["github"])
-        return result
+            write(directory / "publication.json", {**publication, "phase": "github_published"})
+            return result
 
 
 def published(receipt):
