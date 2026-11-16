@@ -154,6 +154,42 @@ class CollabTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkflowError, "PR #6"):
             review_approval(self.flow, capped["id"], 6, packet, estimate)
 
+    def test_pr_cap_counts_every_earlier_request_and_refuses_unknown_spending(self):
+        packet, estimate = "b" * 64, {"estimated_usd_at_output_limit": "0.05"}
+        capped = create_ask(self.flow, {"kind": "approve", "title": "PR #5 审阅累计", "body": "累计不超过 1 美元",
+                                        "binds": {"pr": 5, "cap_usd": "1.00"}})
+        answer(self.flow, capped["id"], "yes", "PR #5 的审阅累计批到 1 美元")
+        prs = self.flow.state / "prs" / "5"
+        write(prs / "not-sent" / "attempt.json", {"client_request_id": "zero", "request_sent": False})
+        write(prs / "settled-none" / "attempt.json", {"client_request_id": "none", "provider": "lmuai"})
+        write(prs / "settled-none" / "billing-reconciliation.json",
+              {"client_request_id": "none", "outcome": "no_usage", "evidence": "provider usage history"})
+        self.assertEqual(review_approval(self.flow, capped["id"], 5, packet, estimate)["spent_usd"], "0")
+        settled = prs / "settled-used"
+        write(settled / "attempt.json", {"client_request_id": "used", "provider": "lmuai"})
+        write(settled / "billing-reconciliation.json",
+              {"client_request_id": "used", "outcome": "usage_confirmed", "evidence": "provider usage history"})
+        with self.assertRaisesRegex(WorkflowError, "实际花费"):
+            review_approval(self.flow, capped["id"], 5, packet, estimate)
+        write(settled / "billing-reconciliation.json", {"client_request_id": "used", "outcome": "usage_confirmed",
+                                                         "evidence": "provider usage history", "actual_cost_usd": "0.96"})
+        with self.assertRaisesRegex(WorkflowError, "超过"):
+            review_approval(self.flow, capped["id"], 5, packet, estimate)
+        write(settled / "billing-reconciliation.json", {"client_request_id": "used", "outcome": "usage_confirmed",
+                                                         "evidence": "provider usage history", "actual_cost_usd": "0.40"})
+        self.assertEqual(review_approval(self.flow, capped["id"], 5, packet, estimate)["spent_usd"], "0.40")
+        unbilled = prs / "unbilled"
+        write(unbilled / "attempt.json", {"client_request_id": "relay", "provider": "lmuai"})
+        write(unbilled / "response.json", {"response": {"usage": {"input_tokens": 10, "output_tokens": 2}}})
+        with self.assertRaisesRegex(WorkflowError, "实际花费"):
+            review_approval(self.flow, capped["id"], 5, packet, estimate)
+        write(unbilled / "response.json", {"response": {"usage": {"input_tokens": 10, "output_tokens": 2}},
+                                           "billing": {"actual_cost_usd": "0.10"}})
+        self.assertEqual(review_approval(self.flow, capped["id"], 5, packet, estimate)["spent_usd"], "0.50")
+        write(prs / "in-flight" / "attempt.json", {"client_request_id": "pending", "phase": "sending"})
+        with self.assertRaisesRegex(WorkflowError, "实际花费"):
+            review_approval(self.flow, capped["id"], 5, packet, estimate)
+
     def test_review_without_a_granted_request_never_launches_the_reviewer(self):
         run_dir = self.flow.state / "prs" / "5" / (HEAD + "-" + BASE)
         target = {"repo": REPO, "pr": 5, "head": HEAD, "base": BASE}

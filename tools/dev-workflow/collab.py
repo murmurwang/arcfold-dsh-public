@@ -201,19 +201,39 @@ def granted(record):
 
 
 def review_spent(flow, number):
-    """Spending already recorded for reviews of this PR: billed amounts, or the upper bound from usage."""
+    """Spending already recorded for reviews of this PR.
+
+    Each earlier request counts its billed amount, the upper bound from its
+    returned usage, or the amount written in its reconciliation. A request
+    whose spending cannot be determined refuses instead of counting as zero.
+    """
     from desktop_review_request import maximum_cost
 
+    root = flow.state / "prs" / str(number)
+    runs = sorted({path.parent for name in ("attempt.json", "response.json") for path in root.glob(f"*/{name}")})
     total = Decimal("0")
-    for path in sorted((flow.state / "prs" / str(number)).glob("*/response.json")):
-        response = read(path)
+    for here in runs:
+        attempt = load_json(here / "attempt.json")
+        if attempt.get("request_sent") is False:
+            continue
+        response = load_json(here / "response.json")
         billing = response.get("billing")
         if isinstance(billing, dict) and "actual_cost_usd" in billing:
             total += amount(billing["actual_cost_usd"], allow_zero=True)
             continue
         usage = (response.get("response") or {}).get("usage") or {}
-        if type(usage.get("input_tokens")) is int:
+        if attempt.get("provider", "openai") != "lmuai" and type(usage.get("input_tokens")) is int:
             total += maximum_cost(usage["input_tokens"])
+            continue
+        settled = load_json(here / "billing-reconciliation.json")
+        if attempt and settled.get("client_request_id") == attempt.get("client_request_id") and settled.get("evidence"):
+            if settled.get("outcome") == "no_usage":
+                continue
+            if settled.get("outcome") == "usage_confirmed" and "actual_cost_usd" in settled:
+                total += amount(settled["actual_cost_usd"], allow_zero=True)
+                continue
+        raise WorkflowError(f"无法确定 PR #{number} 之前一次审阅（{here.name[:12]}）的实际花费。"
+                            "按金额上限批准时，先在 billing-reconciliation.json 写明 actual_cost_usd。")
     return total
 
 

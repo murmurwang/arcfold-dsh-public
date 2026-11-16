@@ -18,6 +18,6 @@ npm 正式发布还需核对安装包之外的公开发布信息，见 [发布�
 
 `--repo OWNER/REPOSITORY` 或 `ARCFOLD_REPOSITORY` 指定仓库。`ARCFOLD_AGENT_ID` 可声明其他 Agent 的贡献标识，入口也支持当前 Codex 会话或操作系统账号。代码和回执流程适用于走该入口的协作者。分支权限由所连接的 GitHub 仓库配置。请求单、对齐确认和反馈都是同一账户可写的本机文件，用来防止误用过期授权和遗漏步骤，不是系统级身份认证。
 
-审阅使用当前 HTTPS 连接设置，支持通过 HTTP 代理建立到 OpenAI 的加密隧道。先建立并验证连接，再传送审阅材料。连接建立前的失败记录为未送出。发送结果未知时，从 OpenAI 用量页或支持渠道核对。在原尝试目录保存 `billing-reconciliation.json`，记录 `client_request_id`、`outcome`（`no_usage` 或 `usage_confirmed`）和 `evidence`，才继续同一提案的新审阅。
+审阅使用当前 HTTPS 连接设置，支持通过 HTTP 代理建立到 OpenAI 的加密隧道。先建立并验证连接，再传送审阅材料。连接建立前的失败记录为未送出。发送结果未知时，从 OpenAI 用量页或支持渠道核对。在原尝试目录保存 `billing-reconciliation.json`，记录 `client_request_id`、`outcome`（`no_usage` 或 `usage_confirmed`）和 `evidence`，才继续同一提案的新审阅。授权单按累计金额上限批准时，`usage_confirmed` 还要写 `actual_cost_usd`；任何一次旧请求的花费无法确定，`review --approval` 都会拒绝。
 
 用户选择通过灵眸转发时，两次 `review` 命令都带 `--provider lmuai`。候选、服务和模型一起绑定到审阅材料。先通过灵眸只读接口核对 GPT-6.1 Terra 可用性和专用密钥最多 3.50 美元的总额度。公开起步价用于估算，可能明显低于实际扣费；密钥额度用于约束发起，独立回执附实际扣除额度。审阅材料会经过灵眸。送出前说明提交范围和服务处理边界。
