@@ -17,6 +17,10 @@ def entry_version():
         return {"commit": "unknown", "reason": str(exc), "checked_at": timestamp()}
 
 
+def has_association(record):
+    return bool(record["links"]) or any(row["to"] != "note" for row in record["routes"])
+
+
 def load(flow, item):
     require(isinstance(item, str) and delivery.FEEDBACK.fullmatch(item), "反馈编号形如 001-F1、F1 或 dev-F1。")
     path = flow.state / "feedback" / item / "feedback.json"
@@ -60,7 +64,9 @@ def load(flow, item):
             if event["to"] != "note" and record["status"] == "record-only":
                 record["status"] = "pending"
         elif event["action"] == "status":
-            record["status"] = event["status"]
+            # A note does not undo an actual acceptance, including old histories.
+            if event["status"] != "record-only" or record["status"] != "resolved":
+                record["status"] = event["status"]
         elif event["action"] == "attach":
             record["attachments"] += event["attachments"]
     # Existing routes are sources of association, never proof that an issue was solved.
@@ -74,6 +80,10 @@ def load(flow, item):
             relation = "source" if row["to"].startswith("new:") else "acceptance"
             if total and (total, relation) not in removed and not any(link["delivery"] == total and link["relation"] == relation for link in record["links"]):
                 record["links"].append({"delivery": total, "relation": relation, "source": "legacy route", **row})
+    # Derive this after all associations, so either operation order and legacy
+    # record-only events keep unresolved work visible without rewriting history.
+    if record["status"] == "record-only" and has_association(record):
+        record["status"] = "pending"
     return path, record
 
 
@@ -180,7 +190,7 @@ def route(flow, item, to, note=None):
         _, record = load(flow, item)
         require(all(row["to"] != to for row in record["routes"]), f"{item} 已经记过去向 {to}。")
         result = append(flow, item, "route", to=to, note=note)
-        if to == "note":
+        if to == "note" and result["status"] == "pending" and not has_association(result):
             result = append(flow, item, "status", status="record-only", reason=note)
         return result
 

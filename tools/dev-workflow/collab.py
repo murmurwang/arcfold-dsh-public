@@ -446,6 +446,7 @@ def unknown_fields(value, path=""):
 
 def pending_writes(state):
     """Records of external writes whose outcome was never confirmed."""
+    from workflow import Workflow
     found = []
     if not state.is_dir():
         return found
@@ -471,9 +472,13 @@ def pending_writes(state):
             if name == "task.json" and phase == "starting":
                 found.append({"file": relative, "field": "phase", "phase": phase, "what": "start 建独立目录"})
                 continue
-            if (name == "attempt.json" and data.get("request_sent") is not False and
-                    not (here / "response.json").is_file() and not (here / "billing-reconciliation.json").is_file()):
-                found.append({"file": relative, "field": "phase", "phase": str(phase), "what": "独立审阅请求"})
+            if name == "attempt.json":
+                resolution = Workflow.review_resolution(here, data)
+                missing = [label for key, label in (("result_known", "结果未核对"), ("cost_known", "费用未核对"))
+                           if not resolution[key]]
+                if missing:
+                    found.append({"file": relative, "field": "phase", "phase": str(phase),
+                                  "what": "独立审阅请求：" + "、".join(missing)})
                 continue
             for field in unknown_fields(data):
                 found.append({"file": relative, "field": field, "phase": "unknown", "what": "结果未知的记录"})

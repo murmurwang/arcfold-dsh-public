@@ -161,6 +161,109 @@ class DeliveryTests(unittest.TestCase):
                 feedback.route(self.flow, row["id"], "note", "deferred")
                 self.assertEqual(feedback.route(self.flow, row["id"], target)["status"], "pending")
 
+    def test_note_cannot_hide_linked_or_routed_unresolved_feedback(self):
+        registered = self.register()
+        cases = [*(('link', relation) for relation in delivery.RELATIONS),
+                 ('total', None), ('related', None), ('route', 'issue:17'),
+                 ('route', 'new:' + registered['task']), ('route', 'close-loop:' + registered['task'])]
+        for kind, value in cases:
+            with self.subTest(kind=kind, value=value):
+                row = feedback.record(self.flow, 'unresolved feedback',
+                                      **({'total': '001'} if kind == 'total' else
+                                         {'related': '001'} if kind == 'related' else {}))
+                original = snapshot(self.flow.state / 'feedback' / row['id'])
+                if kind == 'link':
+                    feedback.link(self.flow, row['id'], '001', value, 'assigned')
+                elif kind == 'route':
+                    feedback.route(self.flow, row['id'], value)
+                feedback.route(self.flow, row['id'], 'note', 'keep the observation')
+                self.assertEqual(feedback.load(self.flow, row['id'])[1]['status'], 'pending')
+                # Also recover histories written before this fix, without rewriting them.
+                feedback.append(self.flow, row['id'], 'status', status='record-only', reason='legacy note')
+                before = snapshot(self.flow.state)
+                loaded = feedback.load(self.flow, row['id'])[1]
+                self.assertEqual(loaded['status'], 'pending')
+                self.assertIn(row['id'], [r['id'] for r in collab.progress(self.flow)['feedback']])
+                if loaded['links']:
+                    self.assertIn(row['id'], delivery.show(self.flow, '001')['pending']['feedback'])
+                self.assertTrue(any(r.get('to') == 'note' for r in loaded['history']))
+                self.assertEqual(snapshot(self.flow.state), before)
+                self.assertEqual(snapshot(self.flow.state / 'feedback' / row['id'])['feedback.json'],
+                                 original['feedback.json'])
+
+    def test_note_preserves_feedback_resolved_by_acceptance(self):
+        self.register()
+        for total in (None, '001'):
+            with self.subTest(total=total):
+                row = feedback.record(self.flow, 'accepted feedback', total=total)
+                feedback.resolved(self.flow, row['id'], 'synthetic acceptance', 'pass')
+                self.assertEqual(feedback.route(self.flow, row['id'], 'note', 'extra context')['status'], 'resolved')
+                feedback.append(self.flow, row['id'], 'status', status='record-only', reason='legacy note')
+                self.assertEqual(feedback.load(self.flow, row['id'])[1]['status'], 'resolved')
+                self.assertNotIn(row['id'], [r['id'] for r in collab.progress(self.flow)['feedback']])
+                self.assertNotIn(row['id'], delivery.show(self.flow, '001')['pending']['feedback'])
+
+    def test_review_overviews_keep_result_and_cost_uncertainty_visible(self):
+        registered = self.register()
+        write(self.flow.state / 'tasks' / registered['task'] / 'submit.json',
+              {'phase': 'confirmed', 'pr': 5, 'head': HEAD, 'base': BASE})
+        parent = self.flow.state / 'prs/5'
+        old = parent / 'previous'
+        packet = packet_for({'pr': 5}, {'src/a.mjs': 'export {};\n'}, 'lmuai')
+        write(old / 'request.json', packet)
+        attempt = {'client_request_id': 'earlier', 'packet': packet['id'], 'provider': 'lmuai',
+                   'started_at': 'then', 'phase': 'sending'}
+        write(old / 'attempt.json', attempt)
+        billing = {'client_request_id': 'earlier', 'outcome': 'usage_confirmed',
+                   'actual_cost_usd': '0.10', 'evidence': 'synthetic bill'}
+        resolution = {'client_request_id': 'earlier', 'outcome': 'unavailable', 'reason': 'no usable report',
+                      'evidence': ['synthetic transport record'], 'at': 'now', 'recorded_by': 'fixture-agent'}
+
+        def visible(expected):
+            before = snapshot(self.flow.state)
+            path = 'prs/5/previous/attempt.json'
+            for rows in (collab.pending_writes(self.flow.state), collab.progress(self.flow)['pending_writes'],
+                         delivery.show(self.flow, '001')['pending']['writes']):
+                self.assertEqual(path in [r['file'] for r in rows], expected)
+            self.assertEqual(bool(self.flow.previous_review_uncertainty(parent / 'next')), expected)
+            self.assertEqual(snapshot(self.flow.state), before)
+
+        visible(True)
+        write(old / 'billing-reconciliation.json', billing)
+        with self.subTest(state='billing without a result'):
+            visible(True)
+        write(old / 'response.json', {'response': {'usage': {'input_tokens': 10, 'output_tokens': 2}},
+                                      'billing': {'actual_cost_usd': '0.10'}})
+        with self.subTest(state='invalid response with known billing'):
+            visible(True)
+        for malformed in ('{', '[]', '{"response": null, "billing": []}'):
+            with self.subTest(response=malformed):
+                write(old / 'response.json', malformed.encode())
+                visible(True)
+        for invalid in ({**resolution, 'client_request_id': 'another'}, {**resolution, 'outcome': 'pass'}):
+            with self.subTest(resolution=invalid):
+                write(old / 'result-reconciliation.json', invalid)
+                visible(True)
+        write(old / 'result-reconciliation.json', resolution)
+        write(old / 'attempt.json', {**attempt, 'phase': 'unknown'})
+        with self.subTest(state='result and cost reconciled'):
+            visible(False)
+        (old / 'billing-reconciliation.json').unlink()
+        (old / 'response.json').unlink()
+        with self.subTest(state='result known but cost unknown'):
+            visible(True)
+        write(old / 'billing-reconciliation.json', {**billing, 'client_request_id': 'another'})
+        with self.subTest(state='unrelated bill'):
+            visible(True)
+        write(old / 'billing-reconciliation.json', {**billing, 'actual_cost_usd': 'not a number'})
+        with self.subTest(state='invalid bill'):
+            visible(True)
+        write(old / 'attempt.json', {**attempt, 'request_sent': False})
+        with self.subTest(state='confirmed not sent'):
+            visible(False)
+        for call in (self.repo.main, self.repo.api, self.repo.pr, self.repo.gh, self.repo.fetch):
+            call.assert_not_called()
+
     def test_new_from_dev_feedback_uses_dev_source_instead_of_daily_package(self):
         item = feedback.record(self.flow, "入口输出不对", target="dev", version={"commit": "unknown", "reason": "未保留现场"})
         result = collab.new_from_feedback(self.flow, {"title": "修复入口输出", "scope": ["tools/"]}, item["id"])
@@ -388,11 +491,14 @@ class DeliveryTests(unittest.TestCase):
         response = {"provider_request_id": "fixture", "response": raw, "billing": billing}
         write(old / "response.json", response)
         self.assertTrue(self.flow.previous_review_uncertainty(parent / "next"))
+        self.assertTrue(collab.pending_writes(self.flow.state))
         raw["output"] = [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": json.dumps(result)}]}]
         write(old / "response.json", response)
         self.assertEqual(self.flow.previous_review_uncertainty(parent / "next"), [])
+        self.assertEqual(collab.pending_writes(self.flow.state), [])
         write(old / "attempt.json", {**attempt, "packet": "wrong-packet"})
         self.assertTrue(self.flow.previous_review_uncertainty(parent / "next"))
+        self.assertTrue(collab.pending_writes(self.flow.state))
 
     def test_billing_reconciliation_requires_separate_failed_result_evidence(self):
         parent = self.flow.state / "prs/5"
