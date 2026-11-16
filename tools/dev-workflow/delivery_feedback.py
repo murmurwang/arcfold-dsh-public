@@ -28,6 +28,14 @@ def load(flow, item):
     record.setdefault("original_target", record["target"])
     record.setdefault("links", [])
     record.setdefault("routes", [])
+    if "status" not in record:
+        observations = [read(p) for p in (flow.state / "tasks").glob("*/observations/*.json")]
+        relevant = [r for r in observations if r.get("feedback") == item]
+        latest = max(relevant, key=delivery.observation_order, default={})
+        if latest:
+            record["status"] = "resolved" if latest.get("outcome") == "pass" else "pending"
+        elif record["routes"] and all(r["to"] == "note" for r in record["routes"]):
+            record["status"] = "record-only"
     record.setdefault("status", "pending")
     record["corrections"] = [p.parent.name for p in (flow.state / "feedback").glob("*/feedback.json")
                              if read(p).get("corrects") == item]

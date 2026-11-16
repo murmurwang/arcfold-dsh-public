@@ -135,6 +135,9 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(overview["feedback"], [])
         self.assertEqual(overview["unassigned_feedback"][0]["id"], "dev-F1")
         self.assertEqual(overview["dev_feedback"][0]["status"], "record-only")
+        rendered = collab.render(overview)
+        self.assertIn("尚未关联交付的反馈", rendered)
+        self.assertIn("dev-F1 · record-only", rendered)
 
     def test_new_from_dev_feedback_uses_dev_source_instead_of_daily_package(self):
         item = feedback.record(self.flow, "入口输出不对", target="dev", version={"commit": "unknown", "reason": "未保留现场"})
@@ -262,6 +265,9 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkflowError, "另一份"):
             collab.review_approval(self.flow, "001-A1", 5, "b" * 64, {})
         self.assertTrue(delivery.migrate(self.flow, plan, "同一对照再次读取")["already_applied"])
+        write(folder / "observations" / "actual.json", {"feedback": "F8", "outcome": "pass", "at": "actual"})
+        self.assertEqual(feedback.load(self.flow, "F8")[1]["status"], "resolved")
+        self.assertEqual(collab.progress(self.flow)["feedback"], [])
 
     def test_migration_refuses_stale_plans_and_can_resume_its_own_reserved_numbers(self):
         folder = self.legacy()

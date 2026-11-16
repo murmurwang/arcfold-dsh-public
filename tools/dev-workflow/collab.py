@@ -709,9 +709,12 @@ def render(result):
         lines.append("")
     sections = (
         ("等开发者回复的请求单", [f"{row['id']} {row['kind']}：{row['title']}" for row in result["asks"]]),
+        ("编号已预留但登记未完成", [f"{row['id']}：核对原写入，不回收号码" for row in result.get("incomplete_records", [])]),
         ("结果未知的写入，先核对", [f"{row['file']}：{row['what']}（{row['field']} = {row['phase']}）"
                                   for row in result["pending_writes"]]),
         ("待处理反馈（关联交付不等于解决）", [f"{row['id']}（{row['at']}）：{row['summary']}" for row in result["feedback"]]),
+        ("尚未关联交付的反馈", [f"{row['id']} · {row['status']}：{row['summary']}" for row in result.get("unassigned_feedback", [])]),
+        ("dev 反馈（按对象）", [f"{row['id']} · {row['status']}：{row['summary']}" for row in result.get("dev_feedback", [])]),
         ("已退场的任务", [f"{row['id']}：{row['reason']}" + (f"（由 {row['replaced_by']} 取代）" if row["replaced_by"] else "")
                          for row in result["retired"]]),
     )
