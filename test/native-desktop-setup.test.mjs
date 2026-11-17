@@ -55,20 +55,71 @@ test('a failed activation can resume its saved receipt without recreating data o
   assert.equal(setup.status().state, 'activation_failed'); broken = false;
   assert.equal((await setup.resume()).state, 'ready');
 });
-test('native activation disables only owned legacy routes and never changes native defaults or provider settings', async () => {
-  const rows = [], writes = [], parent = { tree: { update: async (id, value) => { writes.push(id); Object.assign(rows.find(r => r.options.id === id).options, value); } } };
+function activationFixture() {
+  const rows = [], writes = [], persisted = new Map();
   for (const options of [
-    { id: 'arcfold-business', config: {} },
+    { id: 'arcfold-business', name: '@arcfold/dsh', config: {} },
     { id: 'arcfold-metered-provider', name: '@arcfold/dsh/deepseek', config: {} },
     { id: 'arcfold-desktop-metered-provider', name: '@arcfold/dsh/desktop-deepseek', config: {} },
     { id: 'agent-default-model', config: { provider: 'synthetic', model: 'user-choice' } },
     { id: 'llm-pi-ai', config: { providers: { synthetic: { baseURL: 'https://example.test' } } } },
-  ]) rows.push({ options, parent });
+  ]) rows.push({ id: 'include:' + options.id, options });
+  const editor = { configuration: () => rows.map(entry => ({ entry, override: persisted.get(entry.id) ?? {} })),
+    edit: async (entry, change) => {
+      const config = change(persisted.get(entry.id) ?? {});
+      writes.push(entry.options.id); persisted.set(entry.id, structuredClone(config)); entry.options.config = config;
+    } };
+  const manager = { setPluginEnabled: async id => {
+    const row = rows.find(r => r.id === id); writes.push(row.options.id); row.options.disabled = true;
+    return { application: 'applied' };
+  } };
+  const ctx = { loader: { entries: () => rows, await: async () => {} },
+    get: key => key === 'configEditor' ? editor : key === 'pluginManager' ? manager : {} };
+  return { rows, writes, persisted, editor, manager, ctx, result: { tree: { adapter: 'dsh-native-v1' } } };
+}
+test('native activation persists only owned entries and never changes native defaults or provider settings', async () => {
+  const { rows, writes, ctx, result } = activationFixture();
   const untouched = structuredClone(rows.slice(3).map(r => r.options));
-  const ctx = { loader: { entries: () => rows, await: async () => {} }, get: () => ({}) }, result = { tree: { adapter: 'dsh-native-v1' } };
   await activateNativeDesktop(ctx, result); await activateNativeDesktop(ctx, result);
-  assert.deepEqual(writes, ['arcfold-metered-provider', 'arcfold-desktop-metered-provider', 'arcfold-business']);
+  assert.deepEqual(writes, ['arcfold-metered-provider', 'arcfold-desktop-metered-provider', 'arcfold-business',
+    'arcfold-metered-provider', 'arcfold-desktop-metered-provider']);
   assert.deepEqual(rows.slice(3).map(r => r.options), untouched);
   rows[0].options.config = { filename: '/synthetic/foreign-data' };
-  await assert.rejects(activateNativeDesktop(ctx, result), /不能自动覆盖/); assert.equal(writes.length, 3);
+  await assert.rejects(activateNativeDesktop(ctx, result), /不能自动覆盖/); assert.equal(writes.length, 5);
+});
+test('an already-live configuration must still be saved if the durable override is missing', async () => {
+  const f = activationFixture();
+  f.rows[0].options.config = { goalTreeV3: f.result.tree };
+  await activateNativeDesktop(f.ctx, f.result);
+  assert.deepEqual(f.persisted.get(f.rows[0].id), { goalTreeV3: f.result.tree });
+});
+test('activation rechecks ownership and disk configuration before replacing it', async () => {
+  const f = activationFixture();
+  f.rows[0].options.name = 'synthetic-foreign-owner';
+  await assert.rejects(activateNativeDesktop(f.ctx, f.result), /归属/);
+  assert.deepEqual(f.writes, []);
+  f.rows[0].options.name = '@arcfold/dsh';
+  f.persisted.set(f.rows[0].id, { filename: '/synthetic/user-setting' });
+  await assert.rejects(activateNativeDesktop(f.ctx, f.result), /不能自动覆盖/);
+  assert.deepEqual(f.persisted.get(f.rows[0].id), { filename: '/synthetic/user-setting' });
+});
+test('failed or overridden legacy disablement cannot proceed to native activation', async () => {
+  const f = activationFixture();
+  f.manager.setPluginEnabled = async () => ({ application: 'overridden' });
+  await assert.rejects(activateNativeDesktop(f.ctx, f.result), /未能安全停用/);
+  assert.deepEqual(f.writes, []);
+});
+test('ready reflects current services and recovery preserves the existing consent and data', async t => {
+  const f = fixture(t); let active = false;
+  const setup = createNativeDesktopSetup({ ...f.args, isActive: () => active,
+    activate: async result => { f.calls.push(result); active = true; } });
+  await setup.start({ confirmed: true });
+  const config = join(f.home, 'arcfold-desktop/native-model-configuration.json'), before = readFileSync(config);
+  assert.equal(setup.status().state, 'ready');
+  active = false;
+  assert.equal(setup.status().state, 'activation_failed');
+  assert.match(setup.status().activationError, /服务当前不可用/);
+  assert.equal((await setup.resume()).state, 'ready');
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual(readFileSync(config), before);
 });

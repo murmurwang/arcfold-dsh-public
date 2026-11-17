@@ -25,7 +25,7 @@ function directory(path, privateOnly = false) {
 
 /** Keep v1 data and accounting files intact. The new receipt authorizes only
  * native routing; it contains no provider directory, model default or secret. */
-export function createNativeDesktopSetup({ home, activate }) {
+export function createNativeDesktopSetup({ home, activate, isActive = () => true }) {
   assert(realpathSync(home) === home, 'DSH 数据目录必须使用真实路径。');
   const dataRoot = join(home, 'arcfold-desktop'), workspace = join(home, 'arcfold-workspace');
   const runtimeRoot = join(home, 'arcfold-desktop-processes');
@@ -34,7 +34,12 @@ export function createNativeDesktopSetup({ home, activate }) {
   let state = existsSync(receiptPath) ? 'configured' : existsSync(configPath) ? 'interrupted'
     : existsSync(oldCompletedPath) ? 'needs_upgrade' : existsSync(dataRoot) || existsSync(workspace) ? 'interrupted' : 'needs_setup';
   let busy = false, activationError = null, authorizedTree = null;
-  const status = () => ({ state, busy, workspace, dataRoot, modelRouting: NATIVE_ROUTING, followConversationModel: true, activationError });
+  const status = () => {
+    const unavailable = state === 'ready' && !isActive();
+    return { state: unavailable ? 'activation_failed' : state, busy, workspace, dataRoot,
+      modelRouting: NATIVE_ROUTING, followConversationModel: true,
+      activationError: unavailable ? 'Arcfold 服务当前不可用，请保留已有数据并重启后检查。' : activationError };
+  };
   function previous() {
     directory(dataRoot, true); directory(workspace);
     for (const path of [oldConfigPath, oldCompletedPath, join(dataRoot, 'desktop-initialization.json')]) privateFile(path);
@@ -68,7 +73,7 @@ export function createNativeDesktopSetup({ home, activate }) {
     state = 'ready'; activationError = null; return status();
   }
   async function resume() {
-    if (!['configured', 'activation_failed'].includes(state) || busy) return status();
+    if (!['configured', 'activation_failed'].includes(status().state) || busy) return status();
     busy = true;
     try { return await activateSaved(readSaved()); }
     catch (error) { state = 'activation_failed'; activationError = error.message; return status(); }

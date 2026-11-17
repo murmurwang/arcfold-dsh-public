@@ -59,28 +59,53 @@ export async function activateDesktop(ctx, result, { home, previousPython } = {}
 
 export async function activateNativeDesktop(ctx, result, { home } = {}) {
   const rows = [...ctx.loader.entries()];
-  const business = rows.filter(row => row.options.id === 'arcfold-business');
-  if (business.length !== 1) throw new Error('无法确认 Arcfold 配置位置。');
-  const entry = business[0], current = entry.options.config ?? {}, intended = { goalTreeV3: result.tree };
-  let previous = result.previousTree && { goalTreeV3: result.previousTree };
-  const python = current.goalTreeV3?.tokenCounter?.python;
-  if (previous && python && python !== previous.goalTreeV3.tokenCounter.python && isBundledDesktopPython(home, python))
-    previous = { goalTreeV3: { ...previous.goalTreeV3, tokenCounter: { python } } };
-  if (Object.keys(current).length && !same(current, intended) && !same(current, previous))
-    throw new Error('Arcfold 已有不同的运行设置，不能自动覆盖。');
+  const business = () => {
+    const matches = [...ctx.loader.entries()].filter(row => row.options.id === 'arcfold-business');
+    if (matches.length !== 1 || matches[0].options.name !== '@arcfold/dsh')
+      throw new Error('无法确认 Arcfold 配置位置和归属。');
+    return matches[0];
+  };
+  const intended = { goalTreeV3: result.tree };
+  const checkedConfig = current => {
+    let previous = result.previousTree && { goalTreeV3: result.previousTree };
+    const python = current.goalTreeV3?.tokenCounter?.python;
+    if (previous && python && python !== previous.goalTreeV3.tokenCounter.python && isBundledDesktopPython(home, python))
+      previous = { goalTreeV3: { ...previous.goalTreeV3, tokenCounter: { python } } };
+    if (Object.keys(current).length && !same(current, intended) && !same(current, previous))
+      throw new Error('Arcfold 已有不同的运行设置，不能自动覆盖。');
+    return intended;
+  };
+  checkedConfig(business().options.config ?? {});
   const providers = rows.filter(row => ['arcfold-metered-provider', 'arcfold-desktop-metered-provider'].includes(row.options.id));
   if (providers.some(row => !['@arcfold/dsh/deepseek', '@arcfold/dsh/desktop-deepseek'].includes(row.options.name)))
     throw new Error('原模型连接的归属已改变，未修改已有设置。');
-  for (const provider of providers) if (provider.options.disabled !== true)
-    await provider.parent.tree.update(provider.options.id, { disabled: true });
-  if (!same(current, intended)) await entry.parent.tree.update(entry.options.id, { config: intended });
+  const editor = ctx.get('configEditor'), manager = ctx.get('pluginManager');
+  if (!editor?.edit || !editor?.configuration || !manager?.setPluginEnabled)
+    throw new Error('DSH 原生配置保存服务尚未就绪。');
+  // An already-disabled live entry can still have an enabled disk declaration
+  // left by the old in-memory update. Let the native manager reconcile both.
+  for (const provider of providers) {
+    const saved = await manager.setPluginEnabled(provider.id, false);
+    if (saved.application !== 'applied') throw new Error('旧模型连接未能安全停用，请保留已有设置并检查 DSH 插件状态。');
+  }
+  const entry = business();
+  const saved = editor.configuration().find(row => row.entry === entry);
+  // Loader tree.update changes only the owning Include's current config. The
+  // native editor persists the profile patch that later reloads/restarts read,
+  // and checks the current config again under the host's configuration lock.
+  if (!same(entry.options.config ?? {}, intended) || !same(saved?.override, intended))
+    await editor.edit(entry, checkedConfig);
   // Provider settings and the native default model are owned by DSH. The
   // distribution restores their original entries without copying their values.
   await ctx.loader.await();
   const deadline = Date.now() + 5000;
   while (!ctx.get('arcfoldTreeWeb') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
-  if (!ctx.get('arcfoldTreeRuntime') || !ctx.get('arcfoldTreeV3') || !ctx.get('arcfoldTreeWeb') || !ctx.get('arcfoldNativeModelRecords'))
+  if (!nativeRuntimeReady(ctx))
     throw new Error('DSH 原生模型通道尚未完成启动，请保留当前设置后重启检查。');
+}
+
+function nativeRuntimeReady(ctx) {
+  return ['arcfoldTreeRuntime', 'arcfoldTreeV3', 'arcfoldTreeWeb', 'arcfoldNativeModelRecords'].every(key => Boolean(ctx.get(key)));
 }
 
 export function apply(ctx) {
@@ -92,7 +117,8 @@ export function apply(ctx) {
   let setup;
   try {
     const home = realpathSync(resolveDshHome());
-    setup = createNativeDesktopSetup({ home, activate: result => activateNativeDesktop(ctx.root, result, { home }) });
+    setup = createNativeDesktopSetup({ home, activate: result => activateNativeDesktop(ctx.root, result, { home }),
+      isActive: () => nativeRuntimeReady(ctx.root) });
   } catch (error) {
     setup = Object.freeze({ status: () => ({ state: 'unavailable', modelRouting: 'dsh-native-v1', activationError: error.message }) });
   }
