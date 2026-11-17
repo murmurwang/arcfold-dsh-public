@@ -12,7 +12,7 @@ export function DesktopSetup({ initial, rpc, openWorkspace }) {
   }
   async function open(path) {
     if (typeof openWorkspace !== 'function') throw new Error('DSH 工作区服务尚未就绪。');
-    await openWorkspace(path); globalThis.location.reload();
+    await openWorkspace(path);
   }
   async function start() {
     if (!checked || busy) return;

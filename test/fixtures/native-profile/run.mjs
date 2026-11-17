@@ -12,7 +12,7 @@ import { activateNativeDesktop } from '../../../src/desktop/bootstrap.mjs';
 import { createNativeDesktopSetup } from '../../../src/desktop/native-setup.mjs';
 
 const [root, mode, phase] = process.argv.slice(2);
-assert.ok(root && ['memory-control', 'candidate'].includes(mode) && ['create', 'restart'].includes(phase));
+assert.ok(root && ['memory-control', 'candidate', 'runtime-candidate'].includes(mode) && ['create', 'restart'].includes(phase));
 const network = [];
 globalThis.fetch = () => { network.push('fetch'); throw Error('Network is forbidden in the persistence fixture'); };
 Socket.prototype.connect = function () { network.push('socket'); throw Error('Network is forbidden in the persistence fixture'); };
@@ -20,9 +20,9 @@ const profileDir = join(root, 'profile'), home = join(root, 'home');
 const patchPath = join(profileDir, 'cordis.patch.yml');
 if (phase === 'create') {
   mkdirSync(profileDir, { mode: 0o700 }); mkdirSync(home, { mode: 0o700 });
-  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'native-profile-fixture', private: true, type: 'module', dependencies: { '@arcfold/dsh': '0.5.3' } }));
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'native-profile-fixture', private: true, type: 'module', dependencies: { '@arcfold/dsh': '0.5.4' } }));
   const pkg = join(profileDir, 'node_modules/@arcfold/dsh'); mkdirSync(pkg, { recursive: true });
-  writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@arcfold/dsh', version: '0.5.3', type: 'module',
+  writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@arcfold/dsh', version: '0.5.4', type: 'module',
     exports: { '.': './index.mjs', './desktop-deepseek': './legacy.mjs' } }));
   // Keep a real package identity and the real Loader/config editor. Only the
   // business implementation is a stand-in: this tests configuration, not chat.
@@ -36,7 +36,7 @@ if (phase === 'create') {
   writeFileSync(patchPath, JSON.stringify([{ insert: [
     { id: 'hmr', name: 'cordis:fixture-hmr', config: { root: [] } },
     { id: 'timer', name: 'cordis:fixture-timer' },
-    { id: 'arcfold-desktop-metered-provider', name: '@arcfold/dsh/desktop-deepseek' },
+    ...(mode === 'runtime-candidate' ? [] : [{ id: 'arcfold-desktop-metered-provider', name: '@arcfold/dsh/desktop-deepseek' }]),
     { id: 'arcfold-business', name: '@arcfold/dsh' },
   ] }]) + '\n');
 }
@@ -48,6 +48,10 @@ let ctx;
 const ready = new Set();
 const setup = createNativeDesktopSetup({ home, isActive: () => Boolean(ctx?.get('arcfoldTreeWeb')),
   activate: async result => {
+    // This fixture isolates Loader ownership. The separate setup tests verify
+    // the old receipt; the release preflight also upgrades the actual old pack.
+    if (mode === 'runtime-candidate') return activateNativeDesktop(ctx,
+      { ...result, previousTree: { adapter: 'desktop-private-v1' } }, { home });
     if (mode === 'candidate') return activateNativeDesktop(ctx, result, { home });
     const entry = [...ctx.loader.entries()].find(row => row.options.id === 'arcfold-business');
     await entry.parent.tree.update(entry.options.id, { config: { goalTreeV3: result.tree } });
@@ -62,6 +66,13 @@ ctx = await boot('dsh', join(profileDir, 'cordis.yml'), readProfilePatches('dsh'
 try {
   await ctx.plugin(ConfigEditor); await ctx.plugin(PluginManager, {});
   for (const listener of ready) listener(); await ctx.hmr.operations; await ctx.loader.await();
+  if (mode === 'runtime-candidate' && phase === 'create') {
+    const business = [...ctx.loader.entries()].find(row => row.options.id === 'arcfold-business');
+    await business.parent.tree.create({ id: 'arcfold-desktop-metered-provider', name: '@arcfold/dsh/desktop-deepseek' });
+    await business.parent.tree.flush(); await ctx.loader.await();
+    const row = (await ctx.pluginManager.listPlugins()).find(row => row.entryId === 'include:arcfold-desktop-metered-provider');
+    assert.equal(row.readOnlyReason, 'unaddressable'); assert.equal(row.enabled, true);
+  }
   const before = { service: Boolean(ctx.get('arcfoldTreeWeb')), state: setup.status().state, legacy: Boolean(ctx.get('fixtureLegacy')) };
   if (mode === 'candidate' && phase === 'create') {
     // The previous activation could disable a provider only in memory. A live
