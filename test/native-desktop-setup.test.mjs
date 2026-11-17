@@ -69,7 +69,9 @@ function activationFixture() {
       const config = change(persisted.get(entry.id) ?? {});
       writes.push(entry.options.id); persisted.set(entry.id, structuredClone(config)); entry.options.config = config;
     } };
-  const manager = { setPluginEnabled: async id => {
+  const manager = { listPlugins: async () => rows.map(row => ({ entryId: row.id, moduleName: row.options.name,
+    ...(row.unaddressable ? { readOnlyReason: 'unaddressable' } : { patchId: row.options.id }) })),
+    setPluginEnabled: async id => {
     const row = rows.find(r => r.id === id); writes.push(row.options.id); row.options.disabled = true;
     return { application: 'applied' };
   } };
@@ -108,6 +110,52 @@ test('failed or overridden legacy disablement cannot proceed to native activatio
   f.manager.setPluginEnabled = async () => ({ application: 'overridden' });
   await assert.rejects(activateNativeDesktop(f.ctx, f.result), /未能安全停用/);
   assert.deepEqual(f.writes, []);
+});
+function runtimeProviderFixture() {
+  const f = activationFixture(), provider = f.rows[2];
+  const tree = { ctx: { fiber: { entry: { id: 'include' } } }, config: { patches: [] },
+    flush: async () => {}, refresh: async () => {},
+    update: async (id, change) => {
+      assert.equal(id, provider.options.id); assert.deepEqual(change, { disabled: true });
+      f.writes.push('runtime-provider'); Object.assign(provider.options, change); provider.fiber = undefined;
+    } };
+  provider.parent = f.rows[0].parent = { tree };
+  Object.defineProperty(provider, 'disabled', { get: () => provider.options.disabled === true });
+  provider.fiber = { state: 2 }; provider.unaddressable = true;
+  f.result.previousTree = { adapter: 'desktop-private-v1' };
+  return { ...f, provider, tree };
+}
+test('a verified old Desktop connection uses its original owner before saving native settings', async () => {
+  const f = runtimeProviderFixture();
+  await activateNativeDesktop(f.ctx, f.result);
+  assert.deepEqual(f.writes, ['arcfold-metered-provider', 'runtime-provider', 'arcfold-business']);
+  assert.equal(f.provider.disabled, true);
+  assert.deepEqual(f.persisted.get(f.rows[0].id), { goalTreeV3: f.result.tree });
+});
+test('unaddressable does not authorize modifying a foreign, duplicated or profile-overridden connection', async () => {
+  for (const change of [
+    f => { delete f.result.previousTree; },
+    f => { f.provider.parent = { tree: f.tree }; },
+    f => { f.tree.config.patches = [{ id: f.provider.options.id, disabled: false }]; },
+    f => { f.rows.push({ ...f.provider }); },
+    f => { f.provider.options.name = '@arcfold/dsh/deepseek'; },
+  ]) {
+    const f = runtimeProviderFixture(); change(f);
+    await assert.rejects(activateNativeDesktop(f.ctx, f.result), /归属|未能安全停用/);
+    assert.equal(f.writes.includes('runtime-provider'), false);
+    assert.equal(f.persisted.has(f.rows[0].id), false);
+  }
+});
+test('a failed owner write or a still-active old connection cannot start the native runtime', async () => {
+  for (const change of [
+    f => { f.tree.flush = async () => { throw Error('synthetic owner persistence failure'); }; },
+    f => { f.tree.update = async () => { f.provider.options.disabled = true; }; },
+    f => { f.tree.refresh = async () => { f.provider.options.name = 'foreign'; }; },
+  ]) {
+    const f = runtimeProviderFixture(); change(f);
+    await assert.rejects(activateNativeDesktop(f.ctx, f.result));
+    assert.equal(f.persisted.has(f.rows[0].id), false);
+  }
 });
 test('ready reflects current services and recovery preserves the existing consent and data', async t => {
   const f = fixture(t); let active = false;
