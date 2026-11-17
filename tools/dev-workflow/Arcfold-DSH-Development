@@ -1,4 +1,0 @@
-#!/bin/sh
-set -eu
-tool_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
-exec python3 -B "$tool_dir/workflow.py" "$@"

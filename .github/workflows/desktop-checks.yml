@@ -43,5 +43,3 @@ jobs:
           ARCFOLD_DESKTOP_PACKAGE_DEPENDENCIES: ${{ github.workspace }}
           DSH_TELEMETRY_DISABLED: '1'
         run: node scripts/test-isolated.mjs
-      - name: 运行工作流检查
-        run: python3 -B -m unittest discover -s tools/dev-workflow -v
