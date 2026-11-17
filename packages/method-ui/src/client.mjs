@@ -16,7 +16,7 @@ import { zh, en } from './locales.mjs';
 import { installTreeClient } from './tree-client.mjs';
 import { DesktopSetup } from './DesktopSetup.mjs';
 import { DesktopModels } from './DesktopModels.mjs';
-import { openDesktopWorkspace } from './desktop-workspace.mjs';
+import { openDesktopWorkspaceAndRefresh } from './desktop-ui-transition.mjs';
 export const inject = ['slots', 'connection', 'locale', 'fileUpload'];
 const NS = 'arcfold-methods';
 export async function apply(ctx) {
@@ -31,7 +31,7 @@ export async function apply(ctx) {
   }
   if (desktop?.ok === true && ['needs_setup', 'needs_upgrade', 'configured', 'activation_failed', 'interrupted', 'unavailable'].includes(desktop.value?.state)) {
     const props = { initial: desktop.value, rpc: ctx.connection.rpc,
-      openWorkspace: path => openDesktopWorkspace(ctx.get('workspaces'), ctx.get('uiWorkspace'), path) };
+      openWorkspace: path => openDesktopWorkspaceAndRefresh(ctx, path) };
     for (const name of ['settings.section', 'conversation.hero.options'])
       ctx.slots.inject(name, () => ctx.slots.register({ name, id: 'arcfold-desktop-setup', order: 11, label: 'Arcfold 设置', inject: () => props }, DesktopSetup));
     return;

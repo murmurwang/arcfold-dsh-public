@@ -25,12 +25,12 @@ test('stock DSH recomposition removes the in-memory-only activation control', t 
   assert.equal(observed.persisted, false);
   assert.equal(observed.afterRefresh, false);
 });
-test('native profile configuration survives stock recomposition and a separate process restart', t => {
-  const root = profile(t), created = run(root, 'candidate', 'create');
+for (const mode of ['candidate', 'runtime-candidate']) test(`${mode}: configuration and old connection disablement survive recomposition and restart`, t => {
+  const root = profile(t), created = run(root, mode, 'create');
   assert.deepEqual(created.before, { service: false, state: 'needs_setup', legacy: true });
   assert.equal(created.activation, 'ready'); assert.equal(created.persisted, true);
   assert.equal(created.afterRefresh, true); assert.equal(created.status, 'ready');
-  const restarted = run(root, 'candidate', 'restart');
+  const restarted = run(root, mode, 'restart');
   assert.equal(created.legacyAfterRefresh, false);
   assert.deepEqual(restarted.before, { service: true, state: 'configured', legacy: false });
   assert.equal(restarted.activation, 'ready'); assert.equal(restarted.afterRefresh, true);
