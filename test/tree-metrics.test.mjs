@@ -145,6 +145,14 @@ test('unretracted attribution creation remains explicitly weak after a later rea
   const growth = m.growth(); assert.equal(growth.weakUnretractedCreations, 1); assert.equal(growth.confirmedUserChanges, 0); assert.equal(growth.valueJudgment, null);
 });
 
+test('stagnation judges whole blocks of ten turns, so later turns do not create new candidates', async t => {
+  const f = learningFixture(t), a = f.create('我持续推进一件事'), m = metric(f);
+  for (let i = 0; i < 10; i++) await f.feedback(a, 'proceeded', '推进' + i);
+  const first = m.stagnation(a).turnIds;
+  for (let i = 10; i < 19; i++) { await f.feedback(a, 'proceeded', '推进' + i); assert.deepEqual(m.stagnation(a).turnIds, first, 'turn ' + (i + 1)); }
+  await f.feedback(a, 'proceeded', '推进19'); const second = m.stagnation(a).turnIds;
+  assert.equal(second.length, 10); assert.equal(second.some(id => first.includes(id)), false);
+});
 test('cluster and stagnation trigger scans keep durable identities instead of duplicating jobs', async t => {
   const f = learningFixture(t), a = f.create('我反复解释'), m = metric(f);
   for (let i = 0; i < 10; i++) await f.feedback(a, i < 3 ? 'not_understood' : 'proceeded', '合成经历' + i);

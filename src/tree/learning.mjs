@@ -8,6 +8,9 @@ import { deferredLearning } from './jobs.mjs';
 import { compactLearningSource } from './experience.mjs';
 
 const program = { kind: 'program', id: 'tree-learning' };
+// experience-v1 is the production default. correction-v1 and the legacy
+// contract stay readable for jobs frozen before the upgrade and for fixtures.
+export const COMPACT_PROTOCOLS = Object.freeze(['correction-v1', 'experience-v1']);
 const unique = values => [...new Map(values.map(v => [canonicalJson(v), v])).values()];
 export function itemInput({ item, version, method }) {
   return { id: item.id, version: item.activeVersion, nodeId: item.nodeId, kind: item.kind, sourceKind: version.sourceKind, userProtected: item.userProtected,
@@ -33,7 +36,7 @@ export function itemServiceFor(repo, resolveSource, job, corrections) {
 }
 
 export class LearningService {
-  constructor({ repository, experience, contextBuilder, consolidation, jobs, modelConfig, signals, writerRouter, annotations = () => ({}), outputProtocol = 'correction-v1' }) {
+  constructor({ repository, experience, contextBuilder, consolidation, jobs, modelConfig, signals, writerRouter, annotations = () => ({}), outputProtocol = 'experience-v1' }) {
     Object.assign(this, { repo: repository, experience, builder: contextBuilder, consolidation, jobs, config: modelConfig, signals, writers: writerRouter, annotations, outputProtocol });
     this.resolveSource = contextBuilder.resolveSource;
     this.observations = new LearningObservations({ repository, metrics: new MetricsService({ repository, experience, signals }) });
@@ -64,8 +67,11 @@ export class LearningService {
     const material = this.experience.material(turn); if (material.revokedRefs.length) fail('SOURCE_CHANGED', 'Original experience was withdrawn');
     const context = this.builder.build([nodeId], 'learning'), rows = this.builder.activeItems(context.ancestorPaths.flat(), 'learning');
     const priorTurns = turns.slice(0, turns.findIndex(t => t.id === turnId));
-    const observed = this.outputProtocol === 'correction-v1' ? { proposals: [], fragments: [], sources: [] } : this.observations.freeze(nodeId, priorTurns.map(t => t.id));
-    const previousSources = this.outputProtocol === 'correction-v1' && priorTurns.length ? this.experience.material(priorTurns.at(-1)).sources : priorTurns.flatMap(t => t.userSourceRefs.map(this.resolveSource)).filter(Boolean);
+    // Compact protocols read this turn plus the previous own turn, and never
+    // the legacy observation records.
+    const compact = COMPACT_PROTOCOLS.includes(this.outputProtocol);
+    const observed = compact ? { proposals: [], fragments: [], sources: [] } : this.observations.freeze(nodeId, priorTurns.map(t => t.id));
+    const previousSources = compact && priorTurns.length ? this.experience.material(priorTurns.at(-1)).sources : priorTurns.flatMap(t => t.userSourceRefs.map(this.resolveSource)).filter(Boolean);
     const sources = unique([...material.sources, ...previousSources, ...observed.sources]).map(compactLearningSource);
     const annotations = jsonClone(this.annotations(turn, nodeId));
     if (annotations.correction) {
@@ -79,9 +85,9 @@ export class LearningService {
     const rejectedOutputs = session ? this.repo.list('tree_jobs', j => j.role === 'learning' && j.nativeSessionId === session.sessionId && ['invalid_output', 'failed'].includes(j.status))
       .map(j => ({ jobId: j.id, turnId: j.trigger.turnId ?? null, state: j.status, adopted: false, error: j.error ?? null, rawHash: j.rawHash ?? null, nativeLogRef: j.nativeLogRef ?? null })) : [];
     const previousReceipt = session?.history?.at(-1)?.receipt ?? null;
-    const input = { inputVersion: CONTRACT, role: 'learning', ...(this.outputProtocol === 'correction-v1' ? { outputProtocol: this.outputProtocol } : {}), scope: { nodeIds: [nodeId], ancestorPaths: context.ancestorPaths, treeRevision: context.treeRevision }, sources, knownItems: rows.map(itemInput),
+    const input = { inputVersion: CONTRACT, role: 'learning', ...(compact ? { outputProtocol: this.outputProtocol } : {}), scope: { nodeIds: [nodeId], ancestorPaths: context.ancestorPaths, treeRevision: context.treeRevision }, sources, knownItems: rows.map(itemInput),
       allowedIds: { nodeIds: context.ancestorPaths.flat(), fileIds: annotations.fileIds ?? [], subjectIds: [...rows.map(r => r.item.id), ...observed.proposals.map(p => p.id), ...observed.fragments.map(f => f.id)] }, changeReceipts: receipts,
-      ...(this.outputProtocol === 'correction-v1' ? {} : { observationContext: { proposals: observed.proposals, fragments: observed.fragments } }),
+      ...(compact ? {} : { observationContext: { proposals: observed.proposals, fragments: observed.fragments } }),
       currentTurn: { id: turnId, sourceIds: material.sources.map(s => s.id), assignmentRevision: turn.assignmentRevision }, constraints: context.segments.filter(s => s.nodeId !== null),
       previousReceipt: rejectedOutputs.length ? { ...(previousReceipt ?? {}), rejectedOutputs } : previousReceipt, epochSeed: this.consolidation.learningSeed(nodeId), rootOnly: nodeId === this.repo.rootId() };
     const revisionSet = { ['tree_turns:' + turnId]: turn.revision };
@@ -96,19 +102,23 @@ export class LearningService {
   applyResult(result, { job, requestId }) {
     const output = validateOutput('learning', result, job.input), turn = this.repo.get('tree_turns', job.trigger.turnId);
     if (turn?.status !== 'settled' || !turn.nodeIds.includes(job.nodeIds[0]) || turn.assignmentRevision !== job.input.currentTurn.assignmentRevision) fail('JOB_STALE', 'Experience assignment changed');
-    // A current, source-bound correction can produce at most one item. An
-    // ordinary statement or a model inference alone cannot become learning.
-    const selected = { ...output, understandings: [], methods: [], supplements: [], revisions: [] };
-    const revision = output.revisions.find(value => value.correctionEvidence?.quotes?.length || job.trigger.correction?.itemIds?.includes(value.targetId));
-    if (revision) {
-      selected.understandings = [output.understandings[revision.replacedByIndex]];
-      selected.revisions = [{ ...revision, replacedByIndex: 0 }];
-    } else if (output.correctionClaim) {
-      const { kind, quote } = output.correctionClaim;
-      quotedSource(job.input, quote, 'user');
-      const partition = kind === 'understanding' ? 'understandings' : 'methods';
-      const item = output[partition].find(value => value.sourceIds.includes(quote.sourceId));
-      if (item) selected[partition] = [item];
+    // experience-v1 output was bounded item by item when it was parsed: at most
+    // three new understandings, two source-quoted changes and one method that
+    // cites this turn's user input. Older protocols keep the single-correction
+    // rule: an ordinary statement or a model inference alone is not saved.
+    const selected = job.input.outputProtocol === 'experience-v1' ? { ...output, supplements: [] } : { ...output, understandings: [], methods: [], supplements: [], revisions: [] };
+    if (job.input.outputProtocol !== 'experience-v1') {
+      const revision = output.revisions.find(value => value.correctionEvidence?.quotes?.length || job.trigger.correction?.itemIds?.includes(value.targetId));
+      if (revision) {
+        selected.understandings = [output.understandings[revision.replacedByIndex]];
+        selected.revisions = [{ ...revision, replacedByIndex: 0 }];
+      } else if (output.correctionClaim) {
+        const { kind, quote } = output.correctionClaim;
+        quotedSource(job.input, quote, 'user');
+        const partition = kind === 'understanding' ? 'understandings' : 'methods';
+        const item = output[partition].find(value => value.sourceIds.includes(quote.sourceId));
+        if (item) selected[partition] = [item];
+      }
     }
     return this.repo.transaction(() => {
       const items = itemServiceFor(this.repo, this.resolveSource, job, learningCorrections(selected, job.input)), input = proposalInput(selected, job.input);

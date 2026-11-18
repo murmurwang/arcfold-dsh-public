@@ -77,16 +77,18 @@ test('method evaluation cannot silently reclassify an understanding', () => {
   const value = structuredClone(full.verification); value.verifications[0].methodId = 'i1';
   assert.throws(() => validateOutput('verification', value, envelope('verification')), { code: 'OUTPUT_METHOD_KIND' });
 });
-test('verification reports failed methods while still enforcing protected lifecycle', () => {
+test('verification requires a repair for an own failed method and still enforces protected lifecycle', () => {
   const input = envelope('verification'); input.reviewNodeIds = ['n1'];
   const understandingItem = input.knownItems.find(i => i.id === 'i1'); understandingItem.userProtected = true;
   const binding = outputBindings(input), methodItem = input.knownItems.find(i => i.kind === 'method');
-  assert.deepEqual(binding.repairRequiredWhenNotMet, []);
+  assert.deepEqual(binding.repairRequiredWhenNotMet, [methodItem.id]);
   assert.deepEqual(binding.protectedItems[0].operationChoices, ['support']);
   const failed = structuredClone(minimal.verification);
   failed.verifications = [{ methodId: methodItem.id, methodVersion: methodItem.version, result: 'not_met', observed: 'actual failure', opportunityCount: 1, evidence: ['s1'] }];
   const message = value => ({ role: 'assistant', content: [{ type: 'text', text: JSON.stringify(value) }] });
-  validateOutput('verification', failed, input);
+  assert.throws(() => validateOutput('verification', failed, input), { code: 'REPAIR_REQUIRED' });
+  const salvaged = parseFinalOutput('verification', message(failed), input);
+  assert.deepEqual(salvaged.rejectedItems.map(r => r.code), ['REPAIR_REQUIRED']); assert.deepEqual(salvaged.result.verifications, []);
   failed.operations = [{ op: 'rewrite', targetId: methodItem.id, targetVersion: methodItem.version, stage: 'generate', reason: 'correct the demonstrated failure', evidence: ['s1'], detail: { replacement: method } }];
   validateOutput('verification', failed, input);
   for (const op of ['mark_changed', 'mark_invalid', 'withdraw']) {

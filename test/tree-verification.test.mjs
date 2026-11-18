@@ -62,44 +62,56 @@ function completeCorrection(f, output) {
 }
 function sourceDisposition(f, op = 'support') { return { ...emptyVerification(), operations: [{ op, targetId: f.itemId, targetVersion: f.old.version, stage: 'none', reason: '合成：剩余依据足够支持原内容', evidence: f.job.input.sources.map(s => s.id), detail: {} }] }; }
 
-test('assignment source recheck reports its assessment and keeps the old item inactive', async t => {
+test('assignment source recheck preserves independent evidence and whole bundles, without claiming effectiveness', async t => {
   for (const kind of ['method', 'supplement']) await t.test(kind, async t => {
     const f = await correctionFixture(t, kind);
     assert.deepEqual(f.job.input.sources.map(s => s.ref), f.retained.userSourceRefs);
-    const before = f.repo.get('tree_items', f.itemId), output = sourceDisposition(f);
-    const done = completeCorrection(f, output); assert.equal(done.status, 'committed');
-    assert.deepEqual(f.repo.get('tree_items', f.itemId), before);
-    assert.deepEqual(f.repo.get('tree_item_versions', f.old.id), f.old);
     assert.equal(f.builder.activeItems([f.a], kind === 'supplement' ? 'learning' : 'main').length, 0);
-    assert.deepEqual(f.repo.get('tree_reports', done.resultRef.reportId).reviewOutput, output);
+    if (kind === 'method') f.repo.command('fixtureDisabledHook', f.cmd({}), { kind: 'program', id: 'fixture' }, () => {
+      const hook = f.repo.list('tree_hooks', h => h.methodId === f.itemId)[0]; f.repo.save('tree_hooks', { ...hook, enabled: false, manuallyDisabled: true }, hook.revision); return {};
+    });
+    const done = completeCorrection(f, sourceDisposition(f)); assert.equal(done.status, 'committed');
+    const item = f.repo.get('tree_items', f.itemId), current = f.repo.get('tree_item_versions', digest(['item_version', item.id, 2]));
+    assert.equal(item.stale, false); assert.equal(item.validation, 'unverified'); assert.deepEqual(current.sourceRefs, f.retained.userSourceRefs);
+    assert.deepEqual(f.repo.get('tree_item_versions', f.old.id), f.old);
+    assert.equal(f.builder.activeItems([f.a], kind === 'supplement' ? 'learning' : 'main').length, 1);
+    if (kind === 'method') {
+      assert.deepEqual(current.content.sourceRefs, f.retained.userSourceRefs);
+      const hooks = f.repo.list('tree_hooks', h => h.methodId === f.itemId && h.version === 2);
+      assert.equal(hooks.find(h => h.manuallyDisabled).enabled, false);
+      assert.ok(f.repo.list('tree_hooks', h => h.methodId === f.itemId && h.version === 1).every(h => !h.enabled));
+    } else assert.deepEqual(f.repo.get('tree_supplements', digest(['supplement', f.itemId, 2])).traitEvidence, f.retained.userSourceRefs);
     assert.equal(f.repo.list('tree_repairs').length, 0); assert.equal(f.v.enqueueCorrection(f.intent).id, f.job.id);
   });
 });
 
 test('assignment source recheck refuses empty, effect, protected-change and wrong-kind results', async t => {
-  const variants = ['empty', 'effect', 'protected', 'wrong_kind', 'removed_evidence'];
+  const variants = ['empty', 'protected', 'wrong_kind', 'removed_evidence'];
   for (const variant of variants) await t.test(variant, async t => {
     const f = await correctionFixture(t, 'understanding', variant === 'protected'); let output = sourceDisposition(f);
     if (variant === 'empty') output = emptyVerification();
     if (variant === 'effect') output.missed = [{ what: '冒称模型漏做', evidence: output.operations[0].evidence }];
     if (variant === 'wrong_kind') { const replacement = method([]); delete replacement.sourceRefs; replacement.sourceIds = output.operations[0].evidence; output.operations[0] = { ...output.operations[0], op: 'rewrite', detail: { replacement } }; }
     if (variant === 'removed_evidence') output.operations[0].evidence = [f.resolveSource(f.removed.userSourceRefs[0]).id];
-    const result = completeCorrection(f, output);
-    assert.equal(result.status, variant === 'effect' ? 'committed' : 'invalid_output');
-    if (variant === 'effect') assert.ok(result.rejectedItems.length);
-    assert.equal(f.repo.get('tree_items', f.itemId).stale, true);
+    assert.equal(completeCorrection(f, output).status, 'invalid_output'); assert.equal(f.repo.get('tree_items', f.itemId).stale, true);
     assert.equal(f.v.enqueueCorrection(f.intent).id, f.job.id, 'Rejected output cannot create a paid retry');
     assert.equal(f.repo.list('tree_exposures', e => e.kind === 'source_recheck').length, 0);
   });
+  await t.test('effect claims are dropped and only the one disposition applies', async t => {
+    const f = await correctionFixture(t, 'understanding', false), output = sourceDisposition(f);
+    output.missed = [{ what: '冒称模型漏做', evidence: output.operations[0].evidence }];
+    assert.equal(completeCorrection(f, output).status, 'committed');
+    assert.equal(f.repo.list('tree_repairs', r => r.type === 'missed').length, 0);
+    assert.equal(f.repo.list('tree_exposures', e => e.kind === 'source_recheck').length, 1);
+  });
 });
 
-test('protected source recheck reports a question and leaves content inactive', async t => {
-  const f = await correctionFixture(t, 'understanding', true), before = f.repo.get('tree_items', f.itemId);
-  const output = { ...emptyVerification(), probes: [{ itemId: f.itemId, itemVersion: f.old.version, what: '剩余依据不足，需用户核对范围。', evidence: f.job.input.sources.map(s => s.id) }] };
-  const done = completeCorrection(f, output); assert.equal(done.status, 'committed');
-  assert.deepEqual(f.repo.get('tree_items', f.itemId), before); assert.deepEqual(f.repo.get('tree_item_versions', f.old.id), f.old);
+test('protected source recheck records a pending question, keeps content inactive and never fabricates main exposure', async t => {
+  const f = await correctionFixture(t, 'understanding', true), output = { ...emptyVerification(), probes: [{ itemId: f.itemId, itemVersion: f.old.version, what: '剩余依据不足，需用户核对范围。', evidence: f.job.input.sources.map(s => s.id) }] };
+  assert.equal(completeCorrection(f, output).status, 'committed');
+  const item = f.repo.get('tree_items', f.itemId); assert.equal(item.stale, true); assert.equal(item.sourceReview.status, 'needs_evidence');
+  assert.equal(item.activeVersion, f.old.version); assert.deepEqual(f.repo.get('tree_item_versions', f.old.id), f.old);
   assert.equal(f.builder.activeItems([f.a]).length, 0); assert.equal(f.repo.list('tree_exposures', e => e.role === 'main').length, 0);
-  assert.deepEqual(f.repo.get('tree_reports', done.resultRef.reportId).reviewOutput, output);
 });
 
 test('unknown source review stays owned without resending; a concurrent assignment rejects late adoption', async t => {
@@ -121,115 +133,112 @@ test('effect view binds exposed versions to answers and next human feedback, omi
 test('unexposed or zero-opportunity methods cannot be met; outcome requires exact method-specific evidence', async t => {
   const f = learningFixture(t), a = f.create('我核验方法'), [id] = propose(f, a); await f.turn(a); const v = verifier(f), job = v.enqueue(a);
   const unexposed = complete(f, v, job, { ...emptyVerification(), verifications: [evaluation(job, id, 'unclear', 0)] });
-  assert.equal(unexposed.status, 'committed'); assert.equal(unexposed.rejectedItems[0].code, 'METHOD_NOT_EXPOSED');
+  assert.equal(unexposed.status, 'committed'); assert.deepEqual(unexposed.rejectedItems.map(r => r.code), ['METHOD_NOT_EXPOSED']);
   await observe(f, a); const next = v.enqueue(a, { reason: 'cluster' });
   const result = complete(f, v, next, { ...emptyVerification(), verifications: [evaluation(next, id, 'met', 0)] });
-  assert.equal(result.status, 'committed'); assert.equal(result.rejectedItems[0].code, 'OUTPUT_OPPORTUNITY'); assert.equal(f.repo.get('tree_items', id).validation, 'unverified');
+  assert.equal(result.status, 'committed'); assert.deepEqual(result.rejectedItems.map(r => r.code), ['OUTPUT_OPPORTUNITY']); assert.equal(f.repo.get('tree_items', id).validation, 'unverified');
 });
 
-test('method evaluation is reported without changing its version or validation', async t => {
-  const f = learningFixture(t), a = f.create('我验证局部做法'), [id] = propose(f, a); await observe(f, a);
-  const v = verifier(f), job = v.enqueue(a), before = f.repo.get('tree_items', id);
-  const output = { ...emptyVerification(), verifications: [evaluation(job, id, 'not_met')] };
-  const done = complete(f, v, job, output); assert.equal(done.status, 'committed');
-  assert.deepEqual(f.repo.get('tree_items', id), before); assert.deepEqual(f.repo.get('tree_reports', done.resultRef.reportId).reviewOutput, output);
+test('local method support records opportunity and source; not_met without repair is refused', async t => {
+  const f = learningFixture(t), a = f.create('我验证局部做法'), [id] = propose(f, a); await observe(f, a); const v = verifier(f), job = v.enqueue(a);
+  const result = complete(f, v, job, { ...emptyVerification(), verifications: [evaluation(job, id)] }); assert.equal(result.status, 'committed');
+  assert.equal(f.repo.get('tree_items', id).validation, 'supported'); assert.equal(f.repo.get('tree_items', id).evaluations[0].opportunityCount, 1);
+  await observe(f, a); const next = v.enqueue(a);
+  const rejected = complete(f, v, next, { ...emptyVerification(), verifications: [evaluation(next, id, 'not_met')] });
+  assert.equal(rejected.status, 'committed'); assert.deepEqual(rejected.rejectedItems.map(r => r.code), ['REPAIR_REQUIRED']);
+  assert.equal(f.repo.get('tree_items', id).validation, 'supported');
 });
 
-test('two proposed repairs stay in a report and preserve exposed versions', async t => {
-  const f = learningFixture(t), a = f.create('我修正两个做法'), [x, y] = propose(f, a, 2);
-  const observed = await observe(f, a), v = verifier(f), job = v.enqueue(a);
-  const before = [f.repo.get('tree_items', x), f.repo.get('tree_items', y)];
-  const output = { ...emptyVerification(), operations: [operation(job, x, 'withdraw'), operation(job, y, 'withdraw')] };
-  const done = complete(f, v, job, output); assert.equal(done.status, 'committed');
-  assert.deepEqual([f.repo.get('tree_items', x), f.repo.get('tree_items', y)], before);
-  assert.notEqual(f.repo.get('tree_exposures', observed.exposure.id).revoked, true);
-  assert.equal(f.repo.list('tree_repairs').length, 0); assert.deepEqual(f.repo.get('tree_reports', done.resultRef.reportId).reviewOutput, output);
+test('same-window two repairs use the one verified native exposure and preserve historical versions', async t => {
+  const f = learningFixture(t), a = f.create('我修正两个做法'), [x, y] = propose(f, a, 2); const observed = await observe(f, a), v = verifier(f), job = v.enqueue(a);
+  const result = complete(f, v, job, { ...emptyVerification(), operations: [operation(job, x, 'withdraw'), operation(job, y, 'withdraw')] });
+  assert.equal(result.status, 'committed'); assert.equal(f.repo.get('tree_items', x).lifecycle, 'withdrawn'); assert.equal(f.repo.get('tree_items', y).lifecycle, 'withdrawn');
+  assert.ok(f.repo.get('tree_item_versions', digest(['item_version', x, 1]))); assert.equal(f.repo.get('tree_exposures', observed.exposure.id).revoked, true); assert.equal(f.repo.list('tree_repairs').length, 2);
 });
 
 test('user-protected version rejects model rewrite and concurrent user withdrawal rejects the whole batch', async t => {
   const f = learningFixture(t), a = f.create('我保护决定'), [x, y] = propose(f, a, 2); f.asUser(); f.items.confirm(f.cmd({ itemId: x, version: 1 }, f.expected('tree_items', x)));
   await observe(f, a); const v = verifier(f), job = v.enqueue(a), op = { ...operation(job, x, 'withdraw'), targetVersion: 2 };
-  const protectedResult = complete(f, v, job, { ...emptyVerification(), operations: [op] });
-  assert.equal(protectedResult.status, 'committed'); assert.equal(protectedResult.rejectedItems[0].code, 'OUTPUT_PROTECTED');
+  const refused = complete(f, v, job, { ...emptyVerification(), operations: [op] });
+  assert.equal(refused.status, 'committed'); assert.deepEqual(refused.rejectedItems.map(r => r.code), ['OUTPUT_PROTECTED']); assert.equal(f.repo.get('tree_items', x).lifecycle, 'active');
   const next = v.enqueue(a, { reason: 'cluster' }); f.jobs.prepare(next.id); f.jobs.submit(next.id); f.asUser(); f.items.withdraw(f.cmd({ itemId: y, version: 1, reason: '用户撤回' }, f.expected('tree_items', y)));
   f.jobs.receive(next.id, { message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(emptyVerification()) }] }, nativeLogRef: 'fixture#2', eventsHash: digest('withdrawal') });
   assert.equal(f.jobs.validate(next.id).status, 'stale'); assert.equal(f.repo.get('tree_items', x).lifecycle, 'active');
 });
 
-test('reporting a rebuttal cannot change protected understanding or confirmation', async t => {
+test('attaching a rebuttal to protected understanding cannot silently confirm it', async t => {
   const f = learningFixture(t), node = f.create('我保护用户原意'); f.asModel('learning', [node]);
   const id = f.propose(node, { understandings: [{ content: '用户只选择本地学校', source: 'assistant_inferred', sourceRefs: [f.ref] }] }).understandings.itemIds[0];
   f.asUser(); f.items.confirm(f.cmd({ itemId: id, version: 1 }, f.expected('tree_items', id)));
   const before = f.repo.get('tree_items', id); await observe(f, node, '我不同意这条理解，但不要自动改动保护内容');
-  const v = verifier(f), job = v.enqueue(node), op = { ...operation(job, id, 'support'), targetVersion: before.activeVersion, reason: '只报告反对证据' };
-  const done = complete(f, v, job, { ...emptyVerification(), operations: [op] });
-  assert.equal(done.status, 'committed'); assert.deepEqual(f.repo.get('tree_items', id), before);
-  assert.ok(f.repo.get('tree_reports', done.resultRef.reportId));
+  const v = verifier(f), job = v.enqueue(node), op = { ...operation(job, id, 'support'), targetVersion: before.activeVersion, reason: '只附上反对证据，不确认或改写保护内容' };
+  assert.equal(complete(f, v, job, { ...emptyVerification(), operations: [op] }).status, 'committed');
+  const after = f.repo.get('tree_items', id); assert.equal(after.activeVersion, before.activeVersion); assert.equal(after.validation, before.validation);
+  assert.equal(after.evaluations.at(-1).result, 'unclear'); assert.equal(after.reviews.at(-1).result, 'unclear');
 });
 
-test('three windows with no opportunity do not automatically withdraw a method', async t => {
+test('three distinct consolidation windows with no opportunity withdraw at origin; duplicate and cluster windows do not count', async t => {
   const f = learningFixture(t), a = f.create('我等待适用情境'), [id] = propose(f, a); await observe(f, a); const v = verifier(f);
-  const before = f.repo.get('tree_items', id);
   for (let i = 0; i < 3; i++) {
     if (i) await observe(f, a);
     const job = v.enqueue(a, { summaryId: summary(f, a) }), evidence = job.input.effects[0].answer[0].id;
-    const done = complete(f, v, job, { ...emptyVerification(), verifications: [{ ...evaluation(job, id, 'unclear', 0), evidence: [evidence] }] });
-    assert.equal(done.status, 'committed'); assert.deepEqual(f.repo.get('tree_items', id), before);
+    const output = { ...emptyVerification(), verifications: [{ ...evaluation(job, id, 'unclear', 0), evidence: [evidence] }] };
+    const done = complete(f, v, job, output); assert.equal(done.status, 'committed');
+    assert.equal(f.jobs.commit(job.id).id, job.id); if (i < 2) assert.equal(f.repo.get('tree_items', id).lifecycle, 'active');
   }
-  assert.equal(f.repo.list('tree_reports').length, 3);
+  assert.equal(f.repo.get('tree_items', id).lifecycle, 'withdrawn'); assert.equal(f.repo.get('tree_items', id).evaluations.length, 3);
 });
 
-test('child reports do not alter ancestor learning and invalid ancestor changes remain rejected', async t => {
+test('ancestor support needs two independent nodes and cannot be rewritten by one child', async t => {
   const f = learningFixture(t), a = f.create('我写甲'), b = f.create('我写乙'), [id] = propose(f, f.repo.rootId()), v = verifier(f);
-  const before = f.repo.get('tree_items', id);
-  for (const node of [a, b]) { await observe(f, node); const job = v.enqueue(node); assert.equal(complete(f, v, job, { ...emptyVerification(), verifications: [evaluation(job, id)] }).status, 'committed'); }
-  assert.deepEqual(f.repo.get('tree_items', id), before);
+  await observe(f, a); const first = v.enqueue(a); complete(f, v, first, { ...emptyVerification(), verifications: [evaluation(first, id)] }); assert.equal(f.repo.get('tree_items', id).validation, 'unverified');
+  await observe(f, b); const second = v.enqueue(b); complete(f, v, second, { ...emptyVerification(), verifications: [evaluation(second, id)] }); assert.equal(f.repo.get('tree_items', id).validation, 'supported');
   const third = v.enqueue(a, { reason: 'cluster' }), rejected = complete(f, v, third, { ...emptyVerification(), operations: [operation(third, id, 'withdraw')] });
-  assert.equal(rejected.status, 'committed'); assert.equal(rejected.rejectedItems[0].code, 'ANCESTOR_EVIDENCE_ONLY');
-  assert.deepEqual(f.repo.get('tree_items', id), before);
+  assert.equal(rejected.status, 'committed'); assert.deepEqual(rejected.rejectedItems.map(r => r.code), ['ANCESTOR_EVIDENCE_ONLY']);
+  assert.equal(f.repo.get('tree_items', id).lifecycle, 'active');
 });
 
-test('harden suggestion is recorded without adding executable components', async t => {
+test('harden adds a finite hook in a new bundle; changed is a normal evolution, not a producer error', async t => {
   const f = learningFixture(t), a = f.create('我改进检查'), [id] = propose(f, a); await observe(f, a); const v = verifier(f), job = v.enqueue(a);
-  const before = f.repo.get('tree_items', id), hooks = f.repo.list('tree_hooks');
   const op = operation(job, id, 'harden', { hooks: [{ moment: 'turn_end', conditions: [], action: 'remind_user', message: '说明实际检查结果' }], scriptRequests: [] }, 'use');
-  const output = { ...emptyVerification(), operations: [op], verifications: [evaluation(job, id, 'not_met')] };
-  const done = complete(f, v, job, output); assert.equal(done.status, 'committed');
-  assert.deepEqual(f.repo.get('tree_items', id), before); assert.deepEqual(f.repo.list('tree_hooks'), hooks);
-  assert.equal(f.repo.list('tree_repairs').length, 0);
+  complete(f, v, job, { ...emptyVerification(), operations: [op], verifications: [evaluation(job, id, 'not_met')] });
+  assert.equal(f.repo.get('tree_items', id).activeVersion, 2); assert.equal(f.repo.get('tree_methods', digest(['method', id, 2])).hooks.length, 3);
+  await observe(f, a); const next = v.enqueue(a), change = { ...operation(next, id, 'mark_changed'), targetVersion: 2 };
+  complete(f, v, next, { ...emptyVerification(), operations: [change] }); assert.equal(f.repo.get('tree_items', id).lifecycle, 'changed'); assert.equal(f.repo.list('tree_repairs').length, 1);
 });
 
-test('duplicate routine proposals are rejected and valid probes remain in the report', async t => {
-  const f = learningFixture(t), a = f.create('我探索新思路'), [id] = propose(f, a); await observe(f, a); const v = verifier(f), job = v.enqueue(a);
-  const u = { content: '合成推断', source: 'assistant_inferred', sourceIds: [source(job)], origin: 'routine' };
+test('routine reflection rejects two proposals and exposes a valid probe next entry', async t => {
+  const f = learningFixture(t), a = f.create('我探索新思路'), [id] = propose(f, a); await observe(f, a); const v = verifier(f), job = v.enqueue(a), u = { content: '合成推断', source: 'assistant_inferred', sourceIds: [source(job)], origin: 'routine' };
   const rejected = complete(f, v, job, { ...emptyVerification(), proposals: { understandings: [u, u], methods: [] } });
-  assert.equal(rejected.status, 'committed'); assert.equal(rejected.rejectedItems[0].code, 'ROUTINE_LIMIT');
-  const next = v.enqueue(a, { reason: 'cluster' }), before = f.repo.get('tree_items', id);
-  const done = complete(f, v, next, { ...emptyVerification(), probes: [{ itemId: id, itemVersion: 1, what: '确认这个做法的适用范围', evidence: [source(next)] }] });
-  assert.deepEqual(f.repo.get('tree_items', id), before); assert.ok(JSON.stringify(f.repo.get('tree_reports', done.resultRef.reportId)).includes('确认这个做法的适用范围'));
+  assert.equal(rejected.status, 'committed'); assert.deepEqual(rejected.rejectedItems.map(r => [r.item, r.code]), [['proposals.understandings[1]', 'ROUTINE_LIMIT']]);
+  assert.equal(f.repo.list('tree_items', i => i.kind === 'understanding' && i.producerRole === 'verification').length, 1);
+  const next = v.enqueue(a, { reason: 'cluster' }); complete(f, v, next, { ...emptyVerification(), probes: [{ itemId: id, itemVersion: 1, what: '确认这个做法的适用范围', evidence: [source(next)] }] });
+  assert.ok(JSON.stringify(f.builder.build([a])).includes('确认这个做法的适用范围'));
 });
 
-test('consolidation updates summary but does not promote learned items automatically', async t => {
+test('consolidation promotes an eligible own item by moving it, never copying or carrying local support', async t => {
   const f = learningFixture(t), a = f.create('我整理方法'), [id] = propose(f, a); await observe(f, a);
-  const before = f.repo.get('tree_items', id), plan = f.consolidation.plan(a, 'leave_timeout'), frozen = f.consolidation.freeze(plan);
-  const sourceId = frozen.input.sources.find(s => s.role === 'user').id;
+  const v = verifier(f), review = v.enqueue(a); complete(f, v, review, { ...emptyVerification(), verifications: [evaluation(review, id)] });
+  assert.equal(f.repo.get('tree_items', id).validation, 'supported');
+  const plan = f.consolidation.plan(a, 'leave_timeout'), frozen = f.consolidation.freeze(plan), inputSource = frozen.input.sources.find(s => s.role === 'user');
   const job = f.jobs.enqueue({ role: 'consolidation', key: 'broaden-fixture', nodeIds: [a], input: frozen.input, revisionSet: frozen.revisions, config: f.config(), trigger: { kind: 'leave_timeout', reason: 'leave_timeout', producerRole: 'program' } });
   const service = new ConsolidationReflection({ repository: f.repo, consolidation: f.consolidation, resolveSource: f.resolveSource });
-  const output = { summary: { oneLine: '已核对', status: '有合成结果', outputs: [], decisions: [], next: '', pending: [] }, broaden: [{ kind: 'method', id, version: 1, toNodeId: f.repo.rootId(), reason: '可用于其它同类任务', sourceIds: [sourceId] }], retrospect: { understandings: [], methods: [] } };
-  const done = complete(f, service, job, output); assert.equal(done.status, 'committed'); assert.ok(done.resultRef.summaryId);
-  assert.deepEqual(done.resultRef.moved, []); assert.deepEqual(f.repo.get('tree_items', id), before);
+  const output = { summary: { oneLine: '已核对', status: '有合成结果', outputs: [], decisions: [], next: '', pending: [] }, broaden: [{ kind: 'method', id, version: 1, toNodeId: f.repo.rootId(), reason: '可用于其它同类任务', sourceIds: [inputSource.id] }], retrospect: { understandings: [], methods: [] } };
+  const result = complete(f, service, job, output); assert.equal(result.status, 'committed'); assert.equal(f.repo.list('tree_items').length, 1); assert.equal(f.repo.get('tree_items', id).nodeId, f.repo.rootId()); assert.equal(f.repo.get('tree_items', id).originNodeId, a);
+  assert.ok(result.resultRef.summaryId); assert.deepEqual(result.resultRef.moved, [id]);
+  assert.equal(f.repo.get('tree_items', id).validation, 'unverified');
 });
 
-test('format suggestions stay in report and cannot invent a user decision', async t => {
+test('format repairs preserve summary versions, correct name, and cannot invent a user decision', async t => {
   const f = learningFixture(t), a = f.create('我写初稿'); await observe(f, a); const sid = summary(f, a), v = verifier(f), job = v.enqueue(a, { summaryId: sid });
-  const old = f.repo.get('tree_summaries', sid), node = f.repo.get('tree_nodes', a);
-  const fixed = { oneLine: '保留先前产出', status: '已形成初稿', outputs: [], decisions: [], next: '', pending: ['未核实'] };
-  const output = { ...emptyVerification(), formatFixes: [{ target: 'summary', id: a, version: old.version, fixed, reason: '补回待核项', sourceIds: [source(job)] }, { target: 'name', id: a, version: node.revision, fixed: '我完成可核验的初稿', reason: '写明结果', sourceIds: [source(job)] }] };
-  const done = complete(f, v, job, output); assert.equal(done.status, 'committed'); assert.deepEqual(f.repo.get('tree_nodes', a), node); assert.deepEqual(f.repo.get('tree_summaries', sid), old);
-  const next = v.enqueue(a, { summaryId: sid, reason: 'cluster' }), assistantId = next.input.effects[0].answer[0].id;
-  const bad = { ...emptyVerification(), formatFixes: [{ target: 'summary', id: a, version: old.version, fixed: { ...fixed, decisions: [{ what: '未经用户确认', by: 'user', when: '本轮', sourceIds: [assistantId] }] }, reason: '伪造', sourceIds: [assistantId] }] };
-  const rejected = complete(f, v, next, bad); assert.equal(rejected.status, 'committed'); assert.equal(rejected.rejectedItems[0].code, 'USER_SOURCE_REQUIRED');
-  assert.equal(f.repo.get('tree_nodes', a).currentSummaryId, sid);
+  const old = f.repo.get('tree_summaries', sid), fixed = { oneLine: '保留先前产出', status: '已形成初稿', outputs: [], decisions: [], next: '', pending: ['未核实的事项'] };
+  const output = { ...emptyVerification(), formatFixes: [{ target: 'summary', id: a, version: old.version, fixed, reason: '补回遗漏的待核实项', sourceIds: [source(job)] }, { target: 'name', id: a, version: f.repo.get('tree_nodes', a).revision, fixed: '我完成可核验的初稿', reason: '写明结果', sourceIds: [source(job)] }] };
+  assert.equal(complete(f, v, job, output).status, 'committed'); assert.deepEqual(f.repo.get('tree_summaries', sid), old);
+  assert.equal(f.repo.get('tree_nodes', a).name, '我完成可核验的初稿'); const nextSummary = f.repo.get('tree_summaries', f.repo.get('tree_nodes', a).currentSummaryId); assert.equal(nextSummary.previousVersion, old.version);
+  const next = v.enqueue(a, { summaryId: nextSummary.id }), assistantId = next.input.effects[0].answer[0].id;
+  const bad = { ...emptyVerification(), formatFixes: [{ target: 'summary', id: a, version: nextSummary.version, fixed: { ...fixed, decisions: [{ what: '未经用户确认的建议', by: 'user', when: '本轮', sourceIds: [assistantId] }] }, reason: '伪造', sourceIds: [assistantId] }] };
+  const refused = complete(f, v, next, bad); assert.equal(refused.status, 'committed'); assert.deepEqual(refused.rejectedItems.map(r => r.code), ['USER_SOURCE_REQUIRED']);
+  assert.equal(f.repo.get('tree_nodes', a).currentSummaryId, nextSummary.id);
 });
 
 test('two no-opportunity reviews of one summary still count as one consolidation window', async t => {
@@ -242,57 +251,63 @@ test('two no-opportunity reviews of one summary still count as one consolidation
   assert.equal(f.repo.get('tree_items', id).lifecycle, 'active');
 });
 
-test('zero-opportunity evidence stays in a report without changing the method', async t => {
-  const f = learningFixture(t), a = f.create('我做另一种任务'), [id] = propose(f, a); await observe(f, a, '这次只讨论方向，不改文件');
-  const v = verifier(f), job = v.enqueue(a), before = f.repo.get('tree_items', id);
-  const output = { ...emptyVerification(), verifications: [evaluation(job, id, 'unclear', 0)] };
-  const result = complete(f, v, job, output); assert.equal(result.status, 'committed');
-  assert.deepEqual(f.repo.get('tree_items', id), before); assert.equal(f.repo.get('tree_reports', result.resultRef.reportId).reviewOutput.verifications[0].opportunityCount, 0);
+test('an unrelated user request can be evidence for zero applicable opportunities', async t => {
+  const f = learningFixture(t), a = f.create('我做另一种任务'), [id] = propose(f, a); await observe(f, a, '这次只讨论方向，不改文件'); const v = verifier(f), job = v.enqueue(a);
+  const result = complete(f, v, job, { ...emptyVerification(), verifications: [evaluation(job, id, 'unclear', 0)] });
+  assert.equal(result.status, 'committed'); assert.equal(f.repo.get('tree_items', id).validation, 'unverified'); assert.equal(f.repo.get('tree_items', id).evaluations[0].opportunityCount, 0);
 });
 
-test('cross-node cluster report uses bound episodes without changing the cluster', async t => {
+test('cross-node cluster review receives only bound episodes and their actual method exposures', async t => {
   const f = learningFixture(t), a = f.create('我讨论甲'), b = f.create('我讨论乙'), hidden = f.create('我讨论不相干的私事'), [id] = propose(f, a);
-  await observe(f, a, '甲的反馈'); const first = f.repo.list('tree_turns', t => t.status === 'settled').at(-1), firstJob = f.learning.enqueue(first.id, a), firstSource = firstJob.input.sources.find(s => s.role === 'user');
+  await observe(f, a, '甲的反馈');
+  const first = f.repo.list('tree_turns', t => t.status === 'settled').at(-1), firstJob = f.learning.enqueue(first.id, a), firstSource = firstJob.input.sources.find(s => s.role === 'user');
   f.complete(firstJob, { understandings: [], revisions: [], methods: [], supplements: [], categories: [{ category: 'not_understood', note: '甲', sourceId: firstSource.id, subjectIds: [id] }] });
   await f.feedback(b, 'not_understood', '乙的反馈'); await f.feedback(a, 'not_understood', '再一次甲的反馈'); await f.feedback(hidden, 'proceeded', '不应出现在其它簇里的私人内容');
   const cluster = f.clusters.candidate('not_understood', 'negative'), v = verifier(f), job = v.enqueue(f.repo.rootId(), { reason: 'cluster', clusterIds: [cluster.id] });
-  assert.ok(job.input.knownItems.some(i => i.id === id)); assert.ok(!JSON.stringify(job.input).includes('不应出现在其它簇里的私人内容'));
+  assert.ok(job.input.knownItems.some(i => i.id === id)); assert.ok(job.input.effects.some(e => e.itemVersions.some(i => i.itemId === id)));
+  assert.ok(!JSON.stringify(job.input).includes('不应出现在其它簇里的私人内容'));
   const evidence = job.input.clusters[0].episodes.map(e => e.sources.find(s => s.role === 'user').id);
   const done = complete(f, v, job, { ...emptyVerification(), clusters: [{ clusterId: cluster.id, clusterVersion: cluster.revision, verdict: 'none', commonality: '', evidence }] });
-  assert.equal(done.status, 'committed'); assert.equal(f.repo.get('tree_clusters', cluster.id).status, cluster.status);
+  assert.equal(done.status, 'committed'); assert.equal(f.repo.get('tree_clusters', cluster.id).status, 'reviewed_none');
 });
 
-test('negative evidence from independent nodes does not alter protected content', async t => {
+test('ancestor negative evidence requires independent nodes; protected content remains active', async t => {
   const f = learningFixture(t), a = f.create('我检验甲'), b = f.create('我检验乙'), [id] = propose(f, f.repo.rootId()), v = verifier(f);
-  f.asUser(); f.items.confirm(f.cmd({ itemId: id, version: 1 }, f.expected('tree_items', id))); const before = f.repo.get('tree_items', id);
-  for (const node of [a, b]) { await observe(f, node); const job = v.enqueue(node);
+  f.asUser(); f.items.confirm(f.cmd({ itemId: id, version: 1 }, f.expected('tree_items', id)));
+  for (const [index, node] of [a, b].entries()) {
+    await observe(f, node); const job = v.enqueue(node);
     const result = complete(f, v, job, { ...emptyVerification(), verifications: [{ ...evaluation(job, id, 'not_met'), methodVersion: 2 }] });
-    assert.equal(result.status, 'committed'); assert.deepEqual(f.repo.get('tree_items', id), before);
+    assert.equal(result.status, 'committed'); assert.equal(f.repo.get('tree_items', id).lifecycle, 'active');
+    assert.equal(f.repo.get('tree_items', id).validation, index ? 'refuted' : 'supported');
   }
 });
 
-test('proposed merge is retained in report without changing either item', async t => {
+test('merge and rewrite preserve original versions while retiring prior validation', async t => {
   const f = learningFixture(t), a = f.create('我合并重复做法'), [x, y] = propose(f, a, 2), v = verifier(f); await observe(f, a);
-  const before = [f.repo.get('tree_items', x), f.repo.get('tree_items', y)], job = v.enqueue(a);
-  const output = { ...emptyVerification(), operations: [operation(job, y, 'merge', { targetId: x, targetVersion: 1 })] };
-  const done = complete(f, v, job, output); assert.equal(done.status, 'committed');
-  assert.deepEqual([f.repo.get('tree_items', x), f.repo.get('tree_items', y)], before);
+  const first = v.enqueue(a); complete(f, v, first, { ...emptyVerification(), verifications: [evaluation(first, x)] });
+  const job = v.enqueue(a, { reason: 'cluster' });
+  assert.equal(complete(f, v, job, { ...emptyVerification(), operations: [operation(job, y, 'merge', { targetId: x, targetVersion: 1 })] }).status, 'committed');
+  assert.equal(f.repo.get('tree_items', y).lifecycle, 'withdrawn'); assert.equal(f.repo.get('tree_items', x).activeVersion, 2); assert.equal(f.repo.get('tree_items', x).validation, 'unverified');
   assert.ok(f.repo.get('tree_item_versions', digest(['item_version', y, 1]))); assert.ok(f.repo.get('tree_item_versions', digest(['item_version', x, 1])));
+  await observe(f, a); const next = v.enqueue(a), original = f.repo.get('tree_item_versions', digest(['item_version', x, 2])).content;
+  const { sourceRefs, ...replacement } = original; replacement.sourceIds = [source(next)]; replacement.short = { ...replacement.short, action: '先保留已确认内容，再核对新改动。' };
+  const op = { ...operation(next, x, 'rewrite', { replacement }), targetVersion: 2 };
+  assert.equal(complete(f, v, next, { ...emptyVerification(), operations: [op] }).status, 'committed'); assert.equal(f.repo.get('tree_items', x).activeVersion, 3);
 });
 
-test('proposed move does not relocate the method or its hooks', async t => {
+test('move is restricted to observed target scope and relocates attached hooks', async t => {
   const f = learningFixture(t), a = f.create('我明确归属甲'), b = f.create('我明确归属乙'), [id] = propose(f, a), v = verifier(f);
-  await observe(f, a, '这项做法实际服务乙', [b]); const job = v.enqueue(a), before = f.repo.get('tree_items', id), hooks = f.repo.list('tree_hooks');
-  const done = complete(f, v, job, { ...emptyVerification(), operations: [operation(job, id, 'move', { toNodeId: b })] });
-  assert.equal(done.status, 'committed'); assert.deepEqual(f.repo.get('tree_items', id), before); assert.deepEqual(f.repo.list('tree_hooks'), hooks);
+  await observe(f, a, '这项做法实际服务乙', [b]); const job = v.enqueue(a);
+  assert.equal(complete(f, v, job, { ...emptyVerification(), operations: [operation(job, id, 'move', { toNodeId: b })] }).status, 'committed');
+  assert.equal(f.repo.get('tree_items', id).nodeId, b); assert.equal(f.repo.get('tree_items', id).originNodeId, a);
+  assert.ok(f.repo.list('tree_hooks', h => h.methodId === id && h.enabled).every(h => h.scopeNodeId === b));
 });
 
-test('possible missed learning and new proposals stay in the report', async t => {
+test('missed learning is attributable only to a committed producer and new proposals retain checker provenance', async t => {
   const f = learningFixture(t), a = f.create('我检查遗漏'); const observed = await observe(f, a), learned = f.learning.enqueue(observed.turn.id, a);
   f.complete(learned, { understandings: [], revisions: [], methods: [], supplements: [], categories: [] });
   const v = verifier(f), job = v.enqueue(a), evidence = [source(job)];
-  const output = { ...emptyVerification(), missed: [{ what: '这次明确纠正没有留下理解', evidence }], proposals: { understandings: [{ content: '后续需保留确认过的内容', source: 'assistant_inferred', sourceIds: evidence, origin: 'missed' }], methods: [] } };
-  const done = complete(f, v, job, output); assert.equal(done.status, 'committed');
-  assert.equal(f.repo.list('tree_repairs').length, 0); assert.equal(f.repo.list('tree_items').length, 0);
-  assert.deepEqual(f.repo.get('tree_reports', done.resultRef.reportId).reviewOutput, output);
+  const result = complete(f, v, job, { ...emptyVerification(), missed: [{ what: '这次明确纠正没有留下理解', evidence }], proposals: { understandings: [{ content: '后续需保留确认过的内容', source: 'assistant_inferred', sourceIds: evidence, origin: 'missed' }], methods: [] } });
+  assert.equal(result.status, 'committed'); const repair = f.repo.list('tree_repairs')[0]; assert.equal(repair.producerJobId, learned.id); assert.equal(repair.countsAsError, true);
+  const item = f.repo.list('tree_items')[0]; assert.equal(item.producerRole, 'verification'); assert.equal(item.producerJobId, job.id);
 });

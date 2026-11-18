@@ -63,7 +63,7 @@ export class TreeJobs {
     const id = digest(['model_job', role, key]), prompt = compilePrompt(role), modelConfig = freezeModelConfig(role, config);
     const envelope = { ...jsonClone(input), inputVersion: CONTRACT, role, jobId: id, trigger: jsonClone(trigger) };
     if (canonicalJson(envelope.scope?.nodeIds) !== canonicalJson(nodeIds) || !Array.isArray(envelope.sources) || !Array.isArray(envelope.knownItems) || !envelope.allowedIds) fail('INPUT_CONTRACT', 'A complete frozen scope and reference envelope is required');
-    if (['learning', 'verification', 'improvement'].includes(role)) envelope.outputBindings = outputBindings(envelope);
+    if (['learning', 'consolidation', 'verification', 'improvement'].includes(role)) envelope.outputBindings = outputBindings(envelope);
     for (const nodeId of nodeIds) { const node = this.repo.get('tree_nodes', nodeId); if (!node || node.deleted) fail('JOB_SCOPE', 'Unknown scope node'); }
     const inputHash = digest(envelope), inputRevisionSet = jsonClone(revisionSet), specification = { role, key, nodeIds, inputHash, inputRevisionSet, modelConfig, promptHash: prompt.hash };
     // Retry under another caller request id must still find this same job.
