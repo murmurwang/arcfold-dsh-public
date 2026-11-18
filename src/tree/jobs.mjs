@@ -6,6 +6,16 @@ import { recordKey } from './repository.mjs';
 export const ROLE_LIMITS = Object.freeze({ main: 8192, attribution: 2048, learning: 8192, consolidation: 8192, verification: 8192, improvement: 8192, script_writer: 8192 });
 export const WRITER_TOOLS = Object.freeze(['writer_read', 'writer_list', 'writer_search', 'writer_put', 'writer_probe', 'writer_finish']);
 export const TERMINAL_JOBS = Object.freeze(['committed', 'failed', 'unknown', 'invalid_output', 'stale', 'cancelled']);
+export const CONTEXT_REJECTED = 'CONTEXT_WINDOW_EXCEEDED';
+// A failed learning job whose turn may be frozen again in a later native
+// session: either stopped locally before submission, or refused by the
+// provider for context size with no output. Paid, unknown and ordinary
+// failures never qualify.
+export function deferredLearning(job) {
+  if (job?.role !== 'learning' || job.status !== 'failed') return false;
+  if (job.error?.code === 'LEARNING_PRESSURE') return !job.submittedAt && !job.invocationIds.length;
+  return job.error?.code === CONTEXT_REJECTED && job.providerRejected === true;
+}
 const priority = { attribution: 0, script_writer: 1, learning: 2, consolidation: 3, verification: 4, improvement: 5, main: 0 };
 const triggers = {
   main: ['user_turn'], attribution: ['human_input'], learning: ['settled_main_turn', 'assignment_correction'],
@@ -104,6 +114,22 @@ export class TreeJobs {
     this.#command('recordPreDispatchFailure', digest(['not-sent', id, eventsHash]), { jobId: id, nativeLogRef, eventsHash, reason }, { [recordKey('tree_jobs', id)]: job.revision }, () => {
       this.#replace(job, { status: 'failed', leaseOwner: null, nativeLogRef, eventsHash, error: { code: 'NATIVE_PRE_DISPATCH', message: reason }, notSent: true }); return { jobId: id, status: 'failed' };
     }); return this.get(id);
+  }
+  failRejected(id, { nativeLogRef, eventsHash, code, message }) {
+    const job = this.get(id);
+    if (!['submitted', 'unknown'].includes(job.status) || !job.invocationIds.length) fail('REJECTION_STATE', 'Only a submitted request with a guarded identity can be recorded as provider-rejected');
+    text(nativeLogRef, 'native failure receipt', 4096); text(eventsHash, 'native failure hash', 128); text(code, 'provider error code', 256); text(message, 'provider error message', 4096);
+    this.#command('recordProviderRejection', digest(['provider-rejected', id, eventsHash]), { jobId: id, nativeLogRef, eventsHash, code }, { [recordKey('tree_jobs', id)]: job.revision }, () => {
+      this.#replace(job, { status: 'failed', leaseOwner: null, nativeLogRef, eventsHash, error: { code, message }, providerRejected: true }); return { jobId: id, status: 'failed' };
+    }); return this.get(id);
+  }
+  // Start a fresh native session for the current epoch content. Used when the
+  // provider refused the session's first append and nothing older can be
+  // summarized; replaceEpoch still verifies the exact summary and coverage.
+  rotateEpoch(nodeId) {
+    const session = this.repo.get('tree_learning_sessions', digest(['learning_session', nodeId])); if (!session) fail('SESSION_REQUIRED', 'Learning session missing');
+    if (!session.summaryId) fail('EPOCH_COVERAGE', 'A first epoch without a verified summary cannot rotate');
+    return this.replaceEpoch(nodeId, { summaryId: session.summaryId, summaryHash: session.summaryHash, sourceWatermark: session.sourceWatermark, recentJobIds: session.recentJobIds });
   }
   recordError(id, error) {
     const job = this.get(id), details = { code: error.code ?? 'HOST_ERROR', message: error.message };

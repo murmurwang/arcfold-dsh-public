@@ -52,6 +52,7 @@ export async function nativeFixture(t, script = ({ role }) => minimal[role] ?? '
     for (const message of body.messages) for (const block of message.content ?? []) if (block.type === 'text') { try { const v = JSON.parse(block.text); if (v.jobId && v.role) input = v; } catch {} }
     const role = input?.role ?? 'main', row = { ordinal: requests.length + 1, role, body, input }; requests.push(row);
     const result = await script(row, { ctx, jobs, repo, ledger, requests });
+    if (result?.httpError) { res.writeHead(result.httpError.status, { 'content-type': 'application/json', 'x-request-id': `synthetic-${row.ordinal}` }); res.end(JSON.stringify(result.httpError.body)); return; }
     res.writeHead(200, { 'content-type': 'text/event-stream', 'x-request-id': `synthetic-${row.ordinal}` }); res.end(sse(body, result, fixtureOptions.sseOptions));
   })().catch(e => res.destroy(e)); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); const endpoint = `http://127.0.0.1:${server.address().port}/anthropic/v1/messages`;

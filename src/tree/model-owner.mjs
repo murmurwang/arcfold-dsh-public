@@ -1,5 +1,5 @@
 import { canonicalJson, digest, fail } from './contracts.mjs';
-import { WRITER_TOOLS, TERMINAL_JOBS } from './jobs.mjs';
+import { WRITER_TOOLS, TERMINAL_JOBS, CONTEXT_REJECTED } from './jobs.mjs';
 import { directoryContext, contextMatches } from '../learning-runner.mjs';
 import { compilePrompt } from './prompts.mjs';
 import { nativeAgentOptions, nativeModel } from './native-models.mjs';
@@ -168,6 +168,10 @@ export class TreeModelOwner {
         && !events.some(e => e.type === 'assistant/message' && e.seq > start.seq && e.seq < end.seq))
         return this.jobs.failBeforeInvocation(id, { nativeLogRef: `${job.nativeSessionId}#${end.seq}`, eventsHash: digest(events), reason: end.data.reason.error?.message ?? 'Native request guard rejected before admission' });
     }
+    if (!result && events && job.role !== 'main' && job.invocationIds.length) {
+      const rejection = this.#contextRejection(job, events);
+      if (rejection) return this.jobs.failRejected(id, rejection);
+    }
     if (!result) fail('RESULT_UNKNOWN', 'No complete durable native result for this exact job');
     if (!job.invocationIds.length) fail('INVOCATION_MISSING', 'A model result requires at least one guarded paid identity');
     for (const invocationId of job.invocationIds) {
@@ -183,6 +187,24 @@ export class TreeModelOwner {
     if (job.role !== 'main' && result.end.data.reason?.kind === 'max-tokens')
       return this.jobs.transition(id, 'invalid_output', { error: { code: 'OUTPUT_LIMIT', message: 'Provider reached the output limit before completing the final result' }, rawHash: digest(result.final) });
     const validated = this.jobs.validate(id); return validated.status === 'validated' ? this.jobs.commit(id, this.applyResult) : validated;
+  }
+  // A known refusal: the native turn that carried this job ended with the
+  // provider's context-window error, produced no assistant output, and every
+  // guarded request has a durable failed native record. Anything less stays
+  // unknown. Native-model route only; metered accounting is unchanged.
+  #contextRejection(job, events) {
+    if (job.role !== 'learning' || !nativeModel(job.modelConfig)) return null;
+    const own = events.filter(e => e.type === 'user/message' && e.data.source?.jobId === job.id); if (own.length !== 1) return null;
+    const start = events.findLast(e => e.type === 'turn/start' && e.seq < own[0].seq);
+    const end = start && events.find(e => e.type === 'turn/end' && e.data.turn === start.data.turn && e.seq > own[0].seq);
+    const error = end?.data.reason?.kind === 'error' ? end.data.reason.error : null;
+    if (error?.code !== CONTEXT_REJECTED) return null;
+    if (events.some(e => e.type === 'assistant/message' && e.seq > start.seq && e.seq < end.seq)) return null;
+    for (const invocationId of job.invocationIds) {
+      const invocation = this.jobs.repo.get('tree_invocations', invocationId), record = invocation && this.ledgerLookup(invocation.ledgerRequestId);
+      if (record?.status !== 'failed' || record.finish !== 'error') return null;
+    }
+    return { nativeLogRef: `${job.nativeSessionId}#${end.seq}`, eventsHash: digest(events), code: error.code, message: String(error.message || 'Provider rejected the request for context size').slice(0, 4096) };
   }
   run(id) {
     if (this.running.has(id)) return this.running.get(id); const promise = this.#run(id); this.running.set(id, promise);

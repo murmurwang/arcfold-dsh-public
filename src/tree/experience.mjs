@@ -1,6 +1,16 @@
 import { canonicalJson, digest, fail, integer, jsonClone, validateRef } from './contracts.mjs';
 import { DomainService } from './tree.mjs';
 
+// Learning reads the user's and assistant's own wording. Long tool output is
+// kept by reference (ref, sha256, length) instead of being copied into every
+// learning input and new-epoch seed, where it can exceed the model context.
+export const LEARNING_TOOL_SOURCE_CHARS = 4000;
+export function compactLearningSource(source) {
+  if (source?.role !== 'tool' || typeof source.text !== 'string' || source.text.length <= LEARNING_TOOL_SOURCE_CHARS) return source;
+  const marker = `[工具输出 ${source.text.length} 字符；原文按引用保留，未放入学习输入]`;
+  return { ...source, text: marker, content: [{ type: 'text', text: marker }], elided: { chars: source.text.length, sha256: source.sha256 } };
+}
+
 const messageOf = (event, messageId) => event.type === 'agent/inbox/spliced' ? event.data.inserted?.find(m => m.id === messageId) : event.type === 'user/message' ? event.data : event.data?.message;
 const visibleBlocks = message => (message?.content ?? []).filter(b => b.type !== 'reasoning');
 
