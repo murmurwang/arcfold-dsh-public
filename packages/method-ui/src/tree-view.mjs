@@ -57,11 +57,14 @@ export function TreeDock({ source }) {
   return h('div', { className: 'arcfold-tree tree-dock', 'aria-label': '当前事项' }, h(AttributionRange, { source, state }), state.current.paths.map(path => path.length ? h(NodeChip, { key: path.at(-1).id, node: path.at(-1), path, source }) : null), state.error && h('small', { role: 'alert' }, state.error),
     state.detailsNodeId && h('div', { role: 'dialog', 'aria-modal': true, 'aria-label': '事项详情', className: 'tree-detail-dialog' }, button('关闭详情', () => source.closeDetails()), h(ReadState, { value: detail }, data => h(NodeDetail, { key: data.node.id, source, detail: data, navigate: id => source.openDetails(id), onDone: () => { setRevision(v => v + 1); void source.refresh(); } }))));
 }
+const emptyShort = { situation: '', action: '', basis: '', notApplicable: '' };
 function ItemEditor({ source, item, onDone, onCancel }) {
   const [expectedVersion] = useState(item.current.version);
   const [text, setText] = useState(typeof item.current.content === 'string' ? item.current.content : ''),
-    [short, setShort] = useState(item.method?.short ?? item.current.content), [long, setLong] = useState(item.method?.long), [reason, setReason] = useState('');
-  const replacement = () => item.kind === 'understanding' ? text : item.kind === 'supplement' ? short : { short, long };
+    [short, setShort] = useState(item.kind === 'supplement' ? item.current.content : item.method?.short ?? emptyShort), [long, setLong] = useState(item.method?.long), [reason, setReason] = useState('');
+  // A long-only method has no short rule. Send null unless the owner filled one in.
+  const methodShort = () => Object.values(short).some(value => value.trim()) ? { ...emptyShort, ...short } : null;
+  const replacement = () => item.kind === 'understanding' ? text : item.kind === 'supplement' ? short : { short: methodShort(), long: long ?? null };
   return h('section', { className: 'tree-editor' }, item.kind === 'understanding' ? h('label', null, '理解内容', h('textarea', { value: text, onChange: e => setText(e.target.value), maxLength: 2000 })) : h(React.Fragment, null,
     Object.entries({ situation: '何时适用', action: '怎样做', basis: '依据', notApplicable: '何时不适用' }).map(([key, label]) => field(label, short?.[key] ?? '', value => setShort({ ...short, [key]: value }), { key, maxLength: 200 })),
     long && h('details', null, h('summary', null, '详细方法文字'), Object.entries({ name: '名称', description: '说明', whenToUse: '适用情境', steps: '步骤', pitfalls: '注意点', verify: '如何检查' }).map(([key, label]) => h('label', { key }, label, h('textarea', { value: long[key] ?? '', onChange: e => setLong({ ...long, [key]: e.target.value }) }))))),

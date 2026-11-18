@@ -62,7 +62,123 @@
       "minItems": 0,
       "maxItems": 20
     },
-    "correction": {
+    "understandings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 300
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "user_expressed",
+              "assistant_inferred",
+              "unknown"
+            ]
+          },
+          "sourceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 512,
+              "x-reference": "source"
+            },
+            "minItems": 1,
+            "maxItems": 20
+          }
+        },
+        "required": [
+          "content",
+          "source",
+          "sourceIds"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 3
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "targetId": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 512,
+            "x-reference": "item"
+          },
+          "targetVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "mark": {
+            "type": "string",
+            "enum": [
+              "changed",
+              "invalid"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "local",
+              "global"
+            ]
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 300
+          },
+          "quote": {
+            "type": "object",
+            "properties": {
+              "sourceId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "source"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 2000
+              }
+            },
+            "required": [
+              "sourceId",
+              "text"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "targetId",
+          "targetVersion",
+          "mark",
+          "scope",
+          "content",
+          "quote"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 2
+    },
+    "method": {
       "anyOf": [
         {
           "const": null
@@ -73,149 +189,117 @@
             "kind": {
               "type": "string",
               "enum": [
-                "understanding",
-                "method"
+                "collaboration",
+                "technique"
               ]
             },
-            "content": {
+            "situation": {
+              "type": "string",
+              "minLength": 0,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 200
+            },
+            "action": {
               "type": "string",
               "minLength": 1,
               "pattern": "^[^\\u0000]*$",
-              "maxLength": 2000
+              "maxLength": 200
             },
-            "quote": {
+            "basis": {
+              "type": "string",
+              "minLength": 0,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 200
+            },
+            "notApplicable": {
+              "type": "string",
+              "minLength": 0,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 200
+            },
+            "expectedEffect": {
               "type": "object",
               "properties": {
-                "sourceId": {
+                "category": {
                   "type": "string",
-                  "minLength": 1,
-                  "pattern": "^[^\\u0000]*$",
-                  "maxLength": 512,
-                  "x-reference": "source"
+                  "enum": [
+                    "not_understood",
+                    "misread",
+                    "restart",
+                    "repeated",
+                    "overdone",
+                    "omitted",
+                    "misreported",
+                    "redo",
+                    "proceeded",
+                    "approved",
+                    "adopted_proposal",
+                    "confirmed_inference"
+                  ]
+                },
+                "change": {
+                  "type": "string",
+                  "enum": [
+                    "gone",
+                    "less",
+                    "more"
+                  ]
                 },
                 "text": {
                   "type": "string",
                   "minLength": 1,
                   "pattern": "^[^\\u0000]*$",
-                  "maxLength": 2000
+                  "maxLength": 40
                 }
               },
               "required": [
-                "sourceId",
+                "category",
+                "change",
                 "text"
               ],
               "additionalProperties": false
             },
-            "target": {
-              "anyOf": [
-                {
-                  "const": null
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "targetId": {
-                      "type": "string",
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "maxLength": 512,
-                      "x-reference": "item"
-                    },
-                    "targetVersion": {
-                      "type": "integer",
-                      "minimum": 1,
-                      "maximum": 9007199254740991
-                    },
-                    "mark": {
-                      "type": "string",
-                      "enum": [
-                        "changed",
-                        "invalid"
-                      ]
-                    },
-                    "scope": {
-                      "type": "string",
-                      "enum": [
-                        "local",
-                        "global"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "targetId",
-                    "targetVersion",
-                    "mark",
-                    "scope"
-                  ],
-                  "additionalProperties": false
-                }
-              ]
-            },
-            "expectedEffect": {
-              "anyOf": [
-                {
-                  "const": null
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "category": {
-                      "type": "string",
-                      "enum": [
-                        "not_understood",
-                        "misread",
-                        "restart",
-                        "repeated",
-                        "overdone",
-                        "omitted",
-                        "misreported",
-                        "redo",
-                        "proceeded",
-                        "approved",
-                        "adopted_proposal",
-                        "confirmed_inference"
-                      ]
-                    },
-                    "change": {
-                      "type": "string",
-                      "enum": [
-                        "gone",
-                        "less",
-                        "more"
-                      ]
-                    },
-                    "text": {
-                      "type": "string",
-                      "minLength": 1,
-                      "pattern": "^[^\\u0000]*$",
-                      "maxLength": 40
-                    }
-                  },
-                  "required": [
-                    "category",
-                    "change",
-                    "text"
-                  ],
-                  "additionalProperties": false
-                }
-              ]
+            "sourceIds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "source"
+              },
+              "minItems": 1,
+              "maxItems": 20
             }
           },
           "required": [
             "kind",
-            "content",
-            "quote",
-            "target",
-            "expectedEffect"
+            "situation",
+            "action",
+            "basis",
+            "notApplicable",
+            "expectedEffect",
+            "sourceIds"
           ],
-          "additionalProperties": false
+          "additionalProperties": false,
+          "x-combined-length": {
+            "fields": [
+              "situation",
+              "action",
+              "basis",
+              "notApplicable"
+            ],
+            "maximum": 200
+          }
         }
       ]
     }
   },
   "required": [
     "categories",
-    "correction"
+    "understandings",
+    "changes",
+    "method"
   ],
   "additionalProperties": false
 }

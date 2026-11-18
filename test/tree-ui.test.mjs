@@ -17,6 +17,7 @@ import { EpisodeSignals, evidenceResolver } from '../src/tree/signals.mjs';
 import { createTreeHandler, installTreeWeb, treeInvocations } from '../packages/method-ui/src/tree-host.mjs';
 import { digest } from '../src/tree/contracts.mjs';
 import { ItemService } from '../src/tree/items.mjs';
+import { VerificationService } from '../src/tree/verification.mjs';
 import React, { act } from 'react';
 import { JSDOM } from 'jsdom';
 import { createTreeSource } from '../packages/method-ui/src/tree-source.mjs';
@@ -267,8 +268,7 @@ test('two actual UI corrections enter diagnosis with exact before/after versions
   assert.ok(job.input.sources.every(s => s.origin === 'ui')); assert.equal(job.input.repairedItems[0].before.content, '原来的助手推断'); assert.equal(job.input.repairedItems[0].after.content, '用户现在明确的具体范围');
   // B7 must give its sole job owner this same trusted resolver for native and
   // UI receipts. This is a source recheck, never an unconditional test bypass.
-  const done = base.completeImprovement(job, noChange()); assert.equal(done.status, 'committed');
-  assert.equal(f.repo.list('tree_reports').length, 1); assert.equal(done.resultRef.reportOnly, true);
+  const done = base.completeImprovement(job, noChange()); assert.equal(done.status, 'committed'); assert.equal(f.repo.list('tree_reports').length, 0);
 });
 
 test('jsdom keeps pending writes visible, then renders a revision conflict without optimistic success', async t => {
@@ -341,4 +341,37 @@ test('an edit opened before another save retains its draft and cannot overwrite 
   await act(async () => dom.source.refresh()); await dom.flush(); assert.equal(document.querySelector('textarea').value, '未提交的草稿');
   await dom.click('保存修改'); assert.match(document.body.textContent, /版本已变化|内容已变化/);
   assert.equal((await f.call('node.details', { nodeId: node })).items.find(i => i.id === id).current.content, '另一处保存的理解');
+});
+
+test('a long-only learned method can be edited without inventing a short rule', async t => {
+  const f = uiFixture(t), node = f.create('合成方法'); f.asModel('learning', [node]);
+  const long = { name: '用户纠正的做法', description: '按用户明确纠正的方式协作', whenToUse: '', steps: '先核对来源', pitfalls: '', verify: '' };
+  const id = f.propose(node, { methods: [{ kind: 'collaboration', short: null, long, hooks: [], scriptRequests: [], expectedEffect: { category: 'omitted', change: 'less', text: '减少漏核来源' }, sourceRefs: [f.ref] }] }).methods.itemIds[0];
+  const dom = await domFixture(t, f); await dom.render(React.createElement(TreeView, { source: dom.source })); await dom.click('合成方法');
+  await act(async () => document.querySelector('.tree-item>summary').click());
+  await dom.click('修改'); await dom.type('步骤', '先核对来源，再改写'); await dom.type('修改理由', '补全步骤');
+  await dom.click('保存修改');
+  const item = f.repo.get('tree_items', id), bundle = f.repo.get('tree_methods', digest(['method', id, item.activeVersion]));
+  assert.equal(item.activeVersion, 2); assert.equal(bundle.short, null); assert.equal(bundle.long.steps, '先核对来源，再改写');
+});
+
+test('a verification result for a learned method is shown on its card', async t => {
+  const f = uiFixture(t), node = f.create('合成检验方法'); f.asModel('learning', [node]);
+  const [id] = f.propose(node, { methods: [method([f.ref])] }).methods.itemIds;
+  const turn = await f.turn(node, '请按这个做法继续'); await f.builder.activate(turn.sessionId, turn.id, { cancelPrevious: () => {} });
+  const invocation = digest(['synthetic-main-invocation', turn.id]);
+  f.repo.command('fixtureMainInvocation', f.cmd({ turnId: turn.id }), { kind: 'program', id: 'fixture' }, () => {
+    f.repo.save('tree_invocations', { id: invocation, jobId: 'fixture-main', role: 'main', nativeSessionId: turn.sessionId, nativeTurn: turn.nativeTurn, nativeStep: 1, ordinal: 1, modelConfigHash: digest('fixture'), promptHash: digest('fixture'), inputHash: digest('fixture'), allowedTools: [], state: 'result_received' }); return {};
+  });
+  f.builder.expose(turn.sessionId, invocation, 1, f.builder.capture(turn.sessionId));
+  const verification = new VerificationService({ repository: f.repo, experience: f.experience, contextBuilder: f.builder, jobs: f.jobs, modelConfig: f.config, clusters: f.clusters });
+  const job = verification.enqueue(node), evidence = job.input.effects.at(-1).input[0].id;
+  const output = { operations: [], missed: [], verifications: [{ methodId: id, methodVersion: 1, result: 'met', observed: '本轮按做法核对了已有决定', opportunityCount: 1, evidence: [evidence] }], formatFixes: [], clusters: [], proposals: { understandings: [], methods: [] }, probes: [] };
+  f.jobs.prepare(job.id); f.jobs.submit(job.id);
+  f.jobs.receive(job.id, { message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(output) }] }, nativeLogRef: 'synthetic-ui-verification#1', eventsHash: digest(output) });
+  assert.equal(f.jobs.validate(job.id).status, 'validated');
+  assert.equal(f.jobs.commit(job.id, (result, context) => verification.applyResult(result, context)).status, 'committed');
+  const dom = await domFixture(t, f); await dom.render(React.createElement(TreeView, { source: dom.source })); await dom.click('合成检验方法');
+  await act(async () => document.querySelector('.tree-item>summary').click());
+  assert.match(document.body.textContent, /达到预期 · 本轮按做法核对了已有决定/);
 });

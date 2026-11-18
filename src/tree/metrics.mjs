@@ -175,7 +175,11 @@ export class MetricsService {
       userStatusChoices: Object.fromEntries(['active', 'paused', 'completed', 'abandoned'].map(status => [status, eligible.filter(o => o.type === 'status' && o.after === status).length])), byType: Object.fromEntries(['created', 'name', 'parentId', 'status'].map(type => [type, eligible.filter(o => o.type === type).length])), observations, valueJudgment: null };
   }
   stagnation(nodeId) {
-    const node = this.repo.get('tree_nodes', nodeId), turns = this.turns(nodeId).slice(-10); if (node?.status !== 'active' || turns.length < 10) return null;
+    // Judge whole blocks of ten settled turns. The block's turn ids are the
+    // trigger key, so each block is reviewed at most once instead of once per
+    // later turn.
+    const node = this.repo.get('tree_nodes', nodeId), all = this.turns(nodeId), end = Math.floor(all.length / 10) * 10, turns = all.slice(end - 10, end);
+    if (node?.status !== 'active' || end === 0) return null;
     const progress = turns.map(t => this.repo.meta().progressEvidence?.[t.id] ?? { turnId: t.id, state: 'unclassified', sourceRefs: this.experience.material(t).sources.map(s => s.ref), confirmedOutputs: [], confirmedDecisions: [] });
     if (progress.some(p => p.confirmedOutputs.length || p.confirmedDecisions.length)) return null;
     return { nodeId, turnIds: turns.map(t => t.id), progress, status: 'candidate_only', needsSemanticReview: true };

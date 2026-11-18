@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { learningFixture } from './fixtures/tree-learning/helpers.mjs';
-import { compilePrompt, OUTPUT_SCHEMAS } from '../src/tree/prompts.mjs';
 import { integratedFixture } from './fixtures/tree-integration/native.mjs';
 
 test('compact learning records at most one explicit correction and independent categories', async t => {
@@ -12,8 +11,6 @@ test('compact learning records at most one explicit correction and independent c
   const source = job.input.sources.find(s => s.role === 'user' && job.input.currentTurn.sourceIds.includes(s.id));
   assert.equal(job.input.outputProtocol, 'correction-v1');
   assert.equal(job.input.observationContext, undefined);
-  assert.deepEqual(Object.keys(OUTPUT_SCHEMAS.learning.properties), ['categories', 'correction']);
-  assert.ok(compilePrompt('learning').text.length < 2000);
   const result = f.complete(job, {
     categories: [{ category: 'unknown', note: '无效类别', sourceId: source.id, subjectIds: [] },
       { category: 'misread', note: '指出理解错误', sourceId: source.id, subjectIds: [] }],

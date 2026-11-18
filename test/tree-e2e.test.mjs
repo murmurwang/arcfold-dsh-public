@@ -113,13 +113,15 @@ test('B7 corrected mixed-source item reaches a bounded recheck owner', async t =
   assert.equal(f.repo.list('tree_jobs', j => j.role === 'learning' && j.trigger.turnId === removed.id && j.nodeIds.includes(other.nodeIds[0])).length, 1);
   assert.equal(owners.length, 1, 'A mixed-source correction must reach a real verification owner, not remain a queued scheduling intent');
   assert.equal(owners[0].status, 'committed', JSON.stringify(owners[0].error));
-  const item = f.repo.get('tree_items', itemId);
-  assert.equal(item.stale, true); assert.equal(item.activeVersion, 1);
-  const report = f.repo.get('tree_reports', owners[0].resultRef.reportId);
-  assert.equal(report.reviewOutput.operations[0].detail.replacement.content, '用户周末也可以处理该事项。');
+  const item = f.repo.get('tree_items', itemId), currentVersion = f.repo.get('tree_item_versions', digest(['item_version', itemId, item.activeVersion]));
+  assert.equal(item.stale, false); assert.equal(item.activeVersion, 2); assert.equal(item.validation, 'unverified');
+  assert.equal(currentVersion.content, '用户周末也可以处理该事项。');
+  assert.deepEqual(currentVersion.sourceRefs, retained.userSourceRefs);
   assert.deepEqual(f.repo.get('tree_item_versions', originalVersion.id), originalVersion, 'The original mixed provenance stays immutable');
   assert.ok(f.repo.list('tree_exposures', e => e.role === 'main' && e.itemVersions.some(v => v.itemId === itemId && v.version === 1)).every(e => e.revoked));
-  assert.equal(f.repo.list('tree_exposures', exposure => exposure.kind === 'source_recheck').length, 0);
+  const sourceExposure = f.repo.get('tree_exposures', item.sourceReview.exposureId);
+  assert.equal(sourceExposure.role, 'verification'); assert.equal(sourceExposure.kind, 'source_recheck');
+  assert.equal(f.repo.get('tree_invocations', sourceExposure.invocationId).inputHash, owners[0].inputHash);
   assert.equal(f.repo.list('tree_repairs', r => r.itemId === itemId).length, 0, 'Assignment correction alone is not a model error');
   assert.equal(f.runtime.ui.turnJobs(f.repo.get('tree_turns', removed.id)).filter(j => j.role === 'verification').length, 1);
   await f.runtime.idle();
@@ -475,10 +477,13 @@ test('B7 E01/E05 thirty logical turns, three goals, two native sessions and real
   assert.equal(f.repo.list('tree_jobs', j => j.role === 'learning' && j.status === 'committed').length, 30);
   assert.equal(f.requests.filter(r => r.role === 'attribution').length, 30);
   assert.equal(f.requests.filter(r => r.role === 'main').length, 30);
-  const verifications = f.repo.list('tree_jobs', j => j.role === 'verification' && j.status === 'committed');
-  assert.ok(verifications.length);
-  assert.ok(verifications.every(job => f.repo.get('tree_reports', job.resultRef.reportId)));
-  assert.equal(f.repo.list('tree_repairs').length, 0);
+  const improvements = f.repo.list('tree_jobs', j => j.role === 'improvement');
+  assert.equal(improvements.filter(j => j.status === 'committed').length, 1, JSON.stringify(improvements));
+  assert.ok(improvements[0].input.repairs.length >= 2);
+  assert.ok(new Set(improvements[0].input.repairs.flatMap(r => r.nodeIds)).size >= 2);
+  const report = f.repo.get('tree_reports', improvements[0].resultRef.reportId);
+  assert.equal(report.status, 'unhandled'); assert.deepEqual(report.exportAudit, []);
+  assert.equal(f.repo.list('tree_repairs').length, 3);
   for (const row of f.requests.filter(r => r.role === 'main')) {
     const text = JSON.stringify(row.body.messages), segments = row.body.messages.flatMap(m => m.content ?? []).flatMap(b => {
       if (b.type !== 'text') return []; try { return [JSON.parse(b.text)]; } catch { return []; }

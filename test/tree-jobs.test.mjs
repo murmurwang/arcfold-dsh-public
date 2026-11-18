@@ -18,8 +18,8 @@ test('frozen model input derives current source choices and producer targets fro
   assert.deepEqual(job.input.outputBindings.responseAndDecisionSourceIds, ['s1']);
   assert.equal(digest(job.input), job.inputHash);
   const repair = f.enqueue('improvement', { trigger: { producerRole: 'consolidation' } });
-  assert.deepEqual(repair.input.outputBindings.supplementTargets, []);
-  assert.equal(repair.input.outputBindings.mode, 'report_only');
+  assert.deepEqual(repair.input.outputBindings.supplementTargets, ['consolidation']);
+  assert.equal(repair.input.outputBindings.mode, 'producer_adjustment');
 });
 
 test('G4/R12: all seven roles use real native Agent -> patched adapter -> owned transport -> one settled receipt per step', async t => {
