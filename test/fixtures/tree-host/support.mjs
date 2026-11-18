@@ -14,6 +14,13 @@ export const host = realpathSync(process.env.ARCFOLD_PATCH_TEST_INSTALLATION);
 const requireHost = createRequire(join(host, 'package.json'));
 export const load = name => import(pathToFileURL(requireHost.resolve(name)).href);
 export const hash = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
+export function lockDependencyHash(bytes) {
+  const lock = JSON.parse(bytes);
+  // A release changes the product's own version in both places.
+  delete lock.version;
+  delete lock.packages[''].version;
+  return hash(lock);
+}
 export function save(path, value) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(value, null, 2) + '\n');
@@ -26,8 +33,9 @@ export function evidenceRoot(t, label) {
 export function fingerprint() {
   const packages = ['cordis', 'dsh', 'dsh-agent', 'dsh-agent-loop', 'dsh-session', 'dsh-tools',
     'dsh-compaction-basic', 'dsh-token-meter', 'dsh-sandbox', 'dsh-sandbox-local', 'dsh-llm-deepseek'];
+  const lock = readFileSync(join(host, 'package-lock.json'));
   return { node: process.version, platform: process.platform, arch: process.arch,
-    lockFile: 'package-lock.json', lockSha256: hash(readFileSync(join(host, 'package-lock.json'))),
+    lockFile: 'package-lock.json', lockSha256: hash(lock), lockDependencySha256: lockDependencyHash(lock),
     packages: packages.map(name => {
       const dir = join(host, 'node_modules/@deepseek-ai', name);
       const pkg = JSON.parse(readFileSync(join(dir, 'package.json')));
