@@ -3,7 +3,7 @@
   "platform": "darwin",
   "arch": "arm64",
   "lockFile": "package-lock.json",
-  "lockSha256": "c6af0e6464f4dc7729ebd97de6905b1776c3e37c289acc9f369970364292e79d",
+  "lockDependencySha256": "7d89f1a8c02d824e00a13c9117af4a0543e74a4db3857d66c1e9ba9218636aad",
   "packages": [
     {
       "name": "@deepseek-ai/cordis",

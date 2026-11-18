@@ -2,14 +2,30 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
-import { load, active, bounded, save, fingerprint, evidenceRoot, nativeFixture, answer, calls, textOf, assertPairs } from './fixtures/tree-host/support.mjs';
+import { load, active, bounded, save, fingerprint, evidenceRoot, nativeFixture, answer, calls, textOf, assertPairs, host, lockDependencyHash } from './fixtures/tree-host/support.mjs';
 import { runFakeProbes } from './fixtures/tree-host/fake-probes.mjs';
 import { probeAdapter } from './fixtures/tree-host/adapter-probe.mjs';
 
 // Formal engineering validation has its own dependency resources. Explicitly
 // pin this specification-only host too, so a different GUI install cannot
 // silently satisfy these observations.
-assert.deepEqual(fingerprint(), JSON.parse(readFileSync(new URL('./fixtures/tree-host/frozen-runtime.json', import.meta.url))));
+const { lockSha256: _rawLockHash, ...observed } = fingerprint();
+assert.deepEqual(observed, JSON.parse(readFileSync(new URL('./fixtures/tree-host/frozen-runtime.json', import.meta.url))));
+
+test('host lock ignores product versions and detects dependency changes', () => {
+  const bytes = readFileSync(join(host, 'package-lock.json'));
+  const expected = lockDependencyHash(bytes);
+  const release = JSON.parse(bytes);
+  release.version = release.packages[''].version = '999.0.0';
+  assert.equal(lockDependencyHash(JSON.stringify(release)), expected);
+  for (const field of ['version', 'resolved', 'integrity']) {
+    const changed = JSON.parse(bytes);
+    const dependency = changed.packages['node_modules/@deepseek-ai/dsh'];
+    assert.equal(typeof dependency[field], 'string');
+    dependency[field] += '-changed';
+    assert.notEqual(lockDependencyHash(JSON.stringify(changed)), expected, field);
+  }
+});
 
 test('B0 fake host contracts: bounded decisions, ownership and fail-closed runner', async t => {
   const root = evidenceRoot(t, 'fake');
