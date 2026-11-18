@@ -193,7 +193,7 @@ export class TreeModelOwner {
   // guarded request has a durable failed native record. Anything less stays
   // unknown. Native-model route only; metered accounting is unchanged.
   #contextRejection(job, events) {
-    if (!nativeModel(job.modelConfig)) return null;
+    if (job.role !== 'learning' || !nativeModel(job.modelConfig)) return null;
     const own = events.filter(e => e.type === 'user/message' && e.data.source?.jobId === job.id); if (own.length !== 1) return null;
     const start = events.findLast(e => e.type === 'turn/start' && e.seq < own[0].seq);
     const end = start && events.find(e => e.type === 'turn/end' && e.data.turn === start.data.turn && e.seq > own[0].seq);

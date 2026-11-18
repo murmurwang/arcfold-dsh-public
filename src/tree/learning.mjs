@@ -89,6 +89,7 @@ export class LearningService {
     // Node changes invalidate scope, but ordinary newer settled turns need not
     // stale this input. TreeService separately marks affected jobs invalidated.
     const trigger = { kind: 'settled_main_turn', producerRole: 'main', status: 'settled', turnId, watermark: digest([turnId, turn.assignmentRevision]),
+      ...(old?.providerRejected ? { retriesProviderRejection: true } : {}),
       ...(annotations.correction ? { correction: annotations.correction } : {}), ...(annotations.directRequirement ? { directRequirement: annotations.directRequirement } : {}) };
     return this.jobs.enqueue({ role: 'learning', key, nodeIds: [nodeId], input, revisionSet, config: this.config('learning', { turnId, nodeIds: [nodeId] }), trigger });
   }

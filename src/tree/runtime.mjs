@@ -527,14 +527,21 @@ export class TreeRuntime {
     if (session?.contextEpoch !== job.contextEpoch) return true;
     this.repo.command('handleLearningPressure', { requestId: digest(['learning-pressure', job.id]), expected: {}, input: { jobId: job.id, contextEpoch: job.contextEpoch } }, program, () => {
       const plan = this.consolidation.plan(nodeId, 'threshold');
+      const hasNewSummaryMaterial = plan && plan.sourceWatermark !== session.sourceWatermark;
       // The refused input stays in the current native session, so the turn
       // must move to a new one. With nothing older to summarize, rotate to a
       // fresh session over the same verified summary instead of pausing.
-      if (job.providerRejected && !(plan && plan.sourceWatermark !== session.sourceWatermark) && session.summaryId) {
+      if (job.providerRejected && !hasNewSummaryMaterial && session.summaryId && !job.trigger.retriesProviderRejection) {
         this.jobs.rotateEpoch(nodeId); return { rotatedEpoch: session.contextEpoch + 1 };
       }
+      if (job.providerRejected && job.trigger.retriesProviderRejection && !hasNewSummaryMaterial) {
+        const message = '新学习会话的请求仍超出模型上下文，原文和待处理任务已保留。';
+        this.jobs.pauseLearning(nodeId, message);
+        this.diagnostic('learning_capacity', { code: 'LEARNING_CAPACITY', message }, { jobId: job.id, nodeId });
+        return { capacityBlocked: true };
+      }
       this.jobs.pauseLearning(nodeId, this.nativeModels ? '预计输入长度接近上限，等待整理；原文保留。' : '精确输入计数达到上限，等待整理；原文保留。');
-      if (plan && plan.sourceWatermark !== session.sourceWatermark) return { summaryJobId: this.enqueueSummary(plan).id };
+      if (hasNewSummaryMaterial) return { summaryJobId: this.enqueueSummary(plan).id };
       this.diagnostic('learning_capacity', { code: 'LEARNING_CAPACITY', message: 'No older material can be summarized while retaining the last three learning turns' }, { jobId: job.id, nodeId });
       return { capacityBlocked: true };
     });

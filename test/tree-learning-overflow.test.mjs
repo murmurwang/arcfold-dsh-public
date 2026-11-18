@@ -12,9 +12,8 @@ import { digest } from '../src/tree/contracts.mjs';
 const refusal = { httpError: { status: 400, body: { type: 'error', error: { type: 'invalid_request_error', message: 'context_length_exceeded: Your input exceeds the context window of this model. Please adjust your input and try again.' } } } };
 const otherError = { httpError: { status: 400, body: { type: 'error', error: { type: 'invalid_request_error', message: 'Unsupported synthetic parameter' } } } };
 
-test('a learning request refused for context size is a known failure and never blocks or resends', async t => {
-  let refuse = true;
-  const f = await nativeFixture(t, ({ role }) => role === 'learning' && refuse ? refusal : minimal[role], { nativeModels: true });
+test('a learning request refused for context size is a known failure and recovery does not resend it', async t => {
+  const f = await nativeFixture(t, ({ role }) => role === 'learning' ? refusal : minimal[role], { nativeModels: true });
   const job = await f.owner.run(f.enqueue('learning').id);
   assert.equal(job.status, 'failed', JSON.stringify(job.error)); assert.equal(job.error.code, 'CONTEXT_WINDOW_EXCEEDED'); assert.equal(job.providerRejected, true);
   assert.match(job.error.message, /context_length_exceeded/); assert.ok(job.nativeLogRef); assert.ok(job.eventsHash);
@@ -24,9 +23,8 @@ test('a learning request refused for context size is a known failure and never b
   const sent = f.requests.length;
   await f.owner.recover(); await f.owner.run(job.id);
   assert.equal(f.requests.length, sent); assert.equal(f.jobs.get(job.id).status, 'failed');
-  refuse = false;
-  const next = await f.owner.run(f.enqueue('learning').id);
-  assert.equal(next.status, 'committed');
+  const next = f.jobs.prepare(f.enqueue('learning').id);
+  assert.equal(next.status, 'prepared');
 });
 
 test('a refusal previously left unknown is recognized from its durable records on recovery', async t => {
@@ -58,20 +56,25 @@ test('long tool output is kept by reference in learning input; wording and short
   assert.equal(compactLearningSource(short), short); assert.equal(compactLearningSource(user), user);
 });
 
-test('a refusal on the first append of a new epoch moves the turn to a fresh session and learning continues', async t => {
-  let refusals = 0;
-  const f = await bootstrapFixture(t, ({ role, input }) => role === 'attribution'
-    ? { actions: [{ action: 'continue', nodeId: input.scope.nodeIds[0] }], statusChanges: [] }
-    : role === 'learning' ? (refusals > 0 && refusals-- ? refusal : emptyLearning()) : '合成回复', { nativeModels: true });
+async function startSecondLearningEpoch(f) {
   const agent = await f.main('overflow-epoch');
   for (let n = 0; n < 4; n++) assert.equal((await f.turn(agent, `第${n + 1}轮。`)).status, 'settled');
   const { runtime, repo } = f, nodeId = repo.rootId();
   assert.equal(repo.list('tree_jobs', j => j.role === 'learning' && j.status === 'committed').length, 4);
   // Establish epoch 2 exactly as a successful threshold summary would.
   const plan = runtime.consolidation.plan(nodeId, 'threshold');
-  let summary; repo.transaction(() => { summary = repo.save('tree_summaries', { id: 'overflow-summary', nodeId, version: 1, oneLine: '合成摘要', body: {}, throughTurnIds: plan.throughTurnIds, sourceRefs: [], previousVersion: null, sourceWatermark: plan.sourceWatermark, coveredJobIds: plan.coveredJobIds }); });
+  let summary; repo.transaction(() => { summary = repo.save('tree_summaries', { id: 'overflow-summary', nodeId, version: 1, oneLine: '合成摘要', body: {}, throughTurnIds: plan.throughTurnIds, assignmentVersions: plan.assignmentVersions, sourceRefs: [], previousVersion: null, sourceWatermark: plan.sourceWatermark, coveredJobIds: plan.coveredJobIds }); });
   const second = runtime.jobs.replaceEpoch(nodeId, { summaryId: summary.id, summaryHash: digest(summary), sourceWatermark: plan.sourceWatermark, recentJobIds: plan.recentJobIds });
   assert.equal(second.contextEpoch, 2);
+  return { agent, runtime, repo, plan, summary, second };
+}
+
+test('a refusal on the first append of a new epoch moves the turn to a fresh session and learning continues', async t => {
+  let refusals = 0;
+  const f = await bootstrapFixture(t, ({ role, input }) => role === 'attribution'
+    ? { actions: [{ action: 'continue', nodeId: input.scope.nodeIds[0] }], statusChanges: [] }
+    : role === 'learning' ? (refusals > 0 && refusals-- ? refusal : emptyLearning()) : '合成回复', { nativeModels: true });
+  const { agent, runtime, repo, plan, summary, second } = await startSecondLearningEpoch(f);
   refusals = 1;
   const turn = await f.turn(agent, '第五轮。'); assert.equal(turn.status, 'settled');
   const refused = repo.list('tree_jobs', j => j.role === 'learning' && j.trigger.turnId === turn.id && j.providerRejected)[0];
@@ -86,4 +89,20 @@ test('a refusal on the first append of a new epoch moves the turn to a fresh ses
   assert.ok(resumed[0].input.epochSeed); assert.equal(repo.list('tree_jobs', j => j.role === 'consolidation').length, 0);
   assert.equal((await f.turn(agent, '第六轮。')).status, 'settled');
   assert.equal(repo.list('tree_jobs', j => j.role === 'learning' && j.status === 'committed').length, 6);
+});
+
+test('another refusal after rotation preserves the queue without repeatedly retrying the same learning turn', async t => {
+  let refuse = false;
+  const f = await bootstrapFixture(t, ({ role, input }) => role === 'attribution'
+    ? { actions: [{ action: 'continue', nodeId: input.scope.nodeIds[0] }], statusChanges: [] }
+    : role === 'learning' ? (refuse ? refusal : emptyLearning()) : '合成回复', { nativeModels: true });
+  const { agent, runtime, repo } = await startSecondLearningEpoch(f);
+  refuse = true;
+  const turn = await f.turn(agent, '第五轮。');
+  await runtime.idle();
+  const attempts = repo.list('tree_jobs', j => j.role === 'learning' && j.trigger.turnId === turn.id);
+  assert.deepEqual(attempts.map(j => j.contextEpoch).sort(), [2, 3]);
+  assert.ok(attempts.every(j => j.status === 'failed' && j.providerRejected));
+  assert.equal(repo.list('tree_learning_sessions')[0].paused, true);
+  assert.equal(repo.list('tree_jobs', j => !j.role && j.kind === 'learning' && j.input.turnId === turn.id)[0].status, 'queued');
 });
