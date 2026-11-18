@@ -4,6 +4,8 @@ import { validateOutput, resolveSourceIds } from './prompts.mjs';
 import { ScriptWriter } from './script-writer.mjs';
 import { learningCorrections, LearningObservations, quotedSource } from './observations.mjs';
 import { MetricsService } from './metrics.mjs';
+import { deferredLearning } from './jobs.mjs';
+import { compactLearningSource } from './experience.mjs';
 
 const program = { kind: 'program', id: 'tree-learning' };
 const unique = values => [...new Map(values.map(v => [canonicalJson(v), v])).values()];
@@ -45,9 +47,10 @@ export class LearningService {
     if (!turn || turn.status !== 'settled' || !turn.nodeIds.includes(nodeId)) fail('LEARNING_EXPERIENCE', 'Learning needs a settled own main turn');
     const baseKey = digest(['turn-learning', turnId, nodeId, turn.assignmentRevision]), old = this.existing(turn, nodeId);
     const session = this.repo.list('tree_learning_sessions', s => s.nodeId === nodeId)[0];
-    // Only an append stopped before submission may be frozen again after a
-    // successful epoch change. Paid/unknown and ordinary failures never retry.
-    const deferred = old?.status === 'failed' && old.error?.code === 'LEARNING_PRESSURE' && !old.submittedAt && !old.invocationIds.length;
+    // Only an append stopped before submission, or one the provider refused
+    // for context size without output, may be frozen again after the epoch
+    // changes. Paid/unknown and ordinary failures never retry.
+    const deferred = deferredLearning(old);
     if (old && (!deferred || session?.paused || session?.contextEpoch <= old.contextEpoch)) return old;
     const key = old ? digest(['epoch-learning', baseKey, session.contextEpoch]) : baseKey;
     // Freeze after previous receipts, not eagerly while an earlier turn is still
@@ -63,7 +66,7 @@ export class LearningService {
     const priorTurns = turns.slice(0, turns.findIndex(t => t.id === turnId));
     const observed = this.outputProtocol === 'correction-v1' ? { proposals: [], fragments: [], sources: [] } : this.observations.freeze(nodeId, priorTurns.map(t => t.id));
     const previousSources = this.outputProtocol === 'correction-v1' && priorTurns.length ? this.experience.material(priorTurns.at(-1)).sources : priorTurns.flatMap(t => t.userSourceRefs.map(this.resolveSource)).filter(Boolean);
-    const sources = unique([...material.sources, ...previousSources, ...observed.sources]);
+    const sources = unique([...material.sources, ...previousSources, ...observed.sources]).map(compactLearningSource);
     const annotations = jsonClone(this.annotations(turn, nodeId));
     if (annotations.correction) {
       const c = annotations.correction;
@@ -169,7 +172,8 @@ export class WriterRouter {
     const bundle = this.repo.get('tree_methods', digest(['method', methodId, item.draftVersion]));
     return bundle.pendingScriptRequests.map((request, requestIndex) => {
       const key = digest(['write-method-script', methodId, item.draftVersion, requestIndex]), prior = this.repo.get('tree_jobs', digest(['model_job', 'script_writer', key])); if (prior) return prior;
-      const sources = parentJob.input.sources.filter(s => request.evidence.includes(s.id));
+      // Writers need the original evidence, not the learning input's reference.
+      const sources = parentJob.input.sources.filter(s => request.evidence.includes(s.id)).map(s => s.elided ? this.resolveSource(s.ref) ?? s : s);
       if (sources.length !== new Set(request.evidence).size || !sources.length || request.files.some(id => !parentJob.input.allowedIds.fileIds?.includes(id))) fail('WRITER_REQUEST_SOURCE', 'Script request must bind its source and allowed file references');
       const binding = { methodId, draftVersion: item.draftVersion, requestIndex, scriptId: digest(['method-script', methodId, item.draftVersion, requestIndex]), version: 1 };
       return this.jobs.enqueue({ role: 'script_writer', key, nodeIds: [item.nodeId], revisionSet: { ['tree_items:' + item.id]: item.revision }, config: this.config('script_writer', { parentJobId: parentJob.id, nodeIds: [item.nodeId] }),

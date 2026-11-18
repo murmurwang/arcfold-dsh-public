@@ -54,6 +54,7 @@ export async function bootstrapFixture(t, script, { nativeHost = false, realExpe
     }
     const row = { ordinal: requests.length + 1, role: input?.role ?? 'main', input, body, url: req.url }; requests.push(row);
     const result = await script(row, ctx.get('arcfoldTreeRuntime'));
+    if (result?.httpError) { res.writeHead(result.httpError.status, { 'content-type': 'application/json', 'x-request-id': 'synthetic-bootstrap-' + row.ordinal }); res.end(JSON.stringify(result.httpError.body)); return; }
     res.writeHead(200, { 'content-type': 'text/event-stream', 'x-request-id': 'synthetic-bootstrap-' + row.ordinal }); res.end(sse(body, result));
   })().catch(error => res.destroy(error)); });
   if (!realExperiment) await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
