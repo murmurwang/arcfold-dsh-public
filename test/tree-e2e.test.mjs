@@ -573,7 +573,7 @@ test('B7 native user input runs attribution, one owned main, durable experience 
   assert.equal(f.repo.list('tree_jobs', j => j.role === 'learning')[0].status, 'committed');
   assert.equal(agent.session.snapshotEvents().filter(e => e.type === 'turn/start').length, 1);
   assert.equal(f.repo.list('tree_snapshots', s => s.logicalTurnId === turn.id).length, 1);
-  assert.equal(f.requests.find(r => r.role === 'main').body.tools.length, 5);
+  assert.equal(f.requests.find(r => r.role === 'main').body.tools.length, 6, 'five tree tools plus arcfold_revise_goal');
   const again = await f.turn(agent, '继续同一个合成委托。');
   assert.equal(again.nativeTurn, 2); assert.equal(f.requests.length, 6);
   assert.equal(new Set(f.repo.list('tree_jobs', j => j.role === 'learning').map(j => j.nativeSessionId)).size, 1);
