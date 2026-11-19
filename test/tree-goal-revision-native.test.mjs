@@ -54,7 +54,7 @@ test('main revises its goal in the turn: a rename is visible on the next step, a
 test('main sees the current goal and its path every turn, and creates a child on an ancestor in one call', async t => {
   const APP = '月底前完成申请', DAILY = '把路线图拆成每日待办', OTHER = '整理冥想体验', NEXT = '把核心纲领往下拆成要实现和证明的结果';
   let turnNo = 0, step = 0;
-  const ids = {}, seen = [];
+  const ids = {}, seen = [], raw = [];
   const f = await integratedFixture(t, (row, { repo }) => {
     if (row.role === 'attribution') {
       if (turnNo === 1) return { actions: [{ action: 'create', name: APP }], statusChanges: [] };
@@ -65,7 +65,7 @@ test('main sees the current goal and its path every turn, and creates a child on
     if (row.role === 'learning') return emptyLearning();
     if (row.role === 'verification') return emptyVerification();
     if (row.role !== 'main' || turnNo !== 4) return '合成答复。';
-    seen.push(text(row.body)); step++;
+    seen.push(text(row.body)); raw.push(JSON.stringify(row.body)); step++;
     const call = (id, nodeId, name) => ({ tool: { id, name: 'arcfold_revise_goal', args: { op: 'create_child', nodeId, expectedRevision: repo.get('tree_nodes', nodeId).revision, name, reason: '用户要求定稿这一层并往下拆' } } });
     if (step === 1) return call('outside-path', ids.other, '不该建在这里');
     if (step === 2) return call('on-ancestor', ids.app, NEXT);
@@ -79,7 +79,7 @@ test('main sees the current goal and its path every turn, and creates a child on
   assert.equal(f.repo.get('tree_nodes', ids.daily).parentId, ids.app);
   turnNo = 4; const fourth = await f.turn(agent, '这一层先定稿，接着往下推导要做的事。');
   assert.match(seen[0], new RegExp(`"name":"${DAILY}","path":\\[[^\\]]*"name":"${APP}"[^\\]]*"name":"${DAILY}"`), 'the turn table names the current goal and its path');
-  assert.match(seen[1], /OUT_OF_SCOPE|a goal on its path/, 'a goal off the current path is refused');
+  assert.match(raw[1], /OUT_OF_SCOPE|a goal on its path/, 'a goal off the current path is refused and main sees why');
   const turn = f.repo.get('tree_turns', fourth.id);
   assert.equal(turn.goalRevisions.filter(r => r.nodeId === ids.other).length, 0);
   const created = turn.goalRevisions.find(r => r.op === 'create_child' && r.state === 'applied').createdNodeId;
