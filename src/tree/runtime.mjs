@@ -73,9 +73,12 @@ class RuntimeContextBuilder extends ContextBuilder {
     if (role === 'main') {
       const turn = this.repo.get('tree_turns', value.turnId), sources = turn.userSourceRefs.map(this.resolveSource);
       const authority = { logicalTurnId: turn.id, assignmentRevision: turn.assignmentRevision,
-        nodes: turn.nodeIds.map(id => ({ id, expectedRevision: this.repo.get('tree_nodes', id).revision })),
+        // Name and root path of each current goal, so main sees every turn what
+        // the turn is filed under and can revise it, including on an ancestor.
+        nodes: turn.nodeIds.map(id => { const node = this.repo.get('tree_nodes', id); return { id, name: node.name, expectedRevision: node.revision,
+          path: this.repo.ancestors(id).map(n => ({ id: n.id, name: n.name, expectedRevision: n.revision })) }; }),
         evidence: sources.filter(Boolean).map(s => ({ id: s.id, messageId: s.ref.messageId })), fileRefs: [],
-        instruction: '工具参数的节点版本和证据编号必须逐字使用本段当前值；此编号表不增加执行授权。' };
+        instruction: '工具参数的节点版本和证据编号必须逐字使用本段当前值；此编号表不增加执行授权。nodes是本轮当前目标，path从根到当前目标。回答前对照：此刻在做的事已经不是它，就用arcfold_revise_goal修改；要在path上某一层下面新建，create_child的nodeId填那一层。' };
       value.segments = [...value.segments, { key: `turn-authority:${turn.id}`, nodeId: null, version: digest(authority), text: canonicalJson(authority), sourceRefs: turn.userSourceRefs, itemVersions: [], summaryVersions: [] }];
       value.renderedHash = digest(value.segments); value.bytes = Buffer.byteLength(value.segments.map(s => s.text).join('\n'));
     }

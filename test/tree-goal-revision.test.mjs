@@ -58,13 +58,41 @@ test('create_child waits for the turn end, then moves this turn onto the new chi
   assert.equal(f.repo.list('tree_jobs', j => j.kind === 'learning').length, 0, 'settlement, not the revision, queues learning');
 });
 
-test('add_parent inserts a higher goal above the current one and keeps the turn on it', t => {
+// F34: after add_parent the conversation is about the higher goal. Keeping the
+// turn on the old child let the next turns continue under it.
+test('add_parent inserts a higher goal above the current one and moves the turn onto it', t => {
   const { f, plan, turn, record, apply } = planningTurn(t), root = f.repo.rootId();
   record('add_parent', plan, { name: '让对方认识用户本人和产品' });
   const result = apply(), parent = result.revisions[0].createdNodeId;
   assert.equal(f.repo.get('tree_nodes', parent).parentId, root);
   assert.equal(f.repo.get('tree_nodes', plan).parentId, parent);
-  const row = f.repo.get('tree_turns', turn); assert.deepEqual(row.nodeIds, [plan]); assert.equal(row.assignmentRevision, 1);
+  const row = f.repo.get('tree_turns', turn); assert.deepEqual(row.nodeIds, [parent]); assert.equal(row.assignmentRevision, 2);
+  assert.deepEqual(f.repo.list('tree_links', l => l.turnId === turn && l.active).map(l => l.nodeId), [parent]);
+  f.repo.assertTree();
+});
+
+test('the owner correction after add_parent returns the turn to the original goal and keeps the new parent', t => {
+  const { f, plan, turn, record, apply } = planningTurn(t);
+  record('add_parent', plan, { name: '让对方认识用户本人和产品' });
+  const parent = apply().revisions[0].createdNodeId;
+  f.asUser();
+  f.tree.correctAssignment(f.cmd({ turnId: turn, nodeIds: [plan], sourceRefs: [], undoCreate: true }, f.expected('tree_turns', turn)));
+  assert.deepEqual(f.repo.get('tree_turns', turn).nodeIds, [plan]);
+  assert.notEqual(f.repo.get('tree_nodes', parent).deleted, true, 'the parent still holds the original goal');
+  assert.equal(f.repo.get('tree_nodes', plan).parentId, parent);
+});
+
+// F34 turn 29: the turn sits on a daily-plan goal while the conversation moves
+// to another piece of work under the application goal above it.
+test('create_child on an ancestor creates the goal there and moves the turn from the current goal', t => {
+  const f = fixture(t), application = f.create('月底前完成申请'), daily = f.create('把路线图拆成每日待办', application);
+  const turn = f.tree.applyAttribution(f.attribution([{ action: 'continue', nodeId: daily }])).result.turnId;
+  f.asModel('main', [daily]);
+  f.tree.recordGoalRevision(f.cmd({ turnId: turn, revision: { id: 'r1', op: 'create_child', nodeId: application, name: '把核心纲领往下拆成要实现和证明的结果', reason: '用户要求定稿这一层并往下拆', callId: 'c1', state: 'pending' } }, f.expected('tree_turns', turn)));
+  const result = f.tree.applyGoalRevisions(f.cmd({ turnId: turn, mainCommitted: true }, f.expected('tree_turns', turn))).result, child = result.revisions[0].createdNodeId;
+  assert.equal(f.repo.get('tree_nodes', child).parentId, application);
+  assert.equal(f.repo.get('tree_nodes', daily).parentId, application, 'the daily goal stays where it was');
+  assert.deepEqual(f.repo.get('tree_turns', turn).nodeIds, [child]);
   f.repo.assertTree();
 });
 
