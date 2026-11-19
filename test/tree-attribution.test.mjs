@@ -18,7 +18,7 @@ test('attribution sources must match durable inbox bytes; text claiming another 
 });
 test('visible deadline fallback cancels old attribution and cannot be overwritten by its late result', async t => {
   const f = setup(t), input = f.begin(); let timeout, id;
-  f.attribution.timers = { setTimeout(fn, ms) { assert.equal(ms, 12000); timeout = fn; return 1; }, clearTimeout() {} };
+  f.attribution.timers = { setTimeout(fn, ms) { assert.equal(ms, 60000); timeout = fn; return 1; }, clearTimeout() {} };
   f.owner.run = async jobId => { id = jobId; f.jobs.prepare(id); f.jobs.submit(id); return new Promise(() => {}); };
   const pending = f.attributed(input); timeout(); const turn = await pending;
   assert.deepEqual(turn.nodeIds, [f.repo.rootId()]); assert.match(turn.fallback.reason, /ATTRIBUTION_DEADLINE/); assert.equal(f.jobs.get(id).status, 'cancelled');
