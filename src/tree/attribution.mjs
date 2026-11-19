@@ -104,7 +104,7 @@ export class AttributionService {
           try { this.cancelPending(job.id, code); } catch (error) { reject(error); return; }
           reject(Object.assign(new Error(code), { code }));
         };
-        timer = this.timers.setTimeout(() => stop('ATTRIBUTION_DEADLINE'), 12000); abort = () => stop('ATTRIBUTION_ABORTED'); signal?.addEventListener('abort', abort, { once: true });
+        timer = this.timers.setTimeout(() => stop('ATTRIBUTION_DEADLINE'), 60000); abort = () => stop('ATTRIBUTION_ABORTED'); signal?.addEventListener('abort', abort, { once: true });
         if (signal?.aborted) abort();
       });
       await Promise.race([this.owner.run(job.id), cancelled]); signal?.throwIfAborted();
