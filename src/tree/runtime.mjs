@@ -18,6 +18,7 @@ import { TreeModelOwner } from './model-owner.mjs';
 import { NativeSources, ExperienceService } from './experience.mjs';
 import { ContextBuilder, mountTreeContext } from './context.mjs';
 import { AttributionService } from './attribution.mjs';
+import { TreeService } from './tree.mjs';
 import { ConsolidationService } from './consolidation.mjs';
 import { LearningService, WriterRouter, itemInput } from './learning.mjs';
 import { VerificationService, ConsolidationReflection } from './verification.mjs';
@@ -460,10 +461,36 @@ export class TreeRuntime {
         try { this.owner.consume(job.id, this.logs.get(session.id)); }
         catch (error) { if (this.jobs.get(job.id).status === 'submitted') this.jobs.transition(job.id, 'unknown', { error: { code: error.code ?? 'HOST_ERROR', message: error.message } }); this.diagnostic('main_settlement', error, { jobId: job.id }); }
       }
+      // A failed revision must not block settlement or this turn's learning.
+      try { this.applyGoalRevisions(turn.id, job); } catch (error) { this.diagnostic('goal_revision_apply', error, { turnId: turn.id }); }
       this.settleTurn(turn.id); this.kick();
       } finally { release(); }
     }).catch(error => this.diagnostic('turn_settlement', error, { sessionId: session.id, nativeTurn: event.data.turn }));
     this.settlements.set(session.id, promise); return promise;
+  }
+  // Applies main's structural goal revisions once its turn has ended, before
+  // settlement queues learning, so this turn's learning lands on the revised
+  // goal and the next attribution starts there. Also records whether the final
+  // reply told the user about each revision, which the reply must do.
+  applyGoalRevisions(turnId, job) {
+    const turn = this.repo.get('tree_turns', turnId), revisions = turn?.goalRevisions ?? [];
+    if (!revisions.length || revisions.every(r => r.announced !== undefined)) return null;
+    const mainCommitted = job?.role === 'main' && this.jobs.get(job.id).status === 'committed', actor = { kind: 'model', role: 'main', id: job?.id ?? 'main' };
+    const tree = new TreeService({ repository: this.repo, resolveSource: this.resolveSource, context: () => ({ actor, nodeIds: turn.nodeIds }) });
+    const before = this.repo.list('tree_nodes');
+    const receipt = tree.applyGoalRevisions({ requestId: digest(['apply-goal-revisions', turnId]), expected: { [`tree_turns:${turnId}`]: turn.revision }, input: { turnId, mainCommitted } });
+    this.metrics.observeTree(receipt, before, { logicalTurnId: turnId });
+    let reply = '';
+    try { reply = this.sources.turn(turn.sessionId, turn.nativeTurn).sources.filter(s => s.role === 'assistant' || s.origin === 'model').map(s => s.text).at(-1) ?? ''; }
+    catch (error) { this.diagnostic('goal_revision_reply', error, { turnId }); }
+    const current = this.repo.get('tree_turns', turnId);
+    const named = r => r.op === 'switch' ? this.repo.get('tree_nodes', r.nodeId)?.name : r.name;
+    const goalRevisions = current.goalRevisions.map(r => ({ ...r, announced: Boolean(named(r) && reply.includes(named(r))) }));
+    for (const r of goalRevisions.filter(r => !r.announced && r.state !== 'dropped')) this.diagnostic('goal_revision_unannounced', Object.assign(new Error('The reply did not tell the user about a goal revision'), { code: 'GOAL_REVISION_UNANNOUNCED' }), { turnId, revisionId: r.id });
+    this.repo.command('recordGoalRevisionAnnouncement', { requestId: digest(['goal-revision-announcement', turnId]), expected: { [`tree_turns:${turnId}`]: current.revision }, input: { turnId } }, program, () => {
+      this.repo.save('tree_turns', { ...current, goalRevisions }, current.revision); return { turnId, unannounced: goalRevisions.filter(r => !r.announced).map(r => r.id) };
+    });
+    return receipt;
   }
   settleTurn(turnId, { recovery = false } = {}) {
     const turn = this.repo.get('tree_turns', turnId), events = this.sources.events(turn.sessionId);
