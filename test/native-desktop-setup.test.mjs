@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createNativeDesktopSetup } from '../src/desktop/native-setup.mjs';
 import { createDesktopSetup } from '../src/desktop/setup-service.mjs';
 import { activateNativeDesktop } from '../src/desktop/bootstrap.mjs';
@@ -46,7 +49,8 @@ test('upgrade requires native-route consent and preserves old data, configuratio
   assert.equal(readFileSync(userData, 'utf8'), 'keep');
   assert.equal(f.calls[0].tree.userId, f.calls[0].previousTree.userId);
   const restarted = createNativeDesktopSetup(f.args); await restarted.resume();
-  assert.deepEqual(f.calls[1], f.calls[0]);
+  assert.deepEqual({ ...f.calls[1], resuming: false }, f.calls[0]);
+  assert.deepEqual([f.calls[0].resuming, f.calls[1].resuming], [false, true]);
 });
 test('a failed activation can resume its saved receipt without recreating data or consent', async t => {
   const f = fixture(t); let broken = true;
@@ -110,6 +114,63 @@ test('failed or overridden legacy disablement cannot proceed to native activatio
   f.manager.setPluginEnabled = async () => ({ application: 'overridden' });
   await assert.rejects(activateNativeDesktop(f.ctx, f.result), /未能安全停用/);
   assert.deepEqual(f.writes, []);
+});
+test('resume skips only an old connection that is already disabled and stopped', async () => {
+  const stopped = f => { for (const row of f.rows.slice(1, 3)) {
+    row.options.disabled = true; Object.defineProperty(row, 'disabled', { get: () => row.options.disabled === true, configurable: true }); } };
+  let f = activationFixture(); stopped(f);
+  await activateNativeDesktop(f.ctx, { ...f.result, resuming: true });
+  assert.deepEqual(f.writes, ['arcfold-business']);
+  // First setup and upgrades still have DSH save the disablement.
+  f = activationFixture(); stopped(f);
+  await activateNativeDesktop(f.ctx, f.result);
+  assert.deepEqual(f.writes, ['arcfold-metered-provider', 'arcfold-desktop-metered-provider', 'arcfold-business']);
+  for (const change of [row => { row.fiber = { state: 2 }; }, row => { row.options.disabled = { __jsExpr: 'true' }; },
+    row => { Object.defineProperty(row, 'disabled', { get: () => false }); }]) {
+    f = activationFixture(); stopped(f); change(f.rows[1]);
+    await activateNativeDesktop(f.ctx, { ...f.result, resuming: true });
+    assert.deepEqual(f.writes, ['arcfold-metered-provider', 'arcfold-business']);
+  }
+});
+test('a refused disablement reports what DSH answered', async () => {
+  const f = activationFixture();
+  f.manager.setPluginEnabled = async () => ({ application: 'failed', error: { code: 'operation-error', diagnostic: 'HMR transactions cannot be nested' } });
+  await assert.rejects(activateNativeDesktop(f.ctx, f.result), /未能安全停用.*"application":"failed".*HMR transactions cannot be nested/);
+  f.manager.listPlugins = async () => [];
+  await assert.rejects(activateNativeDesktop(f.ctx, f.result), /未能安全停用.*"entries":0/);
+  assert.deepEqual(f.writes, []);
+});
+test('resume marks only resumed activation, not first setup', async t => {
+  const f = fixture(t);
+  await f.setup.start({ confirmed: true });
+  await createNativeDesktopSetup(f.args).resume();
+  assert.deepEqual(f.calls.map(row => row.resuming), [false, true]);
+});
+test('an in-place DSH bundle update resumes Arcfold without refusing the saved disablement', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'arcfold-inplace-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, 'home'));
+  const run = phase => {
+    const result = spawnSync(process.execPath, ['--expose-internals', fileURLToPath(new URL('./fixtures/native-profile/inplace-update.mjs', import.meta.url)), root, phase], {
+      encoding: 'utf8', timeout: 60000, env: { PATH: process.env.PATH, DSH_TELEMETRY_DISABLED: '1', DSH_HOME: join(root, 'home') } });
+    assert.equal(result.status, 0, result.stderr || String(result.error));
+    const observed = JSON.parse(result.stdout.trim().split('\n').at(-1));
+    assert.deepEqual(observed.network, []); return observed;
+  };
+  const data = join(root, 'home/arcfold-desktop');
+  const receipts = () => ['native-model-configuration.json', 'native-model-configuration-completed.json']
+    .map(name => createHash('sha256').update(readFileSync(join(data, name))).digest('hex'));
+  const created = run('create');
+  assert.equal(created.after.state, 'ready'); assert.equal(created.after.legacy, false);
+  const saved = receipts();
+  const updated = run('update');
+  assert.equal(updated.restart.state, 'ready');
+  assert.deepEqual([updated.remove, updated.install, updated.version], ['applied', 'applied', '0.6.0']);
+  assert.deepEqual(updated.after, { state: 'ready', activationError: null, service: true, legacy: false,
+    provider: [{ disabled: true, live: true }] });
+  assert.deepEqual(receipts(), saved);
+  assert.match(updated.patch, /\{ id: arcfold-metered-provider, disabled: true \}/);
+  assert.match(updated.patch, /goalTreeV3:/);
 });
 function runtimeProviderFixture() {
   const f = activationFixture(), provider = f.rows[2];

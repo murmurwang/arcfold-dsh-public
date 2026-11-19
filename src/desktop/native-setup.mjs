@@ -67,15 +67,15 @@ export function createNativeDesktopSetup({ home, activate, isActive = () => true
     assert(!old || saved.previous.inputHash === old.inputHash && isDeepStrictEqual(saved.previous.tree, old.tree), '升级来源与原始设置不一致。');
     return saved;
   }
-  async function activateSaved(saved) {
+  async function activateSaved(saved, { resuming = false } = {}) {
     authorizedTree = saved.tree;
-    await activate({ tree: saved.tree, previousTree: saved.previous?.tree });
+    await activate({ tree: saved.tree, previousTree: saved.previous?.tree, resuming });
     state = 'ready'; activationError = null; return status();
   }
   async function resume() {
     if (!['configured', 'activation_failed'].includes(status().state) || busy) return status();
     busy = true;
-    try { return await activateSaved(readSaved()); }
+    try { return await activateSaved(readSaved(), { resuming: true }); }
     catch (error) { state = 'activation_failed'; activationError = error.message; return status(); }
     finally { busy = false; }
   }

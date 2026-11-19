@@ -11,7 +11,10 @@ const legacyProviders = new Map([
   ['arcfold-metered-provider', '@arcfold/dsh/deepseek'],
   ['arcfold-desktop-metered-provider', '@arcfold/dsh/desktop-deepseek'],
 ]);
-const disableFailure = () => new Error('旧模型连接未能安全停用，请保留已有设置并检查 DSH 插件状态。');
+const disableFailure = detail => new Error('旧模型连接未能安全停用，请保留已有设置并检查 DSH 插件状态。'
+  + (detail === undefined ? '' : '（DSH 回复：' + JSON.stringify(detail) + '）'));
+// A disabled Loader entry has no running fiber, or one that Cordis has disposed (FiberState 4).
+const stopped = row => row.options.disabled === true && row.disabled === true && (!row.fiber || row.fiber.state === 4);
 
 // 0.4.x created this entry through the business entry's Include. It can live
 // in that Include's base file, outside the profile-patch manager's addressable
@@ -120,13 +123,20 @@ export async function activateNativeDesktop(ctx, result, { home } = {}) {
   // An already-disabled live entry can still have an enabled disk declaration
   // left by the old in-memory update. Let the native manager reconcile both.
   for (const provider of providers) {
+    // On resume the Loader entries were composed from the saved profile, so a
+    // literally disabled, stopped entry is already the saved choice. After an
+    // in-place update this resume runs inside DSH's own update transaction,
+    // where a second plugin-manager change is refused as nested.
+    if (result.resuming === true && stopped(provider)) continue;
     const inventory = (await manager.listPlugins()).filter(row => row.entryId === provider.id);
-    if (inventory.length !== 1 || inventory[0].moduleName !== provider.options.name) throw disableFailure();
+    if (inventory.length !== 1 || inventory[0].moduleName !== provider.options.name)
+      throw disableFailure({ entries: inventory.length, readOnlyReason: inventory[0]?.readOnlyReason });
     if (inventory[0].readOnlyReason === 'unaddressable')
       await disableCreatedDesktopProvider(ctx, provider, business(), result.previousTree, manager);
     else {
       const saved = await manager.setPluginEnabled(provider.id, false);
-      if (saved.application !== 'applied') throw disableFailure();
+      if (saved.application !== 'applied')
+        throw disableFailure({ application: saved.application, error: saved.error?.code, diagnostic: saved.error?.diagnostic });
     }
   }
   const entry = business();
