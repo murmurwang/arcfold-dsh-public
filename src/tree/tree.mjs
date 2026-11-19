@@ -110,6 +110,70 @@ export class TreeService extends DomainService {
       this.#touchStructure(); return { nodeId, status: this.node(nodeId).status, statusOrigin: this.node(nodeId).statusOrigin };
     });
   }
+  // Main may restate its current goal in place. The name is re-projected on the
+  // next native step; scope, assignment and in-flight jobs stay untouched.
+  renameGoal(command) {
+    return this.repo.command('renameGoal', command, this.actor(['main']), () => {
+      shape(command.input, ['nodeId', 'name', 'sourceRefs']); const { nodeId } = command.input; this.scoped(nodeId);
+      this.repo.requireExpected(command, 'tree_nodes', nodeId); const node = this.node(nodeId), name = text(command.input.name, 'name', 80);
+      if (nodeId === this.repo.rootId()) fail('ROOT_INVARIANT', 'The root goal keeps its name');
+      if (node.nameUserProtected) fail('USER_PROTECTED', 'The user named this goal; ask before renaming it');
+      this.refs(command.input.sourceRefs, { required: false });
+      this.replace('tree_nodes', node, { name, nameOrigin: 'model' }); this.#touchStructure(); return { nodeId, name, previousName: node.name };
+    });
+  }
+  recordGoalRevision(command) {
+    return this.repo.command('recordGoalRevision', command, this.actor(['main']), () => {
+      shape(command.input, ['turnId', 'revision']); const { turnId, revision } = command.input;
+      shape(revision, ['id', 'op', 'nodeId', 'reason', 'callId', 'state'], ['name', 'previousName']); oneOf(revision.op, ['rename', 'add_parent', 'create_child', 'switch'], 'op');
+      oneOf(revision.state, revision.op === 'rename' ? ['applied'] : ['pending'], 'state'); text(revision.reason, 'reason', 2000); if (revision.op !== 'switch') text(revision.name, 'name', 80);
+      this.repo.requireExpected(command, 'tree_turns', turnId); const turn = this.repo.get('tree_turns', turnId); if (!turn) fail('TURN_NOT_FOUND', 'Turn not found');
+      const revisions = turn.goalRevisions ?? []; if (revisions.some(r => r.id === revision.id)) return { turnId, revisionId: revision.id, duplicate: true };
+      if (revisions.length >= 8) fail('GOAL_REVISION_LIMIT', 'At most eight goal revisions per turn');
+      this.replace('tree_turns', turn, { goalRevisions: [...revisions, { ...revision, at: this.repo.now() }] }); return { turnId, revisionId: revision.id, duplicate: false };
+    });
+  }
+  // Structural goal revisions requested by main during a turn. They change the
+  // turn assignment or ancestry, which the running main job is bound to, so
+  // they wait until the main job has settled and before learning is queued.
+  applyGoalRevisions(command) {
+    return this.repo.command('applyGoalRevisions', command, this.actor(['main']), () => {
+      shape(command.input, ['turnId', 'mainCommitted']); const { turnId, mainCommitted } = command.input;
+      this.repo.requireExpected(command, 'tree_turns', turnId); let turn = this.repo.get('tree_turns', turnId); if (!turn) fail('TURN_NOT_FOUND', 'Turn not found');
+      const revisions = (turn.goalRevisions ?? []).map(r => ({ ...r })); let nodeIds = [...turn.nodeIds], createdNodeIds = [...(turn.createdNodeIds ?? [])], moved = [];
+      for (const revision of revisions) {
+        if (revision.state !== 'pending') continue;
+        if (!mainCommitted) { Object.assign(revision, { state: 'dropped', reason: 'main_not_committed' }); continue; }
+        const target = this.repo.get('tree_nodes', revision.nodeId);
+        if (!target || target.deleted) { Object.assign(revision, { state: 'dropped', reason: 'node_missing' }); continue; }
+        if (revision.op === 'switch') {
+          nodeIds = [target.id]; this.#reactivate(target.id);
+        } else {
+          const id = randomUUID(), parentId = revision.op === 'add_parent' ? target.parentId : target.id;
+          if (revision.op === 'add_parent' && !parentId) { Object.assign(revision, { state: 'dropped', reason: 'root_has_no_parent' }); continue; }
+          this.repo.save('tree_nodes', { id, parentId, name: revision.name, status: 'active', statusOrigin: 'model', sourceRefs: turn.userSourceRefs, lastOwnTurnAt: turn.startedAt, lastSummaryWatermark: null });
+          this.#reactivate(id); createdNodeIds.push(id); revision.createdNodeId = id;
+          if (revision.op === 'add_parent') { this.replace('tree_nodes', this.node(target.id), { parentId: id }); moved.push(target.id); }
+          else nodeIds = nodeIds.map(n => n === target.id ? id : n);
+        }
+        Object.assign(revision, { state: 'applied', appliedAt: this.repo.now() });
+      }
+      nodeIds = [...new Set(nodeIds)];
+      const reassigned = canonicalJson(nodeIds) !== canonicalJson(turn.nodeIds), assignmentRevision = turn.assignmentRevision + (reassigned ? 1 : 0);
+      if (reassigned) {
+        for (const link of this.repo.list('tree_links', l => l.turnId === turnId && l.active)) this.replace('tree_links', link, { active: false });
+        for (const nodeId of nodeIds) this.repo.save('tree_links', { id: digest(['link', turnId, assignmentRevision, nodeId]), turnId, nodeId, assignmentRevision, active: true, sourceRefs: turn.sourceRefs });
+      }
+      const created = createdNodeIds.length !== (turn.createdNodeIds ?? []).length;
+      this.replace('tree_turns', turn, { goalRevisions: revisions, nodeIds, createdNodeIds, assignmentRevision });
+      if (moved.length) {
+        const affected = this.repo.list('tree_nodes', n => !n.deleted && this.repo.ancestors(n.id).some(a => moved.includes(a.id))).map(n => n.id);
+        this.#invalidateScope(affected, 'goal_parent_added');
+      }
+      if (reassigned || moved.length || created) this.#touchStructure();
+      return { turnId, nodeIds, assignmentRevision, revisions: revisions.map(({ id, op, state, reason, createdNodeId }) => ({ id, op, state, ...(reason ? { reason } : {}), ...(createdNodeId ? { createdNodeId } : {}) })) };
+    });
+  }
   correctAssignment(command) {
     return this.repo.command('correctAssignment', command, this.actor([], true), () => {
       shape(command.input, ['turnId', 'nodeIds', 'sourceRefs'], ['undoCreate']); const { turnId } = command.input;
