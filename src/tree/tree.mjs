@@ -154,7 +154,10 @@ export class TreeService extends DomainService {
           this.repo.save('tree_nodes', { id, parentId, name: revision.name, status: 'active', statusOrigin: 'model', sourceRefs: turn.userSourceRefs, lastOwnTurnAt: turn.startedAt, lastSummaryWatermark: null });
           this.#reactivate(id); createdNodeIds.push(id); revision.createdNodeId = id;
           if (revision.op === 'add_parent') { this.replace('tree_nodes', this.node(target.id), { parentId: id }); moved.push(target.id); }
-          else nodeIds = nodeIds.map(n => n === target.id ? id : n);
+          // Both ops move the turn to the new goal. A child created on an
+          // ancestor takes the place of the current goal under that ancestor.
+          nodeIds = nodeIds.includes(target.id) ? nodeIds.map(n => n === target.id ? id : n)
+            : nodeIds.map(n => this.repo.ancestors(n).some(a => a.id === target.id) ? id : n);
         }
         Object.assign(revision, { state: 'applied', appliedAt: this.repo.now() });
       }
