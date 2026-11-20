@@ -15,13 +15,26 @@ const messageOf = (event, messageId) => event.type === 'agent/inbox/spliced' ? e
 const visibleBlocks = message => (message?.content ?? []).filter(b => b.type !== 'reasoning');
 
 /** Reads a host-frozen durable native log. Source labels never come from text. */
+const deepFreeze = value => {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) { for (const item of Object.values(value)) deepFreeze(item); Object.freeze(value); }
+  return value;
+};
+
 export class NativeSources {
+  // One validated, read-only copy per durable log serves every lookup until the
+  // log changes. A re-freeze normally supplies a new array; an append in place
+  // changes its length or last entry, which also invalidates the copy.
+  // Copying the whole log per lookup made each step O(refs × log size).
+  #validated = new WeakMap();
   constructor({ readSession, isRevoked = () => false }) { Object.assign(this, { readSession, isRevoked }); }
   events(sessionId) {
     const packet = this.readSession(sessionId);
     if (packet?.then || packet?.durable !== true || packet.sessionId !== sessionId || !Array.isArray(packet.events)) fail('DURABLE_SOURCE_REQUIRED', 'A synchronously frozen durable native log is required');
-    const events = jsonClone(packet.events);
+    const original = packet.events, cached = this.#validated.get(original);
+    if (cached && cached.length === original.length && cached.last === original.at(-1)) return cached.events;
+    const events = jsonClone(original);
     for (const [seq, event] of events.entries()) if (event.seq !== seq || typeof event.type !== 'string' || !event.data) fail('NATIVE_LOG_INVALID', 'Native original log must retain its complete event sequence');
+    this.#validated.set(original, { length: original.length, last: original.at(-1), events: deepFreeze(events) });
     return events;
   }
   ref(sessionId, event, messageId) {
