@@ -17,7 +17,7 @@ export const TREE_TOOLS = Object.freeze({
 });
 const descriptions = {
   arcfold_mark_complete: '把本轮目标标为助手判断的完成，保留理由和来源；先检查对应钩子，用户仍可重新打开。',
-  arcfold_revise_goal: '目标用来指导此刻的工作。只在本轮对话确实显出此刻在做的事变了时修改，依据须是本轮用户原话或用户认可的内容；拿不准就先问用户，不改。rename：同一件事有了更准确的说法，改写当前目标名字，下一步即生效。create_child：对话进到更具体的一层，在当前目标或它路径上的某一层下新建子目标并把本轮转过去，nodeId填那一层。add_parent：讨论里出现了更上层的目标，在当前目标之上加一层，并把本轮转到新上层。switch：本轮其实在做另一个已有候选目标，nodeId填那个目标。后三种在本轮回答结束时生效。name写此刻要做成什么，以用户为主语。修改后在回复里用一句话告诉用户改成了什么，用户可以当场纠正。',
+  arcfold_revise_goal: '目标用来指导此刻的工作。只在本轮对话确实显出此刻在做的事变了时修改，依据须是本轮用户原话或用户认可的内容；拿不准就先问用户，不改。rename：同一件事有了更准确的说法，改写当前目标名字，下一步即生效。create_child：对话进到更具体的一层，在当前目标或它路径上的某一层下新建子目标并把本轮转过去，nodeId填那一层。add_parent：讨论里出现了更上层的目标，在当前目标之上加一层，并把本轮转到新上层。switch：本轮其实在做另一个已有候选目标，nodeId填那个目标，不填name。后三种在本轮回答结束时生效。name写此刻要做成什么，以用户为主语。修改后在回复里用一句话告诉用户改成了什么，用户可以当场纠正。',
   arcfold_read_history: '在当前节点的上级链或直接子节点分页读取原始经历或摘要。来源已撤回时不返回原文。',
   arcfold_read_method: '读取当前范围内一个有效方法的完整说明、准确版本和脚本逻辑编号。读取不扩大权限。',
   arcfold_run_method_script: '通过受限执行入口运行当前有效方法脚本。自动检查版本、权限和快照；参数不接受路径、命令或权限覆盖。',
@@ -60,7 +60,13 @@ export async function executeTreeTool(ctx, runtime, name, args, exec) {
     shape(args, ['op', 'nodeId', 'expectedRevision', 'reason'], ['name']); oneOf(args.op, ['rename', 'add_parent', 'create_child', 'switch'], 'op');
     integer(args.expectedRevision, 'expectedRevision', 1); text(args.reason, 'reason', 2000);
     if (args.op === 'switch') {
-      if (args.name !== undefined) fail('INVALID_FIELD', 'switch uses an existing goal and takes no name');
+      // Some models always fill optional fields. An empty name or the target's
+      // own name changes nothing, so it is dropped; a different name is refused.
+      if (args.name !== undefined) {
+        const target = repo.get('tree_nodes', args.nodeId), given = typeof args.name === 'string' ? args.name.trim() : null;
+        if (given === null || (given !== '' && target && given !== target.name.trim())) fail('INVALID_FIELD', 'switch keeps the existing goal name: omit name, or switch first and rename in the next turn');
+        args = { ...args }; delete args.name;
+      }
       if (scope.nodeIds.includes(args.nodeId)) fail('INVALID_FIELD', 'This goal is already current');
       if (!runtime.attribution.candidateNodes().some(n => n.id === args.nodeId)) fail('OUT_OF_SCOPE', 'Only an existing candidate goal can be switched to');
     } else {

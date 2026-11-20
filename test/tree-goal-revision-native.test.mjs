@@ -94,3 +94,52 @@ test('a revision the reply never mentions is recorded as unannounced', async t =
   const turn = f.repo.get('tree_turns', second.id);
   assert.deepEqual(turn.goalRevisions.map(r => r.announced), [false, false]);
 });
+
+// Shape of 042-F1 (0.7.0, gpt-6.1-sol): switching to an existing goal, the
+// model always filled `name` — first with the goal's own name, then with "".
+async function switchConversation(t, names) {
+  const A = '盘点申请所需的结果、已有证据与缺口', B = '把方向稿定下来';
+  let turnNo = 0, step = 0;
+  const ids = {}, raw = [];
+  const f = await integratedFixture(t, (row, { repo }) => {
+    if (row.role === 'attribution') {
+      if (turnNo === 1) return { actions: [{ action: 'create', name: A }], statusChanges: [] };
+      if (turnNo === 2) return { actions: [{ action: 'create', name: B }], statusChanges: [] };
+      return { actions: [{ action: 'continue', nodeId: row.input.scope.nodeIds[0] }], statusChanges: [] };
+    }
+    if (row.role === 'learning') return emptyLearning();
+    if (row.role === 'verification') return emptyVerification();
+    if (row.role !== 'main' || turnNo !== 3) return '合成答复。';
+    raw.push(JSON.stringify(row.body)); step++;
+    if (step <= names.length) {
+      const args = { op: 'switch', nodeId: ids.a, expectedRevision: repo.get('tree_nodes', ids.a).revision, reason: '用户要求改一下目标' };
+      if (names[step - 1] !== undefined) args.name = names[step - 1];
+      return { tool: { id: 'switch-' + step, name: 'arcfold_revise_goal', args } };
+    }
+    return `这一轮切换到已有目标「${A}」。`;
+  });
+  f.runtime.attribution.timers = { setTimeout: fn => setTimeout(fn, 30000), clearTimeout };
+  const agent = await f.main('goal-switch-name-native');
+  turnNo = 1; ids.a = (await f.turn(agent, '先盘点申请需要的结果。')).nodeIds[0];
+  turnNo = 2; ids.b = (await f.turn(agent, '换个话题，先把方向稿定下来。')).nodeIds[0];
+  turnNo = 3; const third = await f.turn(agent, '改一下目标');
+  return { f, ids, raw, A, turn: f.repo.get('tree_turns', third.id) };
+}
+
+for (const [label, name] of [['its own name with spaces', '  盘点申请所需的结果、已有证据与缺口 '], ['an empty name', '']]) {
+  test(`switch to an existing goal succeeds when main also passes ${label}`, async t => {
+    const { f, ids, A, turn } = await switchConversation(t, [name]);
+    assert.deepEqual(turn.goalRevisions.map(r => [r.op, r.state, r.nodeId]), [['switch', 'applied', ids.a]]);
+    assert.equal(turn.goalRevisions[0].name, undefined, 'an accepted name on switch is not stored as a rename');
+    assert.deepEqual(turn.nodeIds, [ids.a]);
+    assert.equal(f.repo.get('tree_nodes', ids.a).name, A);
+  });
+}
+
+test('switch with a different name is refused with a hint, and the retry without it succeeds', async t => {
+  const { f, ids, raw, A, turn } = await switchConversation(t, ['另起一个名字', undefined]);
+  assert.match(raw[1], /omit name|rename/, 'main is told to omit name or rename after switching');
+  assert.deepEqual(turn.goalRevisions.map(r => [r.op, r.state]), [['switch', 'applied']]);
+  assert.deepEqual(turn.nodeIds, [ids.a]);
+  assert.equal(f.repo.get('tree_nodes', ids.a).name, A);
+});
