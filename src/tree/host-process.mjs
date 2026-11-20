@@ -53,6 +53,9 @@ export function macScriptProfile(policy, runDirectory, node = process.execPath) 
   const exclusions = [...policy.protectedRoots, policy.runtimeRoot].map(p => `(require-not ${pathFilter(p)})`).join(' ');
   const within = root => `(require-all ${pathFilter(root)} ${exclusions})`;
   const writable = root => `(require-all ${within(root)} ${(policy.immutableRoots ?? []).map(p => `(require-not ${pathFilter(p)})`).join(' ')})`;
+  // An app-bundled executable (Desktop's Electron in Node mode) must load its
+  // own frameworks at launch. Its bundle is public install content: read-only.
+  const bundle = /^(.+\.app\/Contents)\/MacOS\/[^/]+$/.exec(executable)?.[1];
   return [
     '(version 1)', '(deny default)', '(import "dyld-support.sb")', '(allow syscall*)',
     // No import of system.sb: it broadly grants XPC lookup. Node only needs its
@@ -61,6 +64,7 @@ export function macScriptProfile(policy, runDirectory, node = process.execPath) 
     '(allow process-exec (literal ' + quoted(executable) + '))',
     '(allow file-read-metadata)',
     `(allow file-read* file-map-executable (literal ${quoted(executable)}) (subpath "/System") (subpath "/usr/lib") (subpath "/usr/share") (subpath "/private/var/db/timezone"))`,
+    ...(bundle ? [`(allow file-read* file-map-executable ${pathFilter(bundle)})`] : []),
     `(allow file-read* ${within(policy.workspace)} ${pathFilter(run)} (literal "/dev/null") (literal "/dev/urandom"))`,
     `(allow file-write* ${pathFilter(run)} (literal "/dev/null") ${policy.writeRoots.map(writable).join(' ')})`,
     anchorDirectories(policy),

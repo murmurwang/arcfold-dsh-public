@@ -1,14 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
-import { writeFileSync, readFileSync, existsSync, symlinkSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { writeFileSync, readFileSync, existsSync, symlinkSync, rmSync, mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { snapshotFixture } from './fixtures/tree-scripts/helpers.mjs';
 import { method } from './fixtures/tree-domain/helpers.mjs';
 import { ScriptArtifacts, MethodScriptBroker, validateArgSchema, normalizeArgs } from '../src/tree/scripts.mjs';
 import { ScriptWriter } from '../src/tree/script-writer.mjs';
 import { digest } from '../src/tree/contracts.mjs';
-import { spawnConfined } from '../src/tree/host-process.mjs';
+import { macScriptProfile, spawnConfined } from '../src/tree/host-process.mjs';
 
 const schema = { type: 'object', properties: { target: { type: 'string', maxLength: 128 } }, required: ['target'], additionalProperties: false };
 const args = { target: 'output.md' };
@@ -142,4 +143,40 @@ test('withdrawal cancels the owned active process signal and preserves its resul
   const f = fixture(t); await f.activate(); let body = 0;
   f.runner.run = async options => { await options.beforeSpawn({ profileHash: 'synthetic' }); body++; f.asUser(); f.items.withdraw(f.cmd({ itemId: f.methodId, version: 2, reason: '停止' }, f.expected('tree_items', f.methodId))); f.main(); f.broker.invalidate(); assert.equal(options.signal.aborted, true); return { code: null, reason: 'cancelled', stdout: 'partial result', stderr: '', truncated: false }; };
   const run = await f.broker.run(f.input); assert.equal(body, 1); assert.equal(run.state, 'revoked'); assert.equal(run.result.stdout, 'partial result');
+});
+
+test('strict script sandbox lets an app-bundled Node read only its own bundle, read-only', () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'bundle-profile-'));
+  try {
+    const contents = join(root, 'Host.app', 'Contents'), executable = join(contents, 'MacOS', 'Host');
+    const workspace = join(root, 'workspace'), runtimeRoot = join(root, 'runtime'), run = join(runtimeRoot, 'run-1');
+    for (const path of [dirname(executable), workspace, run]) mkdirSync(path, { recursive: true });
+    writeFileSync(executable, ''); writeFileSync(join(root, 'plain-node'), '');
+    const policy = { workspace, runtimeRoot, protectedRoots: [join(root, 'protected')], immutableRoots: [], writeRoots: [workspace] };
+    const bundled = macScriptProfile(policy, run, executable);
+    assert.ok(bundled.includes(`(allow file-read* file-map-executable (subpath ${JSON.stringify(contents)}))`));
+    assert.ok(!bundled.split('\n').some(line => line.includes('file-write') && line.includes(contents)));
+    assert.ok(!macScriptProfile(policy, run, join(root, 'plain-node')).includes('Host.app'));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+const desktopBinary = '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness';
+test('installed Desktop binary starts as Node inside the strict script sandbox and cannot write its bundle', {
+  skip: process.platform !== 'darwin' || !existsSync(desktopBinary) ? 'requires the installed macOS Desktop app' : false,
+}, async () => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'bundle-run-'));
+  try {
+    const workspace = join(root, 'workspace'), runtimeRoot = join(root, 'runtime'), run = join(runtimeRoot, 'run-1');
+    for (const path of [workspace, run]) mkdirSync(path, { recursive: true });
+    const policy = { workspace, runtimeRoot, protectedRoots: [join(root, 'protected')], immutableRoots: [], writeRoots: [] };
+    const target = join(dirname(dirname(desktopBinary)), 'arcfold-sandbox-probe');
+    const script = `try { require('node:fs').writeFileSync(${JSON.stringify(target)}, 'x'); console.log('wrote') } catch (e) { console.log('denied', e.code) }`;
+    const wrapped = { argv: ['/usr/bin/sandbox-exec', '-p', macScriptProfile(policy, run, desktopBinary), '--', desktopBinary, '-e', script],
+      enforcement: 'full', kind: 'script', runAsNode: true };
+    const result = await spawnConfined(wrapped, { cwd: workspace, runDirectory: run, timeoutMs: 20000 });
+    assert.equal(result.signal, null, result.stderr);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /^denied (EPERM|EACCES)/);
+    assert.equal(existsSync(target), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
