@@ -5,11 +5,21 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# A newer push to the same PR cancels the older run; manual runs never cancel.
+concurrency:
+  group: desktop-checks-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   desktop:
-    name: Desktop checks
+    # tree-e2e alone takes about as long as all other files together, so it
+    # runs in its own job. Every test file runs in exactly one of the two jobs.
+    name: Desktop checks (${{ matrix.shard }})
     runs-on: macos-15
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [tree-e2e, rest]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,4 +52,15 @@ jobs:
           ARCFOLD_DESKTOP_PACKAGE_SOURCE: ${{ github.workspace }}
           ARCFOLD_DESKTOP_PACKAGE_DEPENDENCIES: ${{ github.workspace }}
           DSH_TELEMETRY_DISABLED: '1'
-        run: node scripts/test-isolated.mjs
+          SHARD: ${{ matrix.shard }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=()
+          for file in test/*.test.mjs; do
+            if [ "$SHARD" = tree-e2e ] && [ "$file" = test/tree-e2e.test.mjs ]; then files+=("$file"); fi
+            if [ "$SHARD" = rest ] && [ "$file" != test/tree-e2e.test.mjs ]; then files+=("$file"); fi
+          done
+          test "${#files[@]}" -gt 0
+          echo "Running ${#files[@]} test files in shard $SHARD"
+          node scripts/test-isolated.mjs "${files[@]}"
