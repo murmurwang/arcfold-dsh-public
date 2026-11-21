@@ -9,7 +9,7 @@ const requiredVersion = { type: 'integer', required: true };
 const strings = { type: 'array', required: true, items: { type: 'string' } };
 export const TREE_TOOLS = Object.freeze({
   arcfold_mark_complete: { nodeId: requiredString, expectedRevision: requiredVersion, reason: requiredString },
-  arcfold_revise_goal: { op: { type: 'string', enum: ['rename', 'add_parent', 'create_child', 'switch'], required: true }, nodeId: requiredString, expectedRevision: requiredVersion, name: { type: 'string' }, reason: requiredString },
+  arcfold_revise_goal: { op: { type: 'string', enum: ['rename', 'add_parent', 'create_child', 'switch', 'move'], required: true }, nodeId: requiredString, expectedRevision: requiredVersion, name: { type: 'string' }, parentId: { type: 'string' }, reason: requiredString },
   arcfold_read_history: { nodeId: requiredString, kind: { type: 'string', enum: ['summary', 'turns'], required: true }, afterTurnId: { type: 'string' }, limit: { type: 'integer' } },
   arcfold_read_method: { methodId: requiredString, expectedVersion: { type: 'integer' } },
   arcfold_run_method_script: { methodId: requiredString, expectedVersion: requiredVersion, scriptId: requiredString, args: { type: 'object', required: true, additionalProperties: true } },
@@ -17,7 +17,7 @@ export const TREE_TOOLS = Object.freeze({
 });
 const descriptions = {
   arcfold_mark_complete: '把本轮目标标为助手判断的完成，保留理由和来源；先检查对应钩子，用户仍可重新打开。',
-  arcfold_revise_goal: '目标用来指导此刻的工作。只在本轮对话确实显出此刻在做的事变了时修改，依据须是本轮用户原话或用户认可的内容；拿不准就先问用户，不改。rename：同一件事有了更准确的说法，改写当前目标名字，下一步即生效。create_child：对话进到更具体的一层，在当前目标或它路径上的某一层下新建子目标并把本轮转过去，nodeId填那一层。add_parent：讨论里出现了更上层的目标，在当前目标之上加一层，并把本轮转到新上层。switch：本轮其实在做另一个已有候选目标，nodeId填那个目标，不填name。后三种在本轮回答结束时生效。name写此刻要做成什么，以用户为主语。修改后在回复里用一句话告诉用户改成了什么，用户可以当场纠正。',
+  arcfold_revise_goal: '目标是这件事要做成的结果。只在本轮对话确实显出要做成的结果变了、或目标放错了位置时修改；同一结果下换做法或步骤不改。依据须是本轮用户说出的结果或用户认可的内容，只是助手对下一步的理解时不改；拿不准就先问用户。rename：同一个结果有了更准确的说法，改写当前目标名字，下一步即生效。create_child：对话进到更具体的一层，在当前目标或它路径上的某一层下新建子目标并把本轮转过去，nodeId填那一层。add_parent：讨论里出现了更上层的目标，在当前目标之上加一层，并把本轮转到新上层。switch：本轮其实在做另一个已有候选目标，nodeId填那个目标，不填name。move：当前目标其实属于全局概貌里另一个进行中目标，nodeId填当前目标，parentId填新上级，不填name；挪的是原目标，经历和条目跟着走。后四种在本轮回答结束时生效。name以用户为主语，写具体对象和要做成的结果，不写对齐、讨论、整理这类过程。修改后在回复里用一句话告诉用户改成了什么或挪到了哪里，用户可以当场纠正。',
   arcfold_read_history: '在当前节点的上级链或直接子节点分页读取原始经历或摘要。来源已撤回时不返回原文。',
   arcfold_read_method: '读取当前范围内一个有效方法的完整说明、准确版本和脚本逻辑编号。读取不扩大权限。',
   arcfold_run_method_script: '通过受限执行入口运行当前有效方法脚本。自动检查版本、权限和快照；参数不接受路径、命令或权限覆盖。',
@@ -57,9 +57,26 @@ export async function executeTreeTool(ctx, runtime, name, args, exec) {
     return { ...receipt.result, revision: repo.get('tree_nodes', args.nodeId).revision, receiptId: receipt.id };
   }
   if (name === 'arcfold_revise_goal') {
-    shape(args, ['op', 'nodeId', 'expectedRevision', 'reason'], ['name']); oneOf(args.op, ['rename', 'add_parent', 'create_child', 'switch'], 'op');
+    shape(args, ['op', 'nodeId', 'expectedRevision', 'reason'], ['name', 'parentId']); oneOf(args.op, ['rename', 'add_parent', 'create_child', 'switch', 'move'], 'op');
     integer(args.expectedRevision, 'expectedRevision', 1); text(args.reason, 'reason', 2000);
-    if (args.op === 'switch') {
+    if (args.op !== 'move' && args.parentId !== undefined) fail('INVALID_FIELD', 'parentId is only for move');
+    if (args.op === 'move') {
+      // The current goal keeps its identity and history; only its parent
+      // changes. The new parent is one of the goals main sees in the overview.
+      if (args.name !== undefined) {
+        const given = typeof args.name === 'string' ? args.name.trim() : null, own = repo.get('tree_nodes', args.nodeId)?.name.trim();
+        if (given === null || (given !== '' && given !== own)) fail('INVALID_FIELD', 'move keeps the goal name: omit name, or move first and rename in the next turn');
+        args = { ...args }; delete args.name;
+      }
+      text(args.parentId, 'parentId', 200);
+      if (!scope.nodeIds.includes(args.nodeId)) fail('OUT_OF_SCOPE', 'Only a current goal of this turn can be moved');
+      if (args.nodeId === repo.rootId()) fail('ROOT_INVARIANT', 'The root goal cannot move');
+      const parent = repo.get('tree_nodes', args.parentId), branch = repo.meta().attributionSelections?.[agent.session.id]?.nodeId;
+      if (!parent || parent.deleted || parent.status !== 'active') fail('OUT_OF_SCOPE', 'The new parent must be an active goal in the overview');
+      if (branch && !repo.ancestors(parent.id).some(a => a.id === branch)) fail('OUT_OF_SCOPE', 'The new parent must be inside the branch selected for this chat');
+      if (repo.ancestors(parent.id).some(a => a.id === args.nodeId)) fail('TREE_CYCLE', 'A goal cannot move below itself');
+      if (repo.get('tree_nodes', args.nodeId)?.parentId === parent.id) fail('INVALID_FIELD', 'The goal is already under this parent');
+    } else if (args.op === 'switch') {
       // Some models always fill optional fields. An empty name or the target's
       // own name changes nothing, so it is dropped; a different name is refused.
       if (args.name !== undefined) {
@@ -81,7 +98,7 @@ export async function executeTreeTool(ctx, runtime, name, args, exec) {
     const record = (state, extra = {}) => {
       const turn = repo.get('tree_turns', scope.turnId);
       return tree.recordGoalRevision({ requestId: digest([requestId, 'record']), expected: { ['tree_turns:' + turn.id]: turn.revision },
-        input: { turnId: turn.id, revision: { id: revisionId, op: args.op, nodeId: args.nodeId, reason: args.reason, callId: exec.callId, state, ...(args.name !== undefined ? { name: args.name } : {}), ...extra } } });
+        input: { turnId: turn.id, revision: { id: revisionId, op: args.op, nodeId: args.nodeId, reason: args.reason, callId: exec.callId, state, ...(args.name !== undefined ? { name: args.name } : {}), ...(args.parentId !== undefined ? { parentId: args.parentId } : {}), ...extra } } });
     };
     if (args.op === 'rename') {
       const before = repo.list('tree_nodes'), receipt = tree.renameGoal({ requestId, expected: { ['tree_nodes:' + node.id]: node.revision }, input: { nodeId: node.id, name: args.name, sourceRefs } });
@@ -90,6 +107,7 @@ export async function executeTreeTool(ctx, runtime, name, args, exec) {
       return { op: 'rename', nodeId: node.id, name: args.name, previousName: node.name, effective: 'next_step', revision: repo.get('tree_nodes', node.id).revision };
     }
     record('pending');
+    if (args.op === 'move') return { op: 'move', nodeId: node.id, name: node.name, parentId: args.parentId, parentName: repo.get('tree_nodes', args.parentId).name, effective: 'turn_end' };
     return { op: args.op, nodeId: node.id, ...(args.name !== undefined ? { name: args.name } : { name: node.name }), effective: 'turn_end' };
   }
   if (name === 'arcfold_read_history') {

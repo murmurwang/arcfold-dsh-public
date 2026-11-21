@@ -143,3 +143,50 @@ test('switch with a different name is refused with a hint, and the retry without
   assert.deepEqual(turn.nodeIds, [ids.a]);
   assert.equal(f.repo.get('tree_nodes', ids.a).name, A);
 });
+
+// Shape of F46 (0.7.0 replay, turn 32): the article goal sits at the root while
+// the application goal it belongs to is a sibling. Main sees each goal's parent
+// in the overview and moves the article, with its history, under the application.
+test('main sees where each goal sits and moves the current goal under another one', async t => {
+  const APP = '月底前完成申请', ARTICLE = '写出第一篇文章，讲清面对的问题';
+  let turnNo = 0, step = 0;
+  const ids = {}, raw = [];
+  const f = await integratedFixture(t, (row, { repo }) => {
+    if (row.role === 'attribution') {
+      if (turnNo === 1) return { actions: [{ action: 'create', name: APP }], statusChanges: [] };
+      if (turnNo === 2) return { actions: [{ action: 'create', name: ARTICLE }], statusChanges: [] };
+      return { actions: [{ action: 'continue', nodeId: row.input.scope.nodeIds[0] }], statusChanges: [] };
+    }
+    if (row.role === 'learning') return emptyLearning();
+    if (row.role === 'verification') return emptyVerification();
+    if (row.role !== 'main' || turnNo !== 3) return '合成答复。';
+    raw.push(JSON.stringify(row.body)); step++;
+    const move = (id, parentId) => ({ tool: { id, name: 'arcfold_revise_goal', args: { op: 'move', nodeId: ids.article, expectedRevision: repo.get('tree_nodes', ids.article).revision, parentId, reason: '用户说这几篇文章用于投递' } } });
+    if (step === 1) return move('move-self', ids.article);
+    if (step === 2) return move('move-app', ids.app);
+    return `把这个目标挪到「${APP}」下面。`;
+  });
+  f.runtime.attribution.timers = { setTimeout: fn => setTimeout(fn, 30000), clearTimeout };
+  const agent = await f.main('goal-move-native');
+  turnNo = 1; ids.app = (await f.turn(agent, '月底前要完成申请。')).nodeIds[0];
+  turnNo = 2; ids.article = (await f.turn(agent, '开始准备第一篇文章。')).nodeIds[0];
+  assert.equal(f.repo.get('tree_nodes', ids.article).parentId, f.repo.rootId());
+  turnNo = 3; const third = await f.turn(agent, '这几篇文章就是申请要交的。');
+  assert.match(raw[0], new RegExp(`"id":"${ids.article}","name":"${ARTICLE}","oneLine":"","parentId":"${f.repo.rootId()}"|"parentId":"${f.repo.rootId()}"`), 'the overview tells main where each goal sits');
+  assert.match(raw[1], /TREE_CYCLE|below itself/, 'moving a goal under itself is refused and main sees why');
+  const turn = f.repo.get('tree_turns', third.id);
+  assert.deepEqual(turn.goalRevisions.map(r => [r.op, r.state, r.announced]), [['move', 'applied', true]]);
+  assert.equal(f.repo.get('tree_nodes', ids.article).parentId, ids.app);
+  assert.equal(f.repo.get('tree_nodes', ids.article).name, ARTICLE);
+  assert.deepEqual(turn.nodeIds, [ids.article], 'the turn stays on the same goal');
+  turnNo = 4; step = 0; raw.length = 0;
+  const fourth = await f.turn(agent, '继续。');
+  assert.deepEqual(fourth.nodeIds, [ids.article]);
+});
+
+test('the goal wording given to main is about the result to achieve, not the current step', async t => {
+  const { seen } = await planningConversation(t);
+  assert.ok(!seen[0].includes('此刻在做的事'), 'the old "what is being done right now" wording is gone');
+  assert.match(seen[0], /要做成的结果/);
+  assert.match(seen[0], /换步骤不算/);
+});

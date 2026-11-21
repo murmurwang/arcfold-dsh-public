@@ -131,3 +131,49 @@ test('the existing owner correction undoes a revision made by main', t => {
   assert.equal(f.repo.get('tree_nodes', child).deleted, true, 'a child with no other experience is removed with the undo');
   assert.equal(f.repo.list('tree_jobs', j => j.kind === 'learning' && j.nodeIds.includes(plan)).length, 1, 'learning is queued again for the original goal');
 });
+
+// F46 (0.7.0 replay, turn 32): the first-article goal sat at the root while the
+// application it belongs to was a sibling. move puts the same goal, with its
+// history, under the right parent.
+function misplacedArticle(t) {
+  const f = fixture(t), application = f.create('月底前完成申请'), inventory = f.create('盘点申请论述的依据', application), article = f.create('写出第一篇文章');
+  const turn = f.tree.applyAttribution(f.attribution([{ action: 'continue', nodeId: article }])).result.turnId;
+  const record = (parentId, extra = {}) => {
+    f.asModel('main', [article]);
+    return f.tree.recordGoalRevision(f.cmd({ turnId: turn, revision: { id: extra.id ?? 'move-1', op: 'move', nodeId: article, parentId, reason: '用户说四篇文章用于投递', callId: extra.id ?? 'c-move', state: 'pending', ...extra.revision } }, f.expected('tree_turns', turn)));
+  };
+  const apply = () => { f.asModel('main', [article]); return f.tree.applyGoalRevisions(f.cmd({ turnId: turn, mainCommitted: true }, f.expected('tree_turns', turn))).result; };
+  return { f, application, inventory, article, turn, record, apply };
+}
+
+test('move waits for the turn end, then puts the same goal under the new parent and keeps the turn on it', t => {
+  const { f, application, article, turn, record, apply } = misplacedArticle(t), root = f.repo.rootId(), before = f.repo.get('tree_turns', turn);
+  record(application);
+  assert.equal(f.repo.get('tree_nodes', article).parentId, root, 'still at the root while the turn runs');
+  const result = apply(), row = f.repo.get('tree_turns', turn), node = f.repo.get('tree_nodes', article);
+  assert.deepEqual(result.revisions.map(r => [r.op, r.state]), [['move', 'applied']]);
+  assert.equal(node.parentId, application); assert.equal(node.name, '写出第一篇文章');
+  assert.deepEqual(row.nodeIds, [article]); assert.equal(row.assignmentRevision, before.assignmentRevision, 'the turn assignment does not change');
+  assert.equal(row.goalRevisions[0].fromParentId, root);
+  assert.equal(f.repo.list('tree_nodes', n => !n.deleted).length, 4, 'no goal is created');
+  f.repo.assertTree();
+  f.asUser();
+  f.tree.moveNode(f.cmd({ nodeId: article, parentId: root, sourceRefs: [] }, f.expected('tree_nodes', article)));
+  assert.equal(f.repo.get('tree_nodes', article).parentId, root, 'the owner moves it back with the existing move');
+});
+
+test('move is dropped when the parent is gone, below the goal itself, or already its parent', t => {
+  const { f, application, article, record, apply } = misplacedArticle(t), child = f.create('第一篇的开篇现场', article);
+  const done = f.repo.get('tree_nodes', application);
+  f.repo.transaction(() => f.repo.save('tree_nodes', { ...done, status: 'completed' }, done.revision));
+  record(application, { id: 'm1' }); record(child, { id: 'm2' }); record(f.repo.rootId(), { id: 'm3' });
+  assert.deepEqual(apply().revisions.map(r => [r.id, r.state, r.reason]), [['m1', 'dropped', 'parent_unavailable'], ['m2', 'dropped', 'tree_cycle'], ['m3', 'dropped', 'already_there']]);
+  assert.equal(f.repo.get('tree_nodes', article).parentId, f.repo.rootId());
+});
+
+test('a move revision carries a parent and no name; other ops carry no parent', t => {
+  const { f, application, article, turn, record } = misplacedArticle(t);
+  assert.throws(() => record(application, { id: 'm-name', revision: { name: '改个名' } }), { code: 'INVALID_FIELD' });
+  f.asModel('main', [article]);
+  assert.throws(() => f.tree.recordGoalRevision(f.cmd({ turnId: turn, revision: { id: 'r-parent', op: 'create_child', nodeId: article, name: '子目标', parentId: application, reason: 'x', callId: 'c', state: 'pending' } }, f.expected('tree_turns', turn))), { code: 'INVALID_FIELD' });
+});

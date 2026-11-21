@@ -79,7 +79,7 @@ class RuntimeContextBuilder extends ContextBuilder {
         nodes: turn.nodeIds.map(id => { const node = this.repo.get('tree_nodes', id); return { id, name: node.name, expectedRevision: node.revision,
           path: this.repo.ancestors(id).map(n => ({ id: n.id, name: n.name, expectedRevision: n.revision })) }; }),
         evidence: sources.filter(Boolean).map(s => ({ id: s.id, messageId: s.ref.messageId })), fileRefs: [],
-        instruction: '工具参数的节点版本和证据编号必须逐字使用本段当前值；此编号表不增加执行授权。nodes是本轮当前目标，path从根到当前目标。回答前对照：此刻在做的事已经不是它，就用arcfold_revise_goal修改；要在path上某一层下面新建，create_child的nodeId填那一层。' };
+        instruction: '工具参数的节点版本和证据编号必须逐字使用本段当前值；此编号表不增加执行授权。nodes是本轮当前目标，path从根到当前目标。回答前对照：要做成的结果已经不是它，就用arcfold_revise_goal修改，同一结果下换步骤不算；要在path上某一层下面新建，create_child的nodeId填那一层；它其实属于全局概貌里另一个目标，用move挪过去。' };
       value.segments = [...value.segments, { key: `turn-authority:${turn.id}`, nodeId: null, version: digest(authority), text: canonicalJson(authority), sourceRefs: turn.userSourceRefs, itemVersions: [], summaryVersions: [] }];
       value.renderedHash = digest(value.segments); value.bytes = Buffer.byteLength(value.segments.map(s => s.text).join('\n'));
     }
@@ -494,7 +494,8 @@ export class TreeRuntime {
     try { reply = this.sources.turn(turn.sessionId, turn.nativeTurn).sources.filter(s => s.role === 'assistant' || s.origin === 'model').map(s => s.text).at(-1) ?? ''; }
     catch (error) { this.diagnostic('goal_revision_reply', error, { turnId }); }
     const current = this.repo.get('tree_turns', turnId);
-    const named = r => r.op === 'switch' ? this.repo.get('tree_nodes', r.nodeId)?.name : r.name;
+    // A move is told by naming where the goal went.
+    const named = r => r.op === 'switch' ? this.repo.get('tree_nodes', r.nodeId)?.name : r.op === 'move' ? this.repo.get('tree_nodes', r.parentId)?.name : r.name;
     const goalRevisions = current.goalRevisions.map(r => ({ ...r, announced: Boolean(named(r) && reply.includes(named(r))) }));
     for (const r of goalRevisions.filter(r => !r.announced && r.state !== 'dropped')) this.diagnostic('goal_revision_unannounced', Object.assign(new Error('The reply did not tell the user about a goal revision'), { code: 'GOAL_REVISION_UNANNOUNCED' }), { turnId, revisionId: r.id });
     this.repo.command('recordGoalRevisionAnnouncement', { requestId: digest(['goal-revision-announcement', turnId]), expected: { [`tree_turns:${turnId}`]: current.revision }, input: { turnId } }, program, () => {

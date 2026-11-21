@@ -99,9 +99,10 @@ export class ContextBuilder extends DomainService {
         sourceRefs: [...rows.flatMap(r => r.version.sourceRefs), ...(summary?.sourceRefs ?? [])],
         itemVersions: rows.map(r => ({ itemId: r.item.id, version: r.item.activeVersion })), summaryVersions: summary ? [{ nodeId: node.id, version: summary.version }] : [] };
     });
-    // Names/status/oneLine are the explicitly permitted global discovery view.
+    // Names/parent/status/oneLine are the explicitly permitted global discovery
+    // view; the parent lets main see where each goal sits in the tree.
     // No sibling understanding, method, source text or summary body enters it.
-    const overview = this.repo.list('tree_nodes', n => !n.deleted && n.status === 'active').map(n => ({ id: n.id, name: n.name, status: n.status, oneLine: this.summary(n)?.oneLine ?? '' })).sort((a, b) => a.id.localeCompare(b.id));
+    const overview = this.repo.list('tree_nodes', n => !n.deleted && n.status === 'active').map(n => ({ id: n.id, parentId: n.parentId ?? null, name: n.name, status: n.status, oneLine: this.summary(n)?.oneLine ?? '' })).sort((a, b) => a.id.localeCompare(b.id));
     const text = canonicalJson({ globalOverview: overview });
     segments.unshift({ key: 'global-overview', nodeId: null, version: digest(overview), text,
       sourceRefs: this.repo.list('tree_nodes', n => !n.deleted && n.status === 'active').flatMap(n => this.summary(n)?.sourceRefs ?? []), itemVersions: [],
