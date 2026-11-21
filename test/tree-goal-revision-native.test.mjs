@@ -150,7 +150,7 @@ test('switch with a different name is refused with a hint, and the retry without
 test('main sees where each goal sits and moves the current goal under another one', async t => {
   const APP = '月底前完成申请', ARTICLE = '写出第一篇文章，讲清面对的问题';
   let turnNo = 0, step = 0;
-  const ids = {}, raw = [];
+  const ids = {}, raw = [], seen = [];
   const f = await integratedFixture(t, (row, { repo }) => {
     if (row.role === 'attribution') {
       if (turnNo === 1) return { actions: [{ action: 'create', name: APP }], statusChanges: [] };
@@ -160,7 +160,7 @@ test('main sees where each goal sits and moves the current goal under another on
     if (row.role === 'learning') return emptyLearning();
     if (row.role === 'verification') return emptyVerification();
     if (row.role !== 'main' || turnNo !== 3) return '合成答复。';
-    raw.push(JSON.stringify(row.body)); step++;
+    seen.push(text(row.body)); raw.push(JSON.stringify(row.body)); step++;
     const move = (id, parentId) => ({ tool: { id, name: 'arcfold_revise_goal', args: { op: 'move', nodeId: ids.article, expectedRevision: repo.get('tree_nodes', ids.article).revision, parentId, reason: '用户说这几篇文章用于投递' } } });
     if (step === 1) return move('move-self', ids.article);
     if (step === 2) return move('move-app', ids.app);
@@ -172,7 +172,9 @@ test('main sees where each goal sits and moves the current goal under another on
   turnNo = 2; ids.article = (await f.turn(agent, '开始准备第一篇文章。')).nodeIds[0];
   assert.equal(f.repo.get('tree_nodes', ids.article).parentId, f.repo.rootId());
   turnNo = 3; const third = await f.turn(agent, '这几篇文章就是申请要交的。');
-  assert.match(raw[0], new RegExp(`"id":"${ids.article}","name":"${ARTICLE}","oneLine":"","parentId":"${f.repo.rootId()}"|"parentId":"${f.repo.rootId()}"`), 'the overview tells main where each goal sits');
+  // The overview segments are JSON text inside the messages, so read the text.
+  assert.ok(seen[0].includes(`"id":"${ids.article}","name":"${ARTICLE}","oneLine":"","parentId":"${f.repo.rootId()}"`), 'the overview tells main the article sits at the root');
+  assert.ok(seen[0].includes(`"id":"${ids.app}","name":"${APP}","oneLine":"","parentId":"${f.repo.rootId()}"`), 'and where the application goal sits');
   assert.match(raw[1], /TREE_CYCLE|below itself/, 'moving a goal under itself is refused and main sees why');
   const turn = f.repo.get('tree_turns', third.id);
   assert.deepEqual(turn.goalRevisions.map(r => [r.op, r.state, r.announced]), [['move', 'applied', true]]);
