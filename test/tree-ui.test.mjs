@@ -213,6 +213,8 @@ test('G6 browser shows the full overflow reason and original, and submits an exp
     pending: selected ? [] : [{ id: 'pending-original', revision: 1, state: 'waiting', text: '<script>这只是用户原话</script>' }] }) };
   f.service.selectBranch = async (p, context) => { assert.equal(context.sessionId, 'native-main'); assert.equal(p.nodeId, branch); assert.equal(p.pendingId, 'pending-original'); selected = p.nodeId; mutations++; return { selection: { nodeId: selected, revision: 1 }, continued: p.pendingId }; };
   const dom = await domFixture(t, f); await dom.render(React.createElement(TreeDock, { source: dom.source }));
+  assert.equal(goalHeader().getAttribute('aria-expanded'), 'true'); assert.equal(goalHeader().textContent, '目标需要选择目标范围');
+  assert.ok(document.querySelector('.tree-goal-panel .tree-attribution-range'));
   assert.match(document.body.textContent, /2001.*2000/); assert.match(document.body.textContent, /这只是用户原话/); assert.equal(document.querySelectorAll('script').length, 0);
   const control = document.querySelector('select[aria-label="本聊天使用哪支目标"]');
   await act(async () => { control.value = branch; control.dispatchEvent(new dom.dom.window.Event('change', { bubbles: true })); });
@@ -220,6 +222,34 @@ test('G6 browser shows the full overflow reason and original, and submits an exp
   assert.match(document.body.textContent, /本聊天只在这支目标下判断归属：我继续这一支/);
   const sent = dom.calls.filter(c => c.endpoint.endsWith('/session.selectBranch')); assert.equal(sent.length, 1); assert.equal(sent[0].request.nodeId, branch);
   await dom.click('更改范围'); assert.equal(document.querySelector('select').value, branch);
+});
+
+const goalHeader = () => document.querySelector('.tree-goal-panel .tree-goal-header');
+const goalRows = () => [...document.querySelectorAll('.tree-goal-row')];
+
+test('goal panel folds to one line naming the current goal, then expands a shared chain like the tree page', async t => {
+  const f = uiFixture(t), a = f.create('我办父事项'), b = f.create('我办子事项', a), c = f.create('我办另一子事项', a);
+  await f.turn(b, '同时推进两个子事项', 'native-main', [c]);
+  const dom = await domFixture(t, f); await dom.render(React.createElement(TreeDock, { source: dom.source }));
+  const panel = document.querySelector('.tree-goal-panel'); assert.ok(panel); assert.equal(panel.getAttribute('aria-label'), '目标');
+  assert.equal(goalHeader().getAttribute('aria-expanded'), 'false'); assert.ok(goalHeader().querySelector('.tree-goal-icon svg'));
+  assert.match(goalHeader().textContent, /^目标我办子事项 等 2 个目标$/); assert.equal(goalRows().length, 0); assert.equal(document.querySelector('.tree-chip'), null);
+  await act(async () => goalHeader().click()); await dom.flush();
+  assert.equal(goalHeader().getAttribute('aria-expanded'), 'true');
+  const root = f.repo.get('tree_nodes', f.repo.rootId()).name;
+  assert.deepEqual(goalRows().map(r => r.querySelector('.tree-node-name').textContent), [root, '我办父事项', '我办子事项', '我办另一子事项']);
+  assert.deepEqual(goalRows().map(r => r.dataset.depth), ['0', '1', '2', '2']);
+  assert.deepEqual(goalRows().map(r => r.getAttribute('aria-current')), [null, null, 'true', 'true']);
+  assert.ok(goalRows().every(r => r.querySelector('.tree-dot') && /进行中/.test(r.querySelector('small').textContent)));
+  await act(async () => goalRows()[1].click()); await dom.flush(); await dom.flush();
+  const dialog = document.querySelector('[role=dialog].tree-detail-dialog'); assert.ok(dialog); assert.match(dialog.querySelector('h2').textContent, /我办父事项/);
+});
+
+test('goal panel with a single goal shows its status, and says so when the chat has no goal yet', async t => {
+  const f = uiFixture(t), dom = await domFixture(t, f); await dom.render(React.createElement(TreeDock, { source: dom.source }));
+  assert.equal(goalHeader().textContent, '目标还没有归到目标');
+  const a = f.create('我只办这一件'); await f.turn(a, '只谈这一件'); await act(async () => dom.source.refresh()); await dom.flush();
+  assert.equal(goalHeader().textContent, '目标我只办这一件 · 进行中');
 });
 
 test('turn strips are absent while the current goals and turn records remain intact', async t => {
@@ -256,6 +286,8 @@ test('client lost-response recovery only reads receipt and never automatically r
 test('v3 client installs exactly the three prescribed slots using the actual native turn prop', () => {
   const registrations = [], effects = [], ctx = { slots: { inject: (_name, fn) => fn(), register: (definition, component) => registrations.push({ definition, component }) }, effect: fn => effects.push(fn), on: () => () => {}, connection: { rpc: {} } };
   installTreeClient(ctx); assert.deepEqual(registrations.map(r => r.definition.name), ['conversation.input.dock', 'conversation.view', 'conversation.chat.turnTail']);
+  // The goal panel sits right under the native task panel (order 0) and above the queue (order 20).
+  assert.deepEqual(registrations.map(r => r.definition.order), [5, 20, 20]);
   const tail = registrations.at(-1), props = tail.definition.inject('main'), rendered = tail.component({ ...props, turn: { turn: 7, status: 'closed', steps: [] } }); assert.equal(rendered.props.nativeTurn, 7); effects[0]()();
 });
 

@@ -29,9 +29,31 @@ function Command({ source, endpoint, payload, children, onDone, disabled = false
   return h('span', { className: 'tree-command' }, button(children, run, { disabled: disabled || waiting, className, title }), op && h('small', { role: op.state === 'conflict' ? 'alert' : 'status' }, op.state === 'success' ? '已保存' : op.message ?? '结果尚待确认'), waiting && op.state !== 'pending' && button('核对操作结果', () => source.readback(id).catch(() => {})));
 }
 function StatusDot({ status }) { return h('i', { className: 'tree-dot ' + status, 'aria-hidden': true }); }
-function NodeChip({ node, path, source }) {
-  const label = (path ?? [node]).map(n => n.name).join(' › ');
-  return button(h(React.Fragment, null, h(StatusDot, { status: node.status }), h('span', null, label), h('small', null, nodeStatus(node))), () => source.openDetails(node.id), { className: 'tree-chip', title: label + ' · ' + nodeStatus(node) });
+const svg = children => h('svg', { width: 14, height: 14, viewBox: '0 0 14 14', fill: 'none', stroke: 'currentColor', strokeWidth: 1.2, 'aria-hidden': true, focusable: false }, children);
+const TargetIcon = () => svg([h('circle', { key: 1, cx: 7, cy: 7, r: 5.9 }), h('circle', { key: 2, cx: 7, cy: 7, r: 3.2 }), h('circle', { key: 3, cx: 7, cy: 7, r: 0.9, fill: 'currentColor', stroke: 'none' })]);
+// Same convention as the native task panel: up while folded, down while open.
+const Chevron = ({ open }) => svg(h('path', { d: open ? 'M3.5 5.5 7 9l3.5-3.5' : 'M3.5 8.5 7 5l3.5 3.5', strokeLinecap: 'round', strokeLinejoin: 'round' }));
+// Merge the current paths into one chain: shared ancestors appear once, in path order.
+function chainRows(paths) {
+  const rows = new Map(), children = new Map(), roots = [], current = new Set(paths.filter(p => p.length).map(p => p.at(-1).id));
+  for (const path of paths) path.forEach((node, depth) => {
+    if (rows.has(node.id)) return; rows.set(node.id, { node, depth, current: current.has(node.id) });
+    if (depth === 0) roots.push(node.id); else { const parent = path[depth - 1].id; children.set(parent, [...(children.get(parent) ?? []), node.id]); }
+  });
+  const ordered = [], walk = id => { ordered.push(rows.get(id)); (children.get(id) ?? []).forEach(walk); };
+  roots.forEach(walk); return ordered;
+}
+function goalSummary(state, needsRange) {
+  if (needsRange) return '需要选择目标范围';
+  if (state.loading && !state.current.turnId) return '正在读取…';
+  const goals = state.current.turnId ? state.current.paths.filter(p => p.length).map(p => p.at(-1)) : [];
+  if (!goals.length) return '还没有归到目标';
+  return goals.length > 1 ? `${goals[0].name} 等 ${goals.length} 个目标` : `${goals[0].name} · ${nodeStatus(goals[0])}`;
+}
+function GoalChain({ paths, source }) {
+  return h('ul', { className: 'tree-goal-chain' }, chainRows(paths).map(({ node, depth, current }) => h('li', { key: node.id },
+    button(h(React.Fragment, null, h(StatusDot, { status: node.status }), h('span', { className: 'tree-node-name' }, node.name), h('small', null, nodeStatus(node))), () => source.openDetails(node.id),
+      { className: 'tree-goal-row' + (current ? ' current' : ''), 'data-depth': depth, 'aria-current': current ? 'true' : undefined, style: { paddingInlineStart: 12 + Math.min(depth, 5) * 14 }, title: node.name + ' · ' + nodeStatus(node) }))));
 }
 function AttributionRange({ source, state }) {
   const range = state.current.attribution, [editing, setEditing] = useState(false), [branch, setBranch] = useState('');
@@ -53,8 +75,18 @@ function AttributionRange({ source, state }) {
         p.state === 'waiting' ? h(Command, { source, endpoint: 'session.selectBranch', payload: () => payload(p.id), onDone: () => setEditing(false) }, '选定并继续这条消息') : h('p', { role: 'status' }, p.state === 'queued' ? '已经排入对话，请勿重复发送。' : '继续请求已记录，发送状态待核对；不会自动重发。')))) : button('更改范围', () => { setBranch(range.selection.nodeId ?? ''); setEditing(true); }));
 }
 export function TreeDock({ source }) {
-  const state = useSource(source), [revision, setRevision] = useState(0), detail = useRead(source, 'node.details', state.detailsNodeId ? { nodeId: state.detailsNodeId } : null, revision + state.epoch);
-  return h('div', { className: 'arcfold-tree tree-dock', 'aria-label': '当前事项' }, h(AttributionRange, { source, state }), state.current.paths.map(path => path.length ? h(NodeChip, { key: path.at(-1).id, node: path.at(-1), path, source }) : null), state.error && h('small', { role: 'alert' }, state.error),
+  const state = useSource(source), [revision, setRevision] = useState(0), [open, setOpen] = useState(false), detail = useRead(source, 'node.details', state.detailsNodeId ? { nodeId: state.detailsNodeId } : null, revision + state.epoch);
+  const range = state.current.attribution, needsRange = Boolean(range && (range.blocked || range.pending.length > 0));
+  // A blocked chat cannot continue until a branch is chosen, so the choice is never left folded away.
+  useEffect(() => { if (needsRange) setOpen(true); }, [needsRange]);
+  const expanded = open || needsRange;
+  return h('div', { className: 'arcfold-tree tree-dock' },
+    h('section', { className: 'tree-goal-panel', 'aria-label': '目标' },
+      h('button', { type: 'button', className: 'tree-goal-header', 'aria-expanded': expanded, onClick: () => setOpen(!expanded) },
+        h('span', { className: 'tree-goal-icon', 'aria-hidden': true }, h(TargetIcon)), h('span', { className: 'tree-goal-title' }, '目标'),
+        h('span', { className: 'tree-goal-summary' + (needsRange ? ' alert' : '') }, goalSummary(state, needsRange)), h('span', { className: 'tree-goal-chevron', 'aria-hidden': true }, h(Chevron, { open: expanded }))),
+      expanded && h('div', { className: 'tree-goal-body' }, h(AttributionRange, { source, state }), state.current.paths.some(p => p.length) && h(GoalChain, { paths: state.current.paths, source }))),
+    state.error && h('small', { role: 'alert' }, state.error),
     state.detailsNodeId && h('div', { role: 'dialog', 'aria-modal': true, 'aria-label': '事项详情', className: 'tree-detail-dialog' }, button('关闭详情', () => source.closeDetails()), h(ReadState, { value: detail }, data => h(NodeDetail, { key: data.node.id, source, detail: data, navigate: id => source.openDetails(id), onDone: () => { setRevision(v => v + 1); void source.refresh(); } }))));
 }
 const emptyShort = { situation: '', action: '', basis: '', notApplicable: '' };
