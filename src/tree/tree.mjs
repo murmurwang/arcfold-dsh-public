@@ -125,8 +125,11 @@ export class TreeService extends DomainService {
   recordGoalRevision(command) {
     return this.repo.command('recordGoalRevision', command, this.actor(['main']), () => {
       shape(command.input, ['turnId', 'revision']); const { turnId, revision } = command.input;
-      shape(revision, ['id', 'op', 'nodeId', 'reason', 'callId', 'state'], ['name', 'previousName']); oneOf(revision.op, ['rename', 'add_parent', 'create_child', 'switch'], 'op');
-      oneOf(revision.state, revision.op === 'rename' ? ['applied'] : ['pending'], 'state'); text(revision.reason, 'reason', 2000); if (revision.op !== 'switch') text(revision.name, 'name', 80);
+      shape(revision, ['id', 'op', 'nodeId', 'reason', 'callId', 'state'], ['name', 'previousName', 'parentId']); oneOf(revision.op, ['rename', 'add_parent', 'create_child', 'switch', 'move'], 'op');
+      oneOf(revision.state, revision.op === 'rename' ? ['applied'] : ['pending'], 'state'); text(revision.reason, 'reason', 2000);
+      if (!['switch', 'move'].includes(revision.op)) text(revision.name, 'name', 80);
+      if (revision.op === 'move') { text(revision.parentId, 'parentId', 200); if (revision.name !== undefined) fail('INVALID_FIELD', 'move keeps the goal name'); }
+      else if (revision.parentId !== undefined) fail('INVALID_FIELD', 'parentId is only for move');
       this.repo.requireExpected(command, 'tree_turns', turnId); const turn = this.repo.get('tree_turns', turnId); if (!turn) fail('TURN_NOT_FOUND', 'Turn not found');
       const revisions = turn.goalRevisions ?? []; if (revisions.some(r => r.id === revision.id)) return { turnId, revisionId: revision.id, duplicate: true };
       if (revisions.length >= 8) fail('GOAL_REVISION_LIMIT', 'At most eight goal revisions per turn');
@@ -140,13 +143,22 @@ export class TreeService extends DomainService {
     return this.repo.command('applyGoalRevisions', command, this.actor(['main']), () => {
       shape(command.input, ['turnId', 'mainCommitted']); const { turnId, mainCommitted } = command.input;
       this.repo.requireExpected(command, 'tree_turns', turnId); let turn = this.repo.get('tree_turns', turnId); if (!turn) fail('TURN_NOT_FOUND', 'Turn not found');
-      const revisions = (turn.goalRevisions ?? []).map(r => ({ ...r })); let nodeIds = [...turn.nodeIds], createdNodeIds = [...(turn.createdNodeIds ?? [])], moved = [];
+      const revisions = (turn.goalRevisions ?? []).map(r => ({ ...r })); let nodeIds = [...turn.nodeIds], createdNodeIds = [...(turn.createdNodeIds ?? [])], moved = [], relocated = [];
       for (const revision of revisions) {
         if (revision.state !== 'pending') continue;
         if (!mainCommitted) { Object.assign(revision, { state: 'dropped', reason: 'main_not_committed' }); continue; }
         const target = this.repo.get('tree_nodes', revision.nodeId);
         if (!target || target.deleted) { Object.assign(revision, { state: 'dropped', reason: 'node_missing' }); continue; }
-        if (revision.op === 'switch') {
+        if (revision.op === 'move') {
+          // The goal keeps its id, name, items and summaries; the turn stays on
+          // it. Only the parent changes, so later turns carry the new path.
+          const parent = this.repo.get('tree_nodes', revision.parentId);
+          if (!parent || parent.deleted || parent.status !== 'active') { Object.assign(revision, { state: 'dropped', reason: 'parent_unavailable' }); continue; }
+          if (target.id === this.repo.rootId() || this.repo.ancestors(parent.id).some(a => a.id === target.id)) { Object.assign(revision, { state: 'dropped', reason: 'tree_cycle' }); continue; }
+          if (target.parentId === parent.id) { Object.assign(revision, { state: 'dropped', reason: 'already_there' }); continue; }
+          revision.fromParentId = target.parentId;
+          this.replace('tree_nodes', target, { parentId: parent.id }); relocated.push(target.id);
+        } else if (revision.op === 'switch') {
           nodeIds = [target.id]; this.#reactivate(target.id);
         } else {
           const id = randomUUID(), parentId = revision.op === 'add_parent' ? target.parentId : target.id;
@@ -173,7 +185,11 @@ export class TreeService extends DomainService {
         const affected = this.repo.list('tree_nodes', n => !n.deleted && this.repo.ancestors(n.id).some(a => moved.includes(a.id))).map(n => n.id);
         this.#invalidateScope(affected, 'goal_parent_added');
       }
-      if (reassigned || moved.length || created) this.#touchStructure();
+      if (relocated.length) {
+        const affected = this.repo.list('tree_nodes', n => !n.deleted && this.repo.ancestors(n.id).some(a => relocated.includes(a.id))).map(n => n.id);
+        this.#invalidateScope(affected, 'goal_moved');
+      }
+      if (reassigned || moved.length || relocated.length || created) this.#touchStructure();
       return { turnId, nodeIds, assignmentRevision, revisions: revisions.map(({ id, op, state, reason, createdNodeId }) => ({ id, op, state, ...(reason ? { reason } : {}), ...(createdNodeId ? { createdNodeId } : {}) })) };
     });
   }
