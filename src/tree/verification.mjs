@@ -1,6 +1,6 @@
 import { CONTRACT, canonicalJson, digest, fail, jsonClone } from './contracts.mjs';
 import { ItemService } from './items.mjs';
-import { validateOutput, resolveSourceIds, consolidationReason } from './prompts.mjs';
+import { validateOutput, resolveSourceIds, consolidationReason, RETROSPECT_REASONS } from './prompts.mjs';
 import { effectiveSignals, EpisodeSignals } from './signals.mjs';
 import { itemInput, proposalInput } from './learning.mjs';
 import { LocalReports } from './reports.mjs';
@@ -284,7 +284,7 @@ export class ConsolidationReflection {
       if (reason === 'node_complete' && this.repo.get('tree_nodes', nodeId).status !== 'completed') fail('JOB_STALE', 'Node is no longer completed');
       return { ...this.consolidation.applyResult(output, context).result, moved: [], retrospect: { status: 'report_only' } };
     }
-    if (reason !== 'node_complete' && (output.retrospect.understandings.length || output.retrospect.methods.length)) fail('RETROSPECT_TRIGGER', 'Completion retrospection requires actual node completion');
+    if (!RETROSPECT_REASONS.includes(reason) && (output.retrospect.understandings.length || output.retrospect.methods.length)) fail('RETROSPECT_TRIGGER', 'Retrospection requires completing or leaving the goal');
     if (reason === 'node_complete' && this.repo.get('tree_nodes', nodeId).status !== 'completed') fail('JOB_STALE', 'Node is no longer completed');
     return this.repo.transaction(() => {
       const summary = this.consolidation.applyResult(output, context), moved = [];
@@ -302,7 +302,8 @@ export class ConsolidationReflection {
       }
       // A completed node leaves the background of later work, so what its
       // completion teaches is kept one level up, where sibling work reads it.
-      const targetId = this.repo.get('tree_nodes', nodeId).parentId ?? nodeId;
+      // A goal that was only left may be resumed, so it keeps what it taught.
+      const targetId = reason === 'node_complete' ? this.repo.get('tree_nodes', nodeId).parentId ?? nodeId : nodeId;
       const service = new ItemService({ repository: this.repo, resolveSource: this.resolveSource, context: () => ({ actor: { kind: 'model', id: job.id, role: 'consolidation' }, nodeIds: [...new Set([nodeId, targetId])] }) });
       const proposals = service.commitProposal({ requestId: digest([requestId, 'retrospect']), expected: {}, input: { ...proposalInput(output.retrospect, job.input), nodeId: targetId } }).result;
       recordOrigins(this.repo, [...(proposals.understandings.itemIds ?? []), ...(proposals.methods.itemIds ?? [])], job, digest([requestId, 'retrospect-origin']));

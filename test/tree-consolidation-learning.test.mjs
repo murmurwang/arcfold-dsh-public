@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { learningFixture } from './fixtures/tree-learning/helpers.mjs';
+import { learningFixture, emptyLearning } from './fixtures/tree-learning/helpers.mjs';
 import { method } from './fixtures/tree-domain/helpers.mjs';
 import { ConsolidationReflection } from '../src/tree/verification.mjs';
 import { validateOutput } from '../src/tree/prompts.mjs';
@@ -46,8 +46,18 @@ test('the consolidation reason is read from the frozen plan when the job trigger
   const lifted = { ...full.consolidation, retrospect: { understandings: [], methods: [] } };
   input.trigger.kind = 'threshold'; assert.throws(() => validateOutput('consolidation', lifted, input), { code: 'OUTPUT_THRESHOLD' });
   input.trigger.kind = 'leave_timeout'; assert.deepEqual(validateOutput('consolidation', lifted, input), lifted);
-  assert.throws(() => validateOutput('consolidation', full.consolidation, input), { code: 'OUTPUT_REFLECTION_TRIGGER' });
+  // 053: leaving a goal may also look back; a threshold summary still may not.
+  assert.deepEqual(validateOutput('consolidation', full.consolidation, input), full.consolidation);
+  input.summaryPlan = { reason: 'threshold' }; assert.throws(() => validateOutput('consolidation', { ...full.consolidation, broaden: [] }, input), { code: 'OUTPUT_THRESHOLD' });
   input.summaryPlan = { reason: 'node_complete' }; assert.deepEqual(validateOutput('consolidation', full.consolidation, input), full.consolidation);
+});
+
+test('only leaving a goal may mark it as possibly put down', () => {
+  const input = envelope('consolidation'), source = full.consolidation.summary.decisions[0]?.sourceIds?.[0] ?? input.sources[0].id;
+  const marked = { ...full.consolidation, retrospect: { understandings: [], methods: [] }, setDown: { reason: '对话已转去别的目标，也没有约定的下一步', sourceIds: [source] } };
+  for (const reason of ['node_leave', 'leave_timeout']) { input.summaryPlan = { reason }; assert.deepEqual(validateOutput('consolidation', marked, input), marked); }
+  for (const reason of ['node_complete', 'threshold']) { input.summaryPlan = { reason }; assert.throws(() => validateOutput('consolidation', { ...marked, broaden: [] }, input), { code: 'OUTPUT_SET_DOWN_TRIGGER' }); }
+  input.summaryPlan = { reason: 'node_leave' }; const plain = { ...marked, setDown: null }; assert.deepEqual(validateOutput('consolidation', plain, input), plain);
 });
 
 test('leaving a node lifts an own item to an ancestor without copying it', async t => {
@@ -72,15 +82,84 @@ test('a completed top-level goal is told that its retrospect goes to the shared 
   assert.deepEqual(job.input.outputBindings.broadenTargets, [f.repo.rootId()]);
 });
 
-test('leaving a node cannot add retrospect items, and one bad lift does not cost the summary', async t => {
+// 053: a goal that was left (not completed) keeps what looking back taught it,
+// since the conversation may come back to it; one bad lift still costs nothing.
+test('leaving a node keeps its retrospect on the node itself, and one bad lift does not cost the summary', async t => {
   const f = learningFixture(t), parent = f.create('我准备申请材料'), a = f.create('我写推荐信', parent);
   await f.turn(a, '请继续写推荐信');
   f.asModel('learning', [a]); const [id] = f.propose(a, { methods: [method([f.ref])] }).methods.itemIds;
   const job = enqueueLikeRuntime(f, f.consolidation.plan(a, 'leave_timeout')), source = userSource(job);
+  assert.deepEqual(job.input.outputBindings.retrospectTarget, { nodeId: a, isRoot: false });
   const result = run(f, job, { summary, broaden: [{ kind: 'method', id, version: 1, toNodeId: 'not-an-ancestor', reason: '编造的节点', sourceIds: [source] }],
-    retrospect: { understandings: [{ content: '离开时不该新增的理解', source: 'assistant_inferred', sourceIds: [source] }], methods: [] } });
+    retrospect: { understandings: [{ content: '推荐信先列事实再写评价', source: 'assistant_inferred', sourceIds: [source] }], methods: [] } });
   assert.equal(result.status, 'committed');
-  assert.deepEqual(result.rejectedItems.map(r => [r.item, r.code]), [['broaden[0]', 'OUTPUT_REFERENCE'], ['retrospect.understandings[0]', 'OUTPUT_REFLECTION_TRIGGER']]);
-  assert.equal(f.repo.get('tree_items', id).nodeId, a); assert.equal(f.repo.list('tree_items', i => i.kind === 'understanding').length, 0);
+  assert.deepEqual(result.rejectedItems.map(r => [r.item, r.code]), [['broaden[0]', 'OUTPUT_REFERENCE']]);
+  assert.equal(f.repo.get('tree_items', id).nodeId, a);
+  assert.deepEqual(f.repo.list('tree_items', i => i.kind === 'understanding').map(i => i.nodeId), [a], 'the new understanding stays on the goal that was left');
   assert.equal(f.repo.get('tree_summaries', f.repo.get('tree_nodes', a).currentSummaryId).oneLine, '合成概况');
+});
+
+test('a completed goal still keeps its retrospect one level up', async t => {
+  const f = learningFixture(t), parent = f.create('我准备申请材料'), a = f.create('我写推荐信', parent);
+  await f.turn(a, '推荐信写好了。');
+  f.asUser(); f.tree.setStatus(f.cmd({ nodeId: a, status: 'completed', sourceRefs: [] }, f.expected('tree_nodes', a)));
+  const job = enqueueLikeRuntime(f, f.consolidation.plan(a, 'node_complete'));
+  assert.deepEqual(job.input.outputBindings.retrospectTarget, { nodeId: parent, isRoot: false });
+});
+
+// 053 (F46): a goal the conversation moves away from is consolidated when it is
+// left, not only after a day of silence; the same turns are not done twice.
+// Each turn's own learning is run to the end, as the runtime does after a turn.
+const learnedTurn = async (f, node, text) => { const turn = await f.turn(node, text); f.complete(f.learning.enqueue(turn.id, node), emptyLearning()); return turn; };
+
+test('leaving a goal plans one consolidation for it once its learning has settled', async t => {
+  const f = learningFixture(t), a = f.create('我写推荐信'), b = f.create('我改简历'), empty = { understandings: [], methods: [] };
+  await learnedTurn(f, a, '先写推荐信'); const last = await f.turn(a, '继续写推荐信');
+  assert.deepEqual(f.consolidation.departed(), [], 'still on the same goal');
+  await learnedTurn(f, b, '换个事，先改简历');
+  assert.deepEqual(f.consolidation.departed(), [], 'the goal that was left waits for its own learning');
+  f.complete(f.learning.enqueue(last.id, a), emptyLearning());
+  const plans = f.consolidation.departed();
+  assert.deepEqual(plans.map(p => [p.nodeId, p.reason]), [[a, 'node_leave']]);
+  const job = enqueueLikeRuntime(f, plans[0]);
+  assert.equal(run(f, job, { summary, broaden: [], retrospect: empty }).status, 'committed');
+  assert.deepEqual(f.consolidation.departed(), [], 'the same turns are not consolidated twice');
+  await learnedTurn(f, b, '继续改简历');
+  assert.deepEqual(f.consolidation.departed(), []);
+  await learnedTurn(f, a, '回到推荐信');
+  assert.deepEqual(f.consolidation.departed().map(p => p.nodeId), [b], 'the goal just left is planned; the current one is not');
+  await learnedTurn(f, b, '再改简历');
+  assert.deepEqual(f.consolidation.departed().map(p => p.nodeId), [a], 'a goal left again after new turns is planned again');
+});
+
+test('a goal main renamed hides its old one line until its summary is refreshed', async t => {
+  const f = learningFixture(t), a = f.create('打磨第一篇的核心问题'), empty = { understandings: [], methods: [] };
+  await learnedTurn(f, a, '先打磨核心问题');
+  assert.equal(run(f, enqueueLikeRuntime(f, f.consolidation.plan(a, 'leave_timeout')), { summary, broaden: [], retrospect: empty }).status, 'committed');
+  assert.equal(f.builder.glance(f.repo.get('tree_nodes', a)).oneLine, '合成概况');
+  await learnedTurn(f, a, '可以从第一篇开始写了');
+  f.asModel('main', [a]); f.tree.renameGoal(f.cmd({ nodeId: a, name: 'Murphy 写出第一篇文章，讲清面对的问题', sourceRefs: [] }, f.expected('tree_nodes', a)));
+  assert.equal(f.builder.glance(f.repo.get('tree_nodes', a)).oneLine, '', 'the summary written under the old name is not shown');
+  const overview = JSON.parse(f.builder.build([a], 'main').segments.find(s => s.key === 'global-overview').text).globalOverview;
+  assert.equal(overview.find(n => n.id === a).oneLine, '');
+  const plans = f.consolidation.departed();
+  assert.deepEqual(plans.map(p => [p.nodeId, p.reason]), [[a, 'node_leave']], 'a rename refreshes the summary even while the conversation stays');
+  assert.equal(run(f, enqueueLikeRuntime(f, plans[0]), { summary: { ...summary, oneLine: '新概况' }, broaden: [], retrospect: empty }).status, 'committed');
+  assert.equal(f.repo.get('tree_nodes', a).summaryNameStale, false);
+  assert.equal(f.builder.glance(f.repo.get('tree_nodes', a)).oneLine, '新概况');
+});
+
+test('a goal that was left may be marked as possibly put down; the mark never changes its status and goes away when the goal is resumed', async t => {
+  const f = learningFixture(t), a = f.create('把申请路线图拆成每日待办'), b = f.create('盘点申请论述的依据'), empty = { understandings: [], methods: [] };
+  await learnedTurn(f, a, '每天按这个节奏推进'); await learnedTurn(f, b, '先盘点依据');
+  const job = enqueueLikeRuntime(f, f.consolidation.departed()[0]);
+  const setDown = { reason: '对话已转去盘点依据，每日待办没有约定的下一步', sourceIds: [userSource(job)] };
+  assert.equal(run(f, job, { summary, broaden: [], retrospect: empty, setDown }).status, 'committed');
+  assert.equal(f.repo.get('tree_nodes', a).status, 'active', 'the program does not put the goal down');
+  assert.deepEqual(f.builder.glance(f.repo.get('tree_nodes', a)), { oneLine: '合成概况', possiblySetDown: true });
+  const overview = JSON.parse(f.builder.build([b], 'main').segments.find(s => s.key === 'global-overview').text).globalOverview;
+  assert.equal(overview.find(n => n.id === a).possiblySetDown, true);
+  assert.equal(overview.find(n => n.id === b).possiblySetDown, undefined);
+  await learnedTurn(f, a, '回到每日待办');
+  assert.equal(f.builder.glance(f.repo.get('tree_nodes', a)).possiblySetDown, undefined, 'coming back to the goal clears the mark');
 });

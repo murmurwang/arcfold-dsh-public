@@ -119,7 +119,9 @@ export class TreeService extends DomainService {
       if (nodeId === this.repo.rootId()) fail('ROOT_INVARIANT', 'The root goal keeps its name');
       if (node.nameUserProtected) fail('USER_PROTECTED', 'The user named this goal; ask before renaming it');
       this.refs(command.input.sourceRefs, { required: false });
-      this.replace('tree_nodes', node, { name, nameOrigin: 'model' }); this.#touchStructure(); return { nodeId, name, previousName: node.name };
+      // The summary was written under the old name; it is refreshed once this
+      // turn's learning settles, and its one line is hidden until then.
+      this.replace('tree_nodes', node, { name, nameOrigin: 'model', summaryNameStale: true }); this.#touchStructure(); return { nodeId, name, previousName: node.name };
     });
   }
   recordGoalRevision(command) {
