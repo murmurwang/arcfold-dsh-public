@@ -997,6 +997,41 @@
         "methods"
       ],
       "additionalProperties": false
+    },
+    "setDown": {
+      "anyOf": [
+        {
+          "const": null
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 2000
+            },
+            "sourceIds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "source"
+              },
+              "minItems": 1,
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "reason",
+            "sourceIds"
+          ],
+          "additionalProperties": false
+        }
+      ]
     }
   },
   "required": [

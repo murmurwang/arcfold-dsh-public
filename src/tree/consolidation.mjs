@@ -1,6 +1,7 @@
 import { CONTRACT, canonicalJson, digest, fail, integer, jsonClone } from './contracts.mjs';
 import { validateOutput } from './prompts.mjs';
 import { compactLearningSource } from './experience.mjs';
+import { TERMINAL_JOBS } from './jobs.mjs';
 
 export class ConsolidationService {
   constructor({ repository, experience, contextBuilder, jobs }) { Object.assign(this, { repo: repository, experience, builder: contextBuilder, jobs }); }
@@ -55,9 +56,13 @@ export class ConsolidationService {
     const sourceRefs = [...new Map(job.input.sources.map(s => [canonicalJson(s.ref), s.ref])).values()];
     return this.repo.command('commitTreeSummary', { requestId, expected: job.inputRevisionSet, input: { nodeId: node.id, jobId: job.id, sourceWatermark: plan.sourceWatermark, sourceRefs } }, { kind: 'model', id: job.id, role: 'consolidation' }, () => {
       const { oneLine, ...body } = output.summary;
+      // setDown only marks that the goal may have been put down; the status
+      // stays as it is until the user says so.
+      const setDown = ['node_leave', 'leave_timeout'].includes(plan.reason) && output.setDown ? { reason: output.setDown.reason, sourceIds: output.setDown.sourceIds } : null;
       this.repo.save('tree_summaries', { id, nodeId: node.id, version, oneLine, body, throughTurnIds: plan.throughTurnIds, sourceRefs, previousVersion: plan.previousVersion,
-        sourceWatermark: plan.sourceWatermark, assignmentVersions: plan.assignmentVersions, coveredJobIds: plan.coveredJobIds, recentJobIds: plan.recentJobIds, reason: plan.reason, jobId: job.id });
-      this.repo.save('tree_nodes', { ...node, currentSummaryId: id, lastSummaryWatermark: plan.sourceWatermark }, node.revision);
+        sourceWatermark: plan.sourceWatermark, assignmentVersions: plan.assignmentVersions, coveredJobIds: plan.coveredJobIds, recentJobIds: plan.recentJobIds, reason: plan.reason, jobId: job.id,
+        ...(setDown ? { setDown } : {}) });
+      this.repo.save('tree_nodes', { ...node, currentSummaryId: id, lastSummaryWatermark: plan.sourceWatermark, summaryNameStale: false }, node.revision);
       // Broaden/retrospect remain versioned proposals for B5; this service never
       // silently grants them item/method activation authority.
       return { summaryId: id, version, nodeId: node.id, proposals: { broaden: output.broaden, retrospect: output.retrospect }, epochPending: plan.reason === 'threshold' };
@@ -104,6 +109,34 @@ export class ConsolidationService {
     const limit = Math.floor(Math.min(128000, contextWindow * 0.8, contextWindow - maxOutputTokens - 65536));
     if (limit <= 0) fail('CONTEXT_CAPACITY', 'Model leaves no safe learning capacity');
     return { tokens: reading.tokens, limit, needsSummary: reading.tokens > limit, tokenizerIdentity: reading.tokenizerIdentity, inputHash: reading.inputHash };
+  }
+  // A goal the conversation has moved away from is consolidated as soon as its
+  // own learning has settled, instead of waiting for the idle timeout; a goal
+  // renamed by main is consolidated again so its one line matches the name.
+  // plan() returns nothing when the latest summary already covers the same
+  // turns, so leaving or renaming twice over the same turns adds no job.
+  departed() {
+    // Runs on every worker scan, so turns, links and learning are indexed once
+    // per scan instead of being listed again for every goal.
+    const turns = this.repo.list('tree_turns'), byId = new Map(turns.map(t => [t.id, t])), own = new Map(), learning = new Set();
+    for (const link of this.repo.list('tree_links', l => l.active)) { const t = byId.get(link.turnId); if (t?.status === 'settled') own.set(link.nodeId, [...(own.get(link.nodeId) ?? []), t]); }
+    for (const job of this.repo.list('tree_jobs', j => (j.role === 'learning' || !j.role && j.kind === 'learning') && !TERMINAL_JOBS.includes(j.status))) for (const id of job.nodeIds ?? []) learning.add(id);
+    const order = (a, b) => a.startedAt.localeCompare(b.startedAt) || a.sessionId.localeCompare(b.sessionId) || a.nativeTurn - b.nativeTurn || a.id.localeCompare(b.id);
+    const result = [];
+    for (const node of this.repo.list('tree_nodes', n => !n.deleted && n.status === 'active' && n.lastOwnTurnAt)) {
+      const settled = own.get(node.id); if (!settled?.length) continue;
+      const last = settled.sort(order).at(-1);
+      const left = turns.some(t => t.sessionId === last.sessionId && t.nativeTurn > last.nativeTurn && t.status === 'settled' && !t.nodeIds.includes(node.id));
+      if (!left && !node.summaryNameStale) continue;
+      // Wait for this goal's running turn and learning: a summary frozen while
+      // learning commits would go stale, and the same turns are not planned twice.
+      if (learning.has(node.id) || turns.some(t => t.status === 'open' && t.nodeIds.includes(node.id) && t.startedAt > last.startedAt)) continue;
+      try { const plan = this.plan(node.id, 'node_leave'); if (plan) result.push(plan); }
+      // Learning of the last turns may still be running, or a source may be gone;
+      // either way this goal waits and the others are still planned.
+      catch (error) { if (!['SUMMARY_LEARNING_RECEIPT', 'SUMMARY_SOURCE_REVOKED'].includes(error.code)) throw error; }
+    }
+    return result;
   }
   due(at = this.repo.now()) {
     const now = Date.parse(at), result = [];

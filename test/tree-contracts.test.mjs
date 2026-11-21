@@ -105,12 +105,13 @@ test('verification requires a repair for an own failed method and still enforces
   assert.ok(!outputBindings(input).repairRequiredWhenNotMet.includes(methodItem.id));
   validateOutput('verification', failed, input);
 });
-test('consolidation completion alone permits retrospective learning; leaving cannot add learning items', () => {
-  const input = envelope('consolidation'); input.trigger.reason = 'leave_timeout';
-  assert.throws(() => validateOutput('consolidation', full.consolidation, input), { code: 'OUTPUT_REFLECTION_TRIGGER' });
+// 053: completing or leaving a goal may look back; a threshold summary may not.
+test('consolidation on completing or leaving a goal permits retrospective learning; a threshold summary does not', () => {
+  const input = envelope('consolidation');
+  for (const reason of ['leave_timeout', 'node_leave', 'node_complete']) { input.trigger.reason = reason; assert.deepEqual(validateOutput('consolidation', full.consolidation, input), full.consolidation); }
   const summaryAndPromotion = { ...full.consolidation, retrospect: { understandings: [], methods: [] } };
-  assert.deepEqual(validateOutput('consolidation', summaryAndPromotion, input), summaryAndPromotion);
-  input.trigger.reason = 'node_complete'; assert.deepEqual(validateOutput('consolidation', full.consolidation, input), full.consolidation);
+  input.trigger.reason = 'leave_timeout'; assert.deepEqual(validateOutput('consolidation', summaryAndPromotion, input), summaryAndPromotion);
+  input.trigger.reason = 'threshold'; assert.throws(() => validateOutput('consolidation', { ...full.consolidation, broaden: [] }, input), { code: 'OUTPUT_THRESHOLD' });
 });
 test('improvement cannot replace user parameters, modify checkers, or claim universal fixes without reports', () => {
   const e = envelope('improvement'); e.trigger.explicitParameters = [{ name: 'retentionDays', scopeNodeId: 'n1' }]; assert.throws(() => validateOutput('improvement', full.improvement, e), { code: 'OUTPUT_PROTECTED' });

@@ -25,6 +25,15 @@ export class ContextBuilder extends DomainService {
       return [{ item, version }];
     }).sort((a, b) => nodeIds.indexOf(a.item.nodeId) - nodeIds.indexOf(b.item.nodeId) || a.item.id.localeCompare(b.item.id));
   }
+  // What a list of goals shows about one goal. A summary written before main
+  // renamed the goal is hidden until it is refreshed; a "may have been put
+  // down" mark is shown only while no turn has come back to the goal since.
+  glance(node) {
+    const summary = this.summary(node);
+    if (!summary) return { oneLine: '' };
+    return { oneLine: node.summaryNameStale ? '' : summary.oneLine,
+      ...(summary.setDown && !node.summaryNameStale && summary.throughTurnIds.includes(node.lastOwnTurnId) ? { possiblySetDown: true } : {}) };
+  }
   summary(node) {
     const summary = node.currentSummaryId && this.repo.get('tree_summaries', node.currentSummaryId);
     if (!summary || summary.sourceRefs.some(ref => !this.resolveSource(ref)) || summary.throughTurnIds.some(id => {
@@ -92,7 +101,7 @@ export class ContextBuilder extends DomainService {
         methods: rows.filter(r => r.method?.long).map(({ item, method }) => ({ id: item.id, version: item.activeVersion, name: method.long.name, description: method.long.description })),
         supplements: rows.filter(r => r.supplement).map(({ item, version }) => ({ id: item.id, version: item.activeVersion, text: version.content })),
         experience: summary ? { version: summary.version, oneLine: summary.oneLine, ...(own ? { body: summary.body } : {}) } : null,
-        children: own ? this.repo.list('tree_nodes', n => !n.deleted && n.parentId === node.id).map(n => ({ id: n.id, name: n.name, status: n.status, oneLine: this.summary(n)?.oneLine ?? '' })).sort((a, b) => a.id.localeCompare(b.id)) : [],
+        children: own ? this.repo.list('tree_nodes', n => !n.deleted && n.parentId === node.id).map(n => ({ id: n.id, name: n.name, status: n.status, ...this.glance(n) })).sort((a, b) => a.id.localeCompare(b.id)) : [],
         probes: own ? this.repo.list('tree_items', i => i.nodeId === node.id && i.lifecycle === 'active' && i.probe).map(i => ({ itemId: i.id, version: i.activeVersion, what: i.probe.what })) : [] };
       const text = canonicalJson({ ...value, instruction: '同一节点以最后一份背景为准；旧版中没有继续列出的内容已撤销。' });
       return { key: `node:${node.id}`, nodeId: node.id, version: digest(value), text,
@@ -102,7 +111,7 @@ export class ContextBuilder extends DomainService {
     // Names/parent/status/oneLine are the explicitly permitted global discovery
     // view; the parent lets main see where each goal sits in the tree.
     // No sibling understanding, method, source text or summary body enters it.
-    const overview = this.repo.list('tree_nodes', n => !n.deleted && n.status === 'active').map(n => ({ id: n.id, parentId: n.parentId ?? null, name: n.name, status: n.status, oneLine: this.summary(n)?.oneLine ?? '' })).sort((a, b) => a.id.localeCompare(b.id));
+    const overview = this.repo.list('tree_nodes', n => !n.deleted && n.status === 'active').map(n => ({ id: n.id, parentId: n.parentId ?? null, name: n.name, status: n.status, ...this.glance(n) })).sort((a, b) => a.id.localeCompare(b.id));
     const text = canonicalJson({ globalOverview: overview });
     segments.unshift({ key: 'global-overview', nodeId: null, version: digest(overview), text,
       sourceRefs: this.repo.list('tree_nodes', n => !n.deleted && n.status === 'active').flatMap(n => this.summary(n)?.sourceRefs ?? []), itemVersions: [],

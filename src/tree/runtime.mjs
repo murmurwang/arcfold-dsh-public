@@ -645,6 +645,7 @@ export class TreeRuntime {
           { kind: 'program', id: 'source-recheck' }, () => { this.repo.save('tree_jobs', { ...intent, status: 'stale', error: { code: error.code, message: error.message } }, intent.revision); return { intentId: intent.id }; });
       }
     }
+    for (const plan of this.consolidation.departed()) this.enqueueSummary(plan);
     for (const plan of this.consolidation.due()) this.enqueueSummary(plan);
     for (const node of this.repo.list('tree_nodes', n => !n.deleted && n.status === 'completed' && n.statusOrigin !== 'cascade')) {
       if (this.repo.list('tree_jobs', j => ['learning', 'consolidation'].includes(j.role) && j.nodeIds.includes(node.id) && !done.has(j.status)).length) continue;
