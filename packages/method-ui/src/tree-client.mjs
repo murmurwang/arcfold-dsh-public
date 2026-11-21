@@ -10,6 +10,7 @@ export function installTreeClient(ctx) {
   };
   ctx.effect(() => () => { sources.forEach(source => source.dispose()); sources.clear(); }, 'Arcfold tree reads');
   ctx.effect(() => { const style = document.createElement('style'); style.dataset.plugin = 'arcfold-tree-v3'; style.textContent = typeof __ARCFOLD_TREE_CSS__ === 'string' ? __ARCFOLD_TREE_CSS__ : ''; document.head.append(style); return () => style.remove(); }, 'Arcfold tree appearance');
-  for (const [name, component] of [['conversation.input.dock', TreeDock], ['conversation.view', TreeView], ['conversation.chat.turnTail', ({ source, turn }) => React.createElement(TreeTurnTail, { source, nativeTurn: turn.turn })]])
-    ctx.slots.inject(name, () => ctx.slots.register({ name, id: 'arcfold-tree-v3', order: 20, label: 'Arcfold', inject: props }, component));
+  // The goal panel sits right under the native task panel (order 0), above the queue (order 20).
+  for (const [name, component, order] of [['conversation.input.dock', TreeDock, 5], ['conversation.view', TreeView, 20], ['conversation.chat.turnTail', ({ source, turn }) => React.createElement(TreeTurnTail, { source, nativeTurn: turn.turn }), 20]])
+    ctx.slots.inject(name, () => ctx.slots.register({ name, id: 'arcfold-tree-v3', order, label: 'Arcfold', inject: props }, component));
 }
