@@ -645,13 +645,10 @@ export class TreeRuntime {
           { kind: 'program', id: 'source-recheck' }, () => { this.repo.save('tree_jobs', { ...intent, status: 'stale', error: { code: error.code, message: error.message } }, intent.revision); return { intentId: intent.id }; });
       }
     }
-    for (const plan of this.consolidation.departed()) this.enqueueSummary(plan);
-    for (const plan of this.consolidation.due()) this.enqueueSummary(plan);
-    for (const node of this.repo.list('tree_nodes', n => !n.deleted && n.status === 'completed' && n.statusOrigin !== 'cascade')) {
-      if (this.repo.list('tree_jobs', j => ['learning', 'consolidation'].includes(j.role) && j.nodeIds.includes(node.id) && !done.has(j.status)).length) continue;
-      const plan = this.consolidation.plan(node.id, 'node_complete'); if (plan) this.enqueueSummary(plan);
-    }
-    for (const role of ['attribution', 'learning', 'consolidation', 'verification', 'improvement']) this.improvement.enqueue(role);
+    // Planning never stops the scan: a goal that cannot be planned is reported
+    // with its id and skipped, and an unexpected planning error is reported
+    // too, so the queued jobs below are always started.
+    try { this.planScan(); } catch (error) { if (!this.closed) this.diagnostic('scan_planning', error); }
     const ready = [...this.repo.list('tree_jobs', j => j.status === 'prepared' && j.role), ...this.jobs.queued()];
     let started = false;
     for (const job of ready.filter(j => !['main', 'attribution'].includes(j.role))) {
@@ -665,6 +662,20 @@ export class TreeRuntime {
       started = true;
     }
     return started;
+  }
+  planScan() {
+    const skip = reason => (nodeId, error) => { if (!busy.has(error.code)) this.diagnostic('summary_plan', error, { nodeId, reason }); };
+    const enqueue = (plan, reason) => { try { this.enqueueSummary(plan); } catch (error) { skip(reason)(plan.nodeId, error); } };
+    for (const plan of this.consolidation.departed(skip('node_leave'))) enqueue(plan, 'node_leave');
+    for (const plan of this.consolidation.due(undefined, skip('leave_timeout'))) enqueue(plan, 'leave_timeout');
+    for (const node of this.repo.list('tree_nodes', n => !n.deleted && n.status === 'completed' && n.statusOrigin !== 'cascade')) {
+      if (this.repo.list('tree_jobs', j => ['learning', 'consolidation'].includes(j.role) && j.nodeIds.includes(node.id) && !done.has(j.status)).length) continue;
+      let plan; try { plan = this.consolidation.plan(node.id, 'node_complete'); } catch (error) { skip('node_complete')(node.id, error); continue; }
+      if (plan) enqueue(plan, 'node_complete');
+    }
+    for (const role of ['attribution', 'learning', 'consolidation', 'verification', 'improvement']) {
+      try { this.improvement.enqueue(role); } catch (error) { if (!busy.has(error.code)) this.diagnostic('improvement_queue', error, { role }); }
+    }
   }
   async runWorker(id) {
     const slot = await this.requestSlots.acquire(this.shutdown.signal);

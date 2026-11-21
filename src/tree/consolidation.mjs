@@ -115,7 +115,9 @@ export class ConsolidationService {
   // renamed by main is consolidated again so its one line matches the name.
   // plan() returns nothing when the latest summary already covers the same
   // turns, so leaving or renaming twice over the same turns adds no job.
-  departed() {
+  // onError(nodeId, error) receives a goal that cannot be planned; the other
+  // goals are still planned. Without it the goal is skipped silently.
+  departed(onError = () => {}) {
     // Runs on every worker scan, so turns, links and learning are indexed once
     // per scan instead of being listed again for every goal.
     const turns = this.repo.list('tree_turns'), byId = new Map(turns.map(t => [t.id, t])), own = new Map(), learning = new Set();
@@ -132,17 +134,21 @@ export class ConsolidationService {
       // learning commits would go stale, and the same turns are not planned twice.
       if (learning.has(node.id) || turns.some(t => t.status === 'open' && t.nodeIds.includes(node.id) && t.startedAt > last.startedAt)) continue;
       try { const plan = this.plan(node.id, 'node_leave'); if (plan) result.push(plan); }
-      // Learning of the last turns may still be running, or a source may be gone;
-      // either way this goal waits and the others are still planned.
-      catch (error) { if (!['SUMMARY_LEARNING_RECEIPT', 'SUMMARY_SOURCE_REVOKED'].includes(error.code)) throw error; }
+      // Learning of the last turns may still be committing: this goal waits.
+      // Anything else (a missing source) is reported; the others are planned.
+      catch (error) { if (error.code !== 'SUMMARY_LEARNING_RECEIPT') onError(node.id, error); }
     }
     return result;
   }
-  due(at = this.repo.now()) {
+  // One goal that cannot be planned (a missing source, unsettled learning)
+  // must not stop the others: with onError it is reported and skipped.
+  due(at = this.repo.now(), onError = (nodeId, error) => { throw error; }) {
     const now = Date.parse(at), result = [];
     for (const node of this.repo.list('tree_nodes', n => !n.deleted && n.lastOwnTurnAt)) {
       const timeout = this.builder.repo.ancestors(node.id).reverse().map(n => this.repo.get('tree_parameters', digest(['parameter', 'leaveTimeoutHours', n.id]))).find(Boolean)?.value ?? 24;
-      if (now - Date.parse(node.lastOwnTurnAt) >= timeout * 3600000) { const plan = this.plan(node.id, 'leave_timeout'); if (plan) result.push(plan); }
+      if (now - Date.parse(node.lastOwnTurnAt) < timeout * 3600000) continue;
+      try { const plan = this.plan(node.id, 'leave_timeout'); if (plan) result.push(plan); }
+      catch (error) { onError(node.id, error); }
     }
     return result;
   }
