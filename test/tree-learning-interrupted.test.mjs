@@ -195,7 +195,7 @@ test('a host stop while a learning request is in flight is resolved as lost afte
   assert.equal(state.status, 'failed', JSON.stringify({ error: state.error, recovered: recovered.filter(r => r.id === job.id) }));
   assert.equal(state.error.code, 'RESULT_LOST'); assert.equal(state.invocationIds.length, 1);
   assert.equal(learningOf(repo, stopped).length, 1);
-  assert.deepEqual(learningOf(repo, later).map(j => j.status), ['committed']);
+  assert.deepEqual(learningOf(repo, later).map(j => j.status), ['committed'], JSON.stringify({ later: learningOf(repo, later).map(j => [j.error, j.nativeSessionId, j.invocationIds]), stopped: [state.nativeSessionId, repo.list('tree_invocations').filter(i => i.jobId === job.id || learningOf(repo, later).some(j => j.id === i.jobId)).map(i => [i.jobId.slice(0, 8), i.nativeTurn, i.nativeStep, i.stepStartSeq, i.state])], log: await restarted.owner.readEvents(state.nativeSessionId).then(e => e?.map(x => `${x.seq}:${x.type}${x.type === 'turn/end' ? ':' + JSON.stringify(x.data.reason) : ''}`)) }));
   assert.equal(restarted.requests.filter(r => r.role === 'learning').length, 1);
   const diagnostics = Object.values(repo.meta().runtimeDiagnostics ?? {}).filter(d => d.kind === 'learning_interrupted');
   assert.deepEqual(diagnostics.map(d => [d.code, d.jobId, d.nodeId]), [['RESULT_LOST', job.id, stopped.nodeIds[0]]]);
