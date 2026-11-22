@@ -8,7 +8,7 @@ const text = body => body.messages.flatMap(m => m.content ?? []).filter(b => b.t
 
 // Synthetic replay of the 0.6.0 shape: a planning goal, then a turn in which the
 // conversation names its real direction and goes one layer deeper.
-async function planningConversation(t, { announce = true } = {}) {
+async function planningConversation(t, { announce = true, extra = {} } = {}) {
   let phase = 'open', step = 0, goal;
   const seen = [];
   const f = await integratedFixture(t, (row, { repo }) => {
@@ -19,8 +19,8 @@ async function planningConversation(t, { announce = true } = {}) {
     if (row.role === 'verification') return emptyVerification();
     if (row.role !== 'main' || phase !== 'deepen') return '合成答复。';
     seen.push(text(row.body)); step++;
-    if (step === 1) return { tool: { id: 'rename-goal', name: 'arcfold_revise_goal', args: { op: 'rename', nodeId: goal, expectedRevision: repo.get('tree_nodes', goal).revision, name: RENAMED, reason: '用户把整个计划概括成两条主线' } } };
-    if (step === 2) return { tool: { id: 'child-goal', name: 'arcfold_revise_goal', args: { op: 'create_child', nodeId: goal, expectedRevision: repo.get('tree_nodes', goal).revision, name: CHILD, reason: '讨论进到两条主线的具体内容' } } };
+    if (step === 1) return { tool: { id: 'rename-goal', name: 'arcfold_revise_goal', args: { op: 'rename', nodeId: goal, expectedRevision: repo.get('tree_nodes', goal).revision, name: RENAMED, reason: '用户把整个计划概括成两条主线', ...extra } } };
+    if (step === 2) return { tool: { id: 'child-goal', name: 'arcfold_revise_goal', args: { op: 'create_child', nodeId: goal, expectedRevision: repo.get('tree_nodes', goal).revision, name: CHILD, reason: '讨论进到两条主线的具体内容', ...extra } } };
     return announce ? `我把目标改成了「${RENAMED}」，并在下面新建「${CHILD}」，这一轮记在它下面。` : '好的，继续讨论。';
   });
   f.runtime.attribution.timers = { setTimeout: fn => setTimeout(fn, 30000), clearTimeout };
@@ -46,6 +46,29 @@ test('main revises its goal in the turn: a rename is visible on the next step, a
   const next = await f.turn(agent, '继续。');
   assert.deepEqual(next.nodeIds, [child], 'the next attribution starts from the revised goal');
   assert.equal(f.runtime.diagnostics?.filter?.(d => d.kind === 'goal_revision_apply').length ?? 0, 0);
+});
+
+// Shape of F50 (0.7.0 + main@21f8624, session 634d2b46, turns 9-12): the model
+// fills the optional parentId with an empty string on every rename and keeps
+// doing so after the error, so an empty parentId must count as not given.
+for (const [label, parentId] of [['an empty parentId', ''], ['a blank parentId', '  ']]) {
+  test(`rename and create_child succeed when main also passes ${label}`, async t => {
+    const { f, goal, second, seen } = await planningConversation(t, { extra: { parentId } });
+    assert.equal(f.repo.get('tree_nodes', goal).name, RENAMED);
+    assert.ok(seen[1].includes(RENAMED), 'the rename is visible on the next step');
+    const turn = f.repo.get('tree_turns', second.id);
+    assert.deepEqual(turn.goalRevisions.map(r => [r.op, r.state]), [['rename', 'applied'], ['create_child', 'applied']]);
+    assert.ok(turn.goalRevisions.every(r => r.parentId === undefined), 'an empty parentId is not stored');
+    const child = turn.goalRevisions.find(r => r.op === 'create_child').createdNodeId;
+    assert.equal(f.repo.get('tree_nodes', child).parentId, goal);
+  });
+}
+
+test('rename with a real parentId is refused with a hint to leave it out', async t => {
+  const { f, goal, second, seen } = await planningConversation(t, { extra: { parentId: 'f2db1f1f-6468-4780-9327-4a4b536b99bb' } });
+  assert.match(seen[1], /parentId is only for move[^"]*omit parentId/, 'main is told to omit parentId');
+  assert.notEqual(f.repo.get('tree_nodes', goal).name, RENAMED);
+  assert.deepEqual(f.repo.get('tree_turns', second.id).goalRevisions ?? [], []);
 });
 
 // Synthetic shape of F34 (0.6.0 + 035, turn 29): the turn is filed under a
