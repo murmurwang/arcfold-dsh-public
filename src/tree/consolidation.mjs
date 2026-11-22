@@ -47,9 +47,11 @@ export class ConsolidationService {
     const { material: _material, learningRecords, ...summaryPlan } = plan;
     // Each covered learning keeps what it saw and produced. Its then-current
     // items, constraints and receipts are superseded by this input's own.
+    // Absent fields stay absent: a saved record cannot hold undefined.
+    const present = value => Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined));
     const learningHistory = learningRecords.map(record => {
-      if (!record.input) return { jobId: record.jobId, invalidated: true, reason: record.reason };
-      return { jobId: record.jobId, input: { currentTurn: record.input.currentTurn, sourceIds: record.input.sources.map(s => s.id) }, output: record.output, receipt: record.receipt, invalidated: record.invalidated };
+      if (!record.input) return present({ jobId: record.jobId, invalidated: true, reason: record.reason });
+      return present({ jobId: record.jobId, input: present({ currentTurn: record.input.currentTurn, sourceIds: record.input.sources.map(s => s.id) }), output: record.output, receipt: record.receipt, invalidated: record.invalidated });
     });
     const input = { inputVersion: CONTRACT, role: 'consolidation', scope: { nodeIds: [plan.nodeId], ancestorPaths: context.ancestorPaths, treeRevision: context.treeRevision }, sources, knownItems,
       allowedIds: { nodeIds: [...new Set(context.ancestorPaths.flat())], fileIds: [], subjectIds: [] }, trigger: { reason: plan.reason }, changeReceipts: [], summaryPlan, learningHistory, constraints: context.segments };
