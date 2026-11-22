@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture } from './fixtures/tree-domain/helpers.mjs';
+import { currentGoalAbove } from '../src/tree/tree.mjs';
 
 // A planning goal that the conversation outgrows: the shape of the 0.6.0 case
 // where twelve turns stayed on the opening wording of one goal.
@@ -169,6 +170,57 @@ test('move is dropped when the parent is gone, below the goal itself, or already
   record(application, { id: 'm1' }); record(child, { id: 'm2' }); record(f.repo.rootId(), { id: 'm3' });
   assert.deepEqual(apply().revisions.map(r => [r.id, r.state, r.reason]), [['m1', 'dropped', 'parent_unavailable'], ['m2', 'dropped', 'tree_cycle'], ['m3', 'dropped', 'already_there']]);
   assert.equal(f.repo.get('tree_nodes', article).parentId, f.repo.rootId());
+});
+
+// F47 (0.7.0 replay, turn 49): asked to tidy the whole goal tree, the turn sits
+// on the root, and the misplaced article is a goal below it rather than the
+// current goal. move takes any goal below a current goal of the turn.
+function tidyAtRoot(t) {
+  const f = fixture(t), root = f.repo.rootId(), application = f.create('月底前完成申请'), article = f.create('写出第一篇文章'), opening = f.create('第一篇的开篇现场', article);
+  const turn = f.tree.applyAttribution(f.attribution([{ action: 'continue', nodeId: root }])).result.turnId;
+  const record = (nodeId, parentId, id) => {
+    f.asModel('main', [root]);
+    return f.tree.recordGoalRevision(f.cmd({ turnId: turn, revision: { id, op: 'move', nodeId, parentId, reason: '用户要求整体整理目标体系', callId: `c-${id}`, state: 'pending' } }, f.expected('tree_turns', turn)));
+  };
+  const apply = () => { f.asModel('main', [root]); return f.tree.applyGoalRevisions(f.cmd({ turnId: turn, mainCommitted: true }, f.expected('tree_turns', turn))).result; };
+  return { f, root, application, article, opening, turn, record, apply };
+}
+
+test('a goal below the current goal is the one it sits under; the current goal is its own; others have none', t => {
+  const { f, root, application, article, opening } = tidyAtRoot(t);
+  assert.equal(currentGoalAbove(f.repo, [root], article), root, 'a child of the root sits under the root');
+  assert.equal(currentGoalAbove(f.repo, [root], opening), root, 'so does a grandchild');
+  assert.equal(currentGoalAbove(f.repo, [article], opening), article);
+  assert.equal(currentGoalAbove(f.repo, [article], article), article, 'the current goal itself');
+  assert.equal(currentGoalAbove(f.repo, [root, article], opening), article, 'the nearest current goal wins');
+  assert.equal(currentGoalAbove(f.repo, [article], application), null, 'a goal on another branch is outside the turn');
+  assert.equal(currentGoalAbove(f.repo, [article], root), null, 'an ancestor is outside the turn');
+  assert.equal(currentGoalAbove(f.repo, [root], 'missing'), null);
+});
+
+test('on the root, move puts a goal below it under the right parent at the turn end and keeps the turn on the root', t => {
+  const { f, root, application, article, opening, turn, record, apply } = tidyAtRoot(t), before = f.repo.get('tree_turns', turn);
+  record(article, application, 'move-article');
+  assert.equal(f.repo.get('tree_nodes', article).parentId, root, 'still at the root while the turn runs');
+  assert.deepEqual(apply().revisions.map(r => [r.op, r.state]), [['move', 'applied']]);
+  const node = f.repo.get('tree_nodes', article), row = f.repo.get('tree_turns', turn);
+  assert.equal(node.parentId, application); assert.equal(node.name, '写出第一篇文章');
+  assert.equal(f.repo.get('tree_nodes', opening).parentId, article, 'its own children go with it');
+  assert.deepEqual(row.nodeIds, [root]); assert.equal(row.assignmentRevision, before.assignmentRevision);
+  assert.equal(row.goalRevisions[0].fromParentId, root);
+  f.repo.assertTree();
+});
+
+test('a move of a goal that has left the current goal before the turn end is dropped as out of scope', t => {
+  const f = fixture(t), application = f.create('月底前完成申请'), article = f.create('写出第一篇文章'), opening = f.create('第一篇的开篇现场', article);
+  const turn = f.tree.applyAttribution(f.attribution([{ action: 'continue', nodeId: article }])).result.turnId;
+  f.asModel('main', [article]);
+  f.tree.recordGoalRevision(f.cmd({ turnId: turn, revision: { id: 'm', op: 'move', nodeId: opening, parentId: application, reason: '开篇其实属于申请', callId: 'c-m', state: 'pending' } }, f.expected('tree_turns', turn)));
+  f.asUser(); f.tree.moveNode(f.cmd({ nodeId: opening, parentId: f.repo.rootId(), sourceRefs: [] }, f.expected('tree_nodes', opening)));
+  f.asModel('main', [article]);
+  const result = f.tree.applyGoalRevisions(f.cmd({ turnId: turn, mainCommitted: true }, f.expected('tree_turns', turn))).result;
+  assert.deepEqual(result.revisions.map(r => [r.state, r.reason]), [['dropped', 'out_of_scope']]);
+  assert.equal(f.repo.get('tree_nodes', opening).parentId, f.repo.rootId(), 'the tree stays as the user left it');
 });
 
 test('a move revision carries a parent and no name; other ops carry no parent', t => {
