@@ -1,5 +1,5 @@
 import { canonicalJson, digest, fail, shape, text, integer, array, oneOf } from './contracts.mjs';
-import { TreeService } from './tree.mjs';
+import { TreeService, currentGoalAbove } from './tree.mjs';
 import { ExperienceService } from './experience.mjs';
 import { bindTurnSnapshot } from './ui.mjs';
 import { HarnessError } from '@deepseek-ai/dsh-llm';
@@ -17,7 +17,7 @@ export const TREE_TOOLS = Object.freeze({
 });
 const descriptions = {
   arcfold_mark_complete: '把本轮目标标为助手判断的完成，保留理由和来源；先检查对应钩子，用户仍可重新打开。',
-  arcfold_revise_goal: '目标是这件事要做成的结果。只在本轮对话确实显出要做成的结果变了、或目标放错了位置时修改；同一结果下换做法或步骤不改。依据须是本轮用户说出的结果或用户认可的内容，只是助手对下一步的理解时不改；拿不准就先问用户。rename：同一个结果有了更准确的说法，改写当前目标名字，下一步即生效。create_child：对话进到更具体的一层，在当前目标或它路径上的某一层下新建子目标并把本轮转过去，nodeId填那一层。add_parent：讨论里出现了更上层的目标，在当前目标之上加一层，并把本轮转到新上层。switch：本轮其实在做另一个已有候选目标，nodeId填那个目标，不填name。move：当前目标其实属于全局概貌里另一个进行中目标，nodeId填当前目标，parentId填新上级，不填name；挪的是原目标，经历和条目跟着走。后四种在本轮回答结束时生效。name以用户为主语，写具体对象和要做成的结果，不写对齐、讨论、整理这类过程。修改后在回复里用一句话告诉用户改成了什么或挪到了哪里，用户可以当场纠正。',
+  arcfold_revise_goal: '目标是这件事要做成的结果。只在本轮对话确实显出要做成的结果变了、或目标放错了位置时修改；同一结果下换做法或步骤不改。依据须是本轮用户说出的结果或用户认可的内容，只是助手对下一步的理解时不改；拿不准就先问用户。rename：同一个结果有了更准确的说法，改写当前目标名字，下一步即生效。create_child：对话进到更具体的一层，在当前目标或它路径上的某一层下新建子目标并把本轮转过去，nodeId填那一层。add_parent：讨论里出现了更上层的目标，在当前目标之上加一层，并把本轮转到新上层。switch：本轮其实在做另一个已有候选目标，nodeId填那个目标，不填name。move：当前目标或它下面的某个目标其实属于全局概貌里另一个进行中目标，nodeId填要挪的那个目标，parentId填新上级，不填name；挪当前目标时expectedRevision填它自己的版本，挪它下面的目标时填编号表里当前目标的版本；挪的是原目标，经历、条目和下级跟着走。后四种在本轮回答结束时生效。name以用户为主语，写具体对象和要做成的结果，不写对齐、讨论、整理这类过程。修改后在回复里用一句话告诉用户改成了什么或挪到了哪里，用户可以当场纠正。',
   arcfold_read_history: '在当前节点的上级链或直接子节点分页读取原始经历或摘要。来源已撤回时不返回原文。',
   arcfold_read_method: '读取当前范围内一个有效方法的完整说明、准确版本和脚本逻辑编号。读取不扩大权限。',
   arcfold_run_method_script: '通过受限执行入口运行当前有效方法脚本。自动检查版本、权限和快照；参数不接受路径、命令或权限覆盖。',
@@ -60,17 +60,24 @@ export async function executeTreeTool(ctx, runtime, name, args, exec) {
     shape(args, ['op', 'nodeId', 'expectedRevision', 'reason'], ['name', 'parentId']); oneOf(args.op, ['rename', 'add_parent', 'create_child', 'switch', 'move'], 'op');
     integer(args.expectedRevision, 'expectedRevision', 1); text(args.reason, 'reason', 2000);
     if (args.op !== 'move' && args.parentId !== undefined) fail('INVALID_FIELD', 'parentId is only for move');
+    // The revision main must quote: the target's own, except for a move of a
+    // goal below the current one, where it quotes the current goal it was given.
+    let guardId = args.nodeId;
     if (args.op === 'move') {
-      // The current goal keeps its identity and history; only its parent
-      // changes. The new parent is one of the goals main sees in the overview.
+      // The moved goal keeps its identity and history; only its parent changes.
+      // It is a current goal or a goal below one, so tidying from an upper goal
+      // can fix a misplaced goal under it. The new parent is one of the goals
+      // main sees in the overview.
       if (args.name !== undefined) {
         const given = typeof args.name === 'string' ? args.name.trim() : null, own = repo.get('tree_nodes', args.nodeId)?.name.trim();
         if (given === null || (given !== '' && given !== own)) fail('INVALID_FIELD', 'move keeps the goal name: omit name, or move first and rename in the next turn');
         args = { ...args }; delete args.name;
       }
       text(args.parentId, 'parentId', 200);
-      if (!scope.nodeIds.includes(args.nodeId)) fail('OUT_OF_SCOPE', 'Only a current goal of this turn can be moved');
       if (args.nodeId === repo.rootId()) fail('ROOT_INVARIANT', 'The root goal cannot move');
+      const above = currentGoalAbove(repo, scope.nodeIds, args.nodeId);
+      if (!above) fail('OUT_OF_SCOPE', 'Only a current goal of this turn, or a goal below it, can be moved');
+      guardId = above;
       const parent = repo.get('tree_nodes', args.parentId), branch = repo.meta().attributionSelections?.[agent.session.id]?.nodeId;
       if (!parent || parent.deleted || parent.status !== 'active') fail('OUT_OF_SCOPE', 'The new parent must be an active goal in the overview');
       if (branch && !repo.ancestors(parent.id).some(a => a.id === branch)) fail('OUT_OF_SCOPE', 'The new parent must be inside the branch selected for this chat');
@@ -93,7 +100,7 @@ export async function executeTreeTool(ctx, runtime, name, args, exec) {
     }
     const node = repo.get('tree_nodes', args.nodeId);
     if (!node || node.deleted) fail('NODE_NOT_FOUND', 'Goal not found');
-    if (node.revision !== args.expectedRevision) fail('REVISION_CONFLICT', 'Goal changed; read it again before revising');
+    if (repo.get('tree_nodes', guardId).revision !== args.expectedRevision) fail('REVISION_CONFLICT', guardId === args.nodeId ? 'Goal changed; read it again before revising' : 'The current goal changed; use its revision from this turn');
     const tree = new TreeService(options), sourceRefs = job.input.sources.map(s => s.ref), revisionId = digest(['goal-revision', scope.turnId, exec.callId]);
     const record = (state, extra = {}) => {
       const turn = repo.get('tree_turns', scope.turnId);

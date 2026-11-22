@@ -186,6 +186,52 @@ test('main sees where each goal sits and moves the current goal under another on
   assert.deepEqual(fourth.nodeIds, [ids.article]);
 });
 
+// Shape of F47 (0.7.0 replay, turn 49): asked to tidy the whole goal tree, the
+// turn sits on the root. The article below it belongs under the application;
+// main moves it quoting the root's revision, the only one it was given.
+test('on the root, main moves a misplaced goal below it, and cannot move a goal outside its current goal', async t => {
+  const APP = '月底前完成申请', ARTICLE = '写出第一篇文章，讲清面对的问题';
+  let turnNo = 0, step = 0;
+  const ids = {}, raw = [], seen = [];
+  const f = await integratedFixture(t, (row, { repo }) => {
+    if (row.role === 'attribution') {
+      if (turnNo === 1) return { actions: [{ action: 'create', name: APP }], statusChanges: [] };
+      if (turnNo === 2) return { actions: [{ action: 'create', name: ARTICLE }], statusChanges: [] };
+      if (turnNo === 3) return { actions: [{ action: 'continue', nodeId: repo.rootId() }], statusChanges: [] };
+      return { actions: [{ action: 'continue', nodeId: ids.article }], statusChanges: [] };
+    }
+    if (row.role === 'learning') return emptyLearning();
+    if (row.role === 'verification') return emptyVerification();
+    if (row.role !== 'main' || turnNo < 3) return '合成答复。';
+    seen.push(text(row.body)); raw.push(JSON.stringify(row.body)); step++;
+    const move = (id, nodeId, expectedRevision, parentId) => ({ tool: { id, name: 'arcfold_revise_goal', args: { op: 'move', nodeId, expectedRevision, parentId, reason: '用户要求整体整理目标体系' } } });
+    const root = repo.get('tree_nodes', repo.rootId());
+    if (turnNo === 3 && step === 1) return move('move-stale', ids.article, root.revision + 100, ids.app);
+    if (turnNo === 3 && step === 2) return move('move-article', ids.article, root.revision, ids.app);
+    if (turnNo === 4 && step === 1) return move('move-outside', ids.app, repo.get('tree_nodes', ids.article).revision, repo.rootId());
+    return turnNo === 3 ? `把「${ARTICLE}」挪到「${APP}」下面。` : '继续写第一篇。';
+  });
+  f.runtime.attribution.timers = { setTimeout: fn => setTimeout(fn, 30000), clearTimeout };
+  const agent = await f.main('goal-move-below-native');
+  turnNo = 1; ids.app = (await f.turn(agent, '月底前要完成申请。')).nodeIds[0];
+  turnNo = 2; ids.article = (await f.turn(agent, '开始准备第一篇文章。')).nodeIds[0];
+  assert.equal(f.repo.get('tree_nodes', ids.article).parentId, f.repo.rootId());
+  turnNo = 3; const third = await f.turn(agent, '纵观现在的目标体系 整体整理一下');
+  assert.deepEqual(third.nodeIds, [f.repo.rootId()], 'the tidy-up turn sits on the root');
+  assert.match(seen[0], /挪下面的目标时expectedRevision填当前目标的版本/, 'the turn table tells main which revision to quote');
+  assert.match(raw[1], /REVISION_CONFLICT|use its revision from this turn/, 'a revision other than the root\'s is refused and main sees why');
+  const turn = f.repo.get('tree_turns', third.id);
+  assert.deepEqual(turn.goalRevisions.map(r => [r.op, r.state, r.announced]), [['move', 'applied', true]]);
+  assert.equal(f.repo.get('tree_nodes', ids.article).parentId, ids.app, 'the article is under the application after the turn');
+  assert.equal(f.repo.get('tree_nodes', ids.article).name, ARTICLE);
+  assert.deepEqual(turn.nodeIds, [f.repo.rootId()], 'the turn stays on the root');
+  turnNo = 4; step = 0; raw.length = 0;
+  const fourth = await f.turn(agent, '继续写第一篇。');
+  assert.deepEqual(fourth.nodeIds, [ids.article]);
+  assert.match(raw[1], /OUT_OF_SCOPE|or a goal below it/, 'from the article, the application above it is outside the turn and cannot be moved');
+  assert.equal(f.repo.get('tree_nodes', ids.app).parentId, f.repo.rootId());
+});
+
 test('the goal wording given to main is about the result to achieve, not the current step', async t => {
   const { seen } = await planningConversation(t);
   assert.ok(!seen[0].includes('此刻在做的事'), 'the old "what is being done right now" wording is gone');

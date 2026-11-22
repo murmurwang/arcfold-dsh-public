@@ -2,6 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { array, canonicalJson, digest, fail, integer, oneOf, shape, sourceRefs, text, CATEGORIES, STATUSES } from './contracts.mjs';
 import { recordKey } from './repository.mjs';
 
+// The current goal of a turn that a goal is, or sits below; null when the goal
+// is outside the turn. main may move such a goal, so tidying the tree from an
+// upper goal can fix a misplaced goal under it.
+export function currentGoalAbove(repo, nodeIds, id) {
+  const node = repo.get('tree_nodes', id); if (!node || node.deleted) return null;
+  if (nodeIds.includes(id)) return id;
+  return repo.ancestors(id).reverse().find(n => nodeIds.includes(n.id))?.id ?? null;
+}
+
 // The adapter supplies context and source resolution. Nothing in command.input
 // can impersonate a user, expand the current turn, or create source evidence.
 export class DomainService {
@@ -153,7 +162,9 @@ export class TreeService extends DomainService {
         if (!target || target.deleted) { Object.assign(revision, { state: 'dropped', reason: 'node_missing' }); continue; }
         if (revision.op === 'move') {
           // The goal keeps its id, name, items and summaries; the turn stays on
-          // it. Only the parent changes, so later turns carry the new path.
+          // its current goal. Only the parent changes, so later turns carry the
+          // new path. The goal must still be at or below a goal main was given.
+          if (!currentGoalAbove(this.repo, turn.nodeIds, target.id)) { Object.assign(revision, { state: 'dropped', reason: 'out_of_scope' }); continue; }
           const parent = this.repo.get('tree_nodes', revision.parentId);
           if (!parent || parent.deleted || parent.status !== 'active') { Object.assign(revision, { state: 'dropped', reason: 'parent_unavailable' }); continue; }
           if (target.id === this.repo.rootId() || this.repo.ancestors(parent.id).some(a => a.id === target.id)) { Object.assign(revision, { state: 'dropped', reason: 'tree_cycle' }); continue; }
