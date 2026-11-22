@@ -59,7 +59,10 @@ export async function executeTreeTool(ctx, runtime, name, args, exec) {
   if (name === 'arcfold_revise_goal') {
     shape(args, ['op', 'nodeId', 'expectedRevision', 'reason'], ['name', 'parentId']); oneOf(args.op, ['rename', 'add_parent', 'create_child', 'switch', 'move'], 'op');
     integer(args.expectedRevision, 'expectedRevision', 1); text(args.reason, 'reason', 2000);
-    if (args.op !== 'move' && args.parentId !== undefined) fail('INVALID_FIELD', 'parentId is only for move');
+    // Some models fill the optional parentId with an empty string on every
+    // call and keep doing so after an error; outside move that means not given.
+    if (args.op !== 'move' && typeof args.parentId === 'string' && args.parentId.trim() === '') { args = { ...args }; delete args.parentId; }
+    if (args.op !== 'move' && args.parentId !== undefined) fail('INVALID_FIELD', 'parentId is only for move: omit parentId for this op');
     // The revision main must quote: the target's own, except for a move of a
     // goal below the current one, where it quotes the current goal it was given.
     let guardId = args.nodeId;

@@ -8,9 +8,9 @@ const text = body => body.messages.flatMap(m => m.content ?? []).filter(b => b.t
 
 // Synthetic replay of the 0.6.0 shape: a planning goal, then a turn in which the
 // conversation names its real direction and goes one layer deeper.
-async function planningConversation(t, { announce = true } = {}) {
+async function planningConversation(t, { announce = true, extra = {} } = {}) {
   let phase = 'open', step = 0, goal;
-  const seen = [];
+  const seen = [], raw = [];
   const f = await integratedFixture(t, (row, { repo }) => {
     if (row.role === 'attribution') return phase === 'open'
       ? { actions: [{ action: 'create', name: '把计划拆成每日待办' }], statusChanges: [] }
@@ -18,9 +18,9 @@ async function planningConversation(t, { announce = true } = {}) {
     if (row.role === 'learning') return emptyLearning();
     if (row.role === 'verification') return emptyVerification();
     if (row.role !== 'main' || phase !== 'deepen') return '合成答复。';
-    seen.push(text(row.body)); step++;
-    if (step === 1) return { tool: { id: 'rename-goal', name: 'arcfold_revise_goal', args: { op: 'rename', nodeId: goal, expectedRevision: repo.get('tree_nodes', goal).revision, name: RENAMED, reason: '用户把整个计划概括成两条主线' } } };
-    if (step === 2) return { tool: { id: 'child-goal', name: 'arcfold_revise_goal', args: { op: 'create_child', nodeId: goal, expectedRevision: repo.get('tree_nodes', goal).revision, name: CHILD, reason: '讨论进到两条主线的具体内容' } } };
+    seen.push(text(row.body)); raw.push(JSON.stringify(row.body)); step++;
+    if (step === 1) return { tool: { id: 'rename-goal', name: 'arcfold_revise_goal', args: { op: 'rename', nodeId: goal, expectedRevision: repo.get('tree_nodes', goal).revision, name: RENAMED, reason: '用户把整个计划概括成两条主线', ...extra } } };
+    if (step === 2) return { tool: { id: 'child-goal', name: 'arcfold_revise_goal', args: { op: 'create_child', nodeId: goal, expectedRevision: repo.get('tree_nodes', goal).revision, name: CHILD, reason: '讨论进到两条主线的具体内容', ...extra } } };
     return announce ? `我把目标改成了「${RENAMED}」，并在下面新建「${CHILD}」，这一轮记在它下面。` : '好的，继续讨论。';
   });
   f.runtime.attribution.timers = { setTimeout: fn => setTimeout(fn, 30000), clearTimeout };
@@ -30,7 +30,7 @@ async function planningConversation(t, { announce = true } = {}) {
   phase = 'deepen';
   const second = await f.turn(agent, '整个计划其实是两条线，我们先讨论这两条线的具体内容。');
   phase = 'after';
-  return { f, agent, goal, second, seen };
+  return { f, agent, goal, second, seen, raw };
 }
 
 test('main revises its goal in the turn: a rename is visible on the next step, a child takes the turn at its end', async t => {
@@ -46,6 +46,74 @@ test('main revises its goal in the turn: a rename is visible on the next step, a
   const next = await f.turn(agent, '继续。');
   assert.deepEqual(next.nodeIds, [child], 'the next attribution starts from the revised goal');
   assert.equal(f.runtime.diagnostics?.filter?.(d => d.kind === 'goal_revision_apply').length ?? 0, 0);
+});
+
+// Shape of F50 (0.7.0 + main@21f8624, session 634d2b46, turns 9-12): the model
+// fills the optional parentId with an empty string on every rename and keeps
+// doing so after the error, so an empty parentId must count as not given.
+for (const [label, parentId] of [['an empty parentId', ''], ['a blank parentId', '  ']]) {
+  test(`rename and create_child succeed when main also passes ${label}`, async t => {
+    const { f, goal, second, seen } = await planningConversation(t, { extra: { parentId } });
+    assert.equal(f.repo.get('tree_nodes', goal).name, RENAMED);
+    assert.ok(seen[1].includes(RENAMED), 'the rename is visible on the next step');
+    const turn = f.repo.get('tree_turns', second.id);
+    assert.deepEqual(turn.goalRevisions.map(r => [r.op, r.state]), [['rename', 'applied'], ['create_child', 'applied']]);
+    assert.ok(turn.goalRevisions.every(r => r.parentId === undefined), 'an empty parentId is not stored');
+    const child = turn.goalRevisions.find(r => r.op === 'create_child').createdNodeId;
+    assert.equal(f.repo.get('tree_nodes', child).parentId, goal);
+  });
+}
+
+test('rename with a real parentId is refused with a hint to leave it out', async t => {
+  const { f, goal, second, raw } = await planningConversation(t, { extra: { parentId: 'f2db1f1f-6468-4780-9327-4a4b536b99bb' } });
+  assert.match(raw[1], /parentId is only for move[^"]*omit parentId/, 'main is told to omit parentId');
+  assert.notEqual(f.repo.get('tree_nodes', goal).name, RENAMED);
+  assert.deepEqual(f.repo.get('tree_turns', second.id).goalRevisions ?? [], []);
+});
+
+test('empty parentId allows adding a parent and switching back to the child, but cannot move it', async t => {
+  const childName = '写完第一篇文章', parentName = '完成申请';
+  let childId, action, reply, reason, resultRequest;
+  const f = await integratedFixture(t, (row, { repo }) => {
+    if (row.role === 'attribution') return { actions: [childId
+      ? { action: 'continue', nodeId: row.input.scope.nodeIds[0] }
+      : { action: 'create', name: childName }], statusChanges: [] };
+    if (row.role === 'learning') return emptyLearning();
+    if (row.role === 'verification') return emptyVerification();
+    if (row.role !== 'main' || !childId) return '好。';
+    if (action) {
+      const op = action;
+      action = undefined;
+      const args = { op, nodeId: childId, expectedRevision: repo.get('tree_nodes', childId).revision, reason, parentId: '' };
+      if (op === 'add_parent') args.name = parentName;
+      return { tool: { id: op, name: 'arcfold_revise_goal', args } };
+    }
+    resultRequest = row.body;
+    return reply;
+  });
+  f.runtime.attribution.timers = { setTimeout: fn => setTimeout(fn, 30000), clearTimeout };
+  const agent = await f.main('empty-parent-goal-operations');
+  childId = (await f.turn(agent, childName)).nodeIds[0];
+  async function revise(op, message, answer) {
+    action = op;
+    reason = message;
+    reply = answer;
+    resultRequest = undefined;
+    const turn = await f.turn(agent, message);
+    return f.repo.get('tree_turns', turn.id);
+  }
+  const added = await revise('add_parent', '这篇文章是为了完成申请，把申请加为上级。', `已加上级「${parentName}」。`);
+  const parentId = f.repo.get('tree_nodes', childId).parentId;
+  assert.equal(f.repo.get('tree_nodes', parentId).name, parentName);
+  assert.deepEqual(added.nodeIds, [parentId]);
+  assert.deepEqual(added.goalRevisions.map(r => [r.op, r.state, r.parentId]), [['add_parent', 'applied', undefined]]);
+  const switched = await revise('switch', '回到写第一篇文章。', `已切换到「${childName}」。`);
+  assert.deepEqual(switched.nodeIds, [childId]);
+  assert.deepEqual(switched.goalRevisions.map(r => [r.op, r.state, r.parentId]), [['switch', 'applied', undefined]]);
+  const refused = await revise('move', '我还没选好要把文章挪到哪个目标下面。', '等你选好上级再挪。');
+  assert.match(JSON.stringify(resultRequest), /Invalid parentId/);
+  assert.deepEqual(refused.goalRevisions ?? [], []);
+  assert.equal(f.repo.get('tree_nodes', childId).parentId, parentId);
 });
 
 // Synthetic shape of F34 (0.6.0 + 035, turn 29): the turn is filed under a
