@@ -226,11 +226,13 @@ export class TreeModelOwner {
         if (start && (!end || end.seq < start.seq)) fail('RESULT_UNKNOWN', 'Previous native turn remains uncertain');
       }
       const config = job.modelConfig, options = { agentOptions: nativeModel(config) ? nativeAgentOptions(config) : { provider: config.provider, model: config.model, maxTokens: config.maxTokens, reasoningEffort: config.reasoningEffort }, setup: ctx => this.setup(ctx, id), meta: { agentPreset: config.preset, cwd: config.cwd } };
-      handle = existing?.length ? await this.host.agents.resume({ ...options, resumeSessionId: job.nativeSessionId }) : await this.host.agents.create({ ...options, sessionId: job.nativeSessionId });
+      // A log that exists but holds no events, as left by a host stop right
+      // after creation, is resumed: creating it again would be refused.
+      handle = existing ? await this.host.agents.resume({ ...options, resumeSessionId: job.nativeSessionId }) : await this.host.agents.create({ ...options, sessionId: job.nativeSessionId });
       // A resumed learning session retains its previous native selection. Move
       // only this owned background session to the job's already-frozen route;
       // persist that selection before any submission or provider request.
-      if (existing?.length && typeof handle.agent.model?.current === 'function') {
+      if (existing && typeof handle.agent.model?.current === 'function') {
         const current = handle.agent.model.current();
         if (!current || ['provider', 'model', 'reasoningEffort'].some(key => (current[key] ?? null) !== (config[key] ?? null))) {
           if (typeof handle.agent.model.select !== 'function') fail('MODEL_SELECTION_UNAVAILABLE', 'Cannot apply the frozen background model to its native session');
@@ -266,13 +268,24 @@ export class TreeModelOwner {
   async recover() {
     const results = [];
     for (const job of this.jobs.repo.list('tree_jobs', j => ['submitted', 'unknown', 'result_received', 'validated'].includes(j.status) && j.role)) {
-      try { results.push(this.consume(job.id, await this.readEvents(job.nativeSessionId))); }
+      let events;
+      try { events = await this.readEvents(job.nativeSessionId); results.push(this.consume(job.id, events)); }
       catch (e) {
         const current = this.jobs.get(job.id);
         if (current.status === 'submitted' && e.code !== 'LIVE_SESSION') this.jobs.transition(job.id, 'unknown', { error: { code: e.code ?? 'HOST_ERROR', message: e.message } });
-        results.push({ id: job.id, status: this.jobs.get(job.id).status, error: e.code ?? e.message });
+        const settled = e.code === 'RESULT_UNKNOWN' && this.#settleInterrupted(job.id, events ?? []);
+        results.push(settled ? { id: job.id, status: settled.status, nodeId: settled.nodeIds[0], interrupted: settled.error } : { id: job.id, status: this.jobs.get(job.id).status, error: e.code ?? e.message });
       }
     } return results;
+  }
+  // A learning request interrupted when the host stopped: readable session, no
+  // complete result, and this job's input never became durable there. A job
+  // whose input did reach the session keeps the existing unknown protection.
+  #settleInterrupted(id, events) {
+    const job = this.jobs.get(id);
+    if (job.role !== 'learning' || job.status !== 'unknown') return null;
+    if (events.some(e => e.type === 'user/message' && e.data.source?.jobId === id)) return null;
+    return this.jobs.failInterrupted(id, { eventsHash: digest(events) });
   }
   async close() { this.closed = true; for (const handle of this.handles.values()) handle.agent.cancel({ kind: 'disposed' }, { keepInbox: true }); await Promise.allSettled([...this.running.values()]); }
 }
