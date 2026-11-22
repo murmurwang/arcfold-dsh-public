@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { CONTRACT, ROLES, array, canonicalJson, digest, fail, integer, jsonClone, oneOf, shape, text } from './contracts.mjs';
 import { compilePrompt, parseFinalOutput, outputBindings } from './prompts.mjs';
 import { recordKey } from './repository.mjs';
+import { modelView } from './model-view.mjs';
 
 export const ROLE_LIMITS = Object.freeze({ main: 8192, attribution: 2048, learning: 8192, consolidation: 8192, verification: 8192, improvement: 8192, script_writer: 8192 });
 export const WRITER_TOOLS = Object.freeze(['writer_read', 'writer_list', 'writer_search', 'writer_put', 'writer_probe', 'writer_finish']);
@@ -162,7 +163,7 @@ export class TreeJobs {
   bindMessage(id, message) {
     const job = this.get(id);
     if (job.nativeMessage) { if (canonicalJson(job.nativeMessage) !== canonicalJson(message)) fail('MESSAGE_CONFLICT', 'The native input identity is immutable'); return job; }
-    if (job.status !== 'prepared' || message.role !== 'user' || !message.id || message.source?.kind !== 'arcfold/tree-job' || message.source.jobId !== job.id || message.source.inputHash !== job.inputHash || canonicalJson(message.content) !== canonicalJson([{ type: 'text', text: canonicalJson(job.input) }])) fail('MESSAGE_CONFLICT', 'Exact host-created input message required before submission');
+    if (job.status !== 'prepared' || message.role !== 'user' || !message.id || message.source?.kind !== 'arcfold/tree-job' || message.source.jobId !== job.id || message.source.inputHash !== job.inputHash || canonicalJson(message.content) !== canonicalJson([{ type: 'text', text: canonicalJson(modelView(job.input)) }])) fail('MESSAGE_CONFLICT', 'Exact host-created input message required before submission');
     this.#command('bindModelMessage', digest(['native-message', id]), { jobId: id, message }, { [recordKey('tree_jobs', id)]: job.revision }, () => { this.#replace(job, { nativeMessage: jsonClone(message) }); return { jobId: id, messageId: message.id }; }); return this.get(id);
   }
   admitInvocation(id, { turn, step, stepStartSeq, requestHash, allowedTools }) {

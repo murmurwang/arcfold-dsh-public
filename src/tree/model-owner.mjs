@@ -2,6 +2,7 @@ import { canonicalJson, digest, fail } from './contracts.mjs';
 import { WRITER_TOOLS, TERMINAL_JOBS, CONTEXT_REJECTED, RESULT_LOST, LEARNING_INTERRUPTED } from './jobs.mjs';
 import { directoryContext, contextMatches } from '../learning-runner.mjs';
 import { compilePrompt } from './prompts.mjs';
+import { modelView } from './model-view.mjs';
 import { nativeAgentOptions, nativeModel } from './native-models.mjs';
 import { nativeResponseComplete } from './native-model-records.mjs';
 
@@ -230,7 +231,7 @@ export class TreeModelOwner {
       if (job.role === 'main') fail('MAIN_HOST_OWNED', 'Main stays in its existing native user Agent; use attachMain and consume');
       if (job.status === 'committed' || ['invalid_output', 'stale', 'cancelled', 'failed'].includes(job.status)) return job;
       if (job.status === 'queued') job = this.jobs.prepare(id);
-      if (job.status === 'prepared' && !job.nativeMessage) job = this.jobs.bindMessage(id, this.createUserMessage({ source: { kind: 'arcfold/tree-job', jobId: job.id, role: job.role, inputHash: job.inputHash, origin: 'program' }, content: [{ type: 'text', text: canonicalJson(job.input) }] }));
+      if (job.status === 'prepared' && !job.nativeMessage) job = this.jobs.bindMessage(id, this.createUserMessage({ source: { kind: 'arcfold/tree-job', jobId: job.id, role: job.role, inputHash: job.inputHash, origin: 'program' }, content: [{ type: 'text', text: canonicalJson(modelView(job.input)) }] }));
       const existing = await this.readEvents(job.nativeSessionId);
       if (job.status !== 'prepared') return this.consume(id, existing);
       if (existing?.some(e => e.type === 'user/message' && e.data.source?.jobId === id)) fail('RESULT_UNKNOWN', 'Prepared job already has native submission evidence; never resend');
