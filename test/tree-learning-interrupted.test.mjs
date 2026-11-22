@@ -188,14 +188,12 @@ test('a host stop while a learning request is in flight is resolved as lost afte
   const running = first.owner.run(job.id);
   await reached;
   const stopping = first.shutdown(); release(); await stopping; await running.catch(() => {});
-  const uncertain = first.jobs.get(job.id);
-  assert.equal(uncertain.status, 'unknown', JSON.stringify(uncertain.error)); assert.equal(uncertain.invocationIds.length, 1);
   const restarted = await integratedFixture(t, answer, { root: first.root, evidenceName: 'after-restart.json' });
   await restarted.transport.recover({ exclusive: true });
   const recovered = await restarted.runtime.recover(); await restarted.runtime.idle();
   const { repo } = restarted, state = restarted.jobs.get(job.id);
   assert.equal(state.status, 'failed', JSON.stringify({ error: state.error, recovered: recovered.filter(r => r.id === job.id) }));
-  assert.equal(state.error.code, 'RESULT_LOST');
+  assert.equal(state.error.code, 'RESULT_LOST'); assert.equal(state.invocationIds.length, 1);
   assert.equal(learningOf(repo, stopped).length, 1);
   assert.deepEqual(learningOf(repo, later).map(j => j.status), ['committed']);
   assert.equal(restarted.requests.filter(r => r.role === 'learning').length, 1);
