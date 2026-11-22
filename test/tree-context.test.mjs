@@ -235,7 +235,7 @@ test('the turn table stays in place while the goals stay the same, and is retire
       const node = firstTable.nodes[0];
       return { tool: { id: 'stale-rename', name: 'arcfold_revise_goal', args: { op: 'rename', nodeId: node.id, expectedRevision: node.expectedRevision, name: '目标甲改名', reason: '合成：用旧编号表的版本号' } } };
     }
-    if (phase === 'two') staleResult = row.body.messages.flatMap(m => m.content ?? []).filter(b => b.type === 'tool-result' || b.type === 'text').map(b => JSON.stringify(b)).join('\n');
+    if (phase === 'two') staleResult = JSON.stringify(row.body);
     return '合成答复。';
   });
   f.runtime.attribution.timers = { setTimeout: fn => setTimeout(fn, 30000), clearTimeout };
