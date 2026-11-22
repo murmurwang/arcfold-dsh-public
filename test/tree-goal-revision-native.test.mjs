@@ -71,6 +71,51 @@ test('rename with a real parentId is refused with a hint to leave it out', async
   assert.deepEqual(f.repo.get('tree_turns', second.id).goalRevisions ?? [], []);
 });
 
+test('empty parentId allows adding a parent and switching back to the child, but cannot move it', async t => {
+  const childName = '写完第一篇文章', parentName = '完成申请';
+  let childId, action, reply, reason, resultRequest;
+  const f = await integratedFixture(t, (row, { repo }) => {
+    if (row.role === 'attribution') return { actions: [childId
+      ? { action: 'continue', nodeId: row.input.scope.nodeIds[0] }
+      : { action: 'create', name: childName }], statusChanges: [] };
+    if (row.role === 'learning') return emptyLearning();
+    if (row.role === 'verification') return emptyVerification();
+    if (row.role !== 'main' || !childId) return '好。';
+    if (action) {
+      const op = action;
+      action = undefined;
+      const args = { op, nodeId: childId, expectedRevision: repo.get('tree_nodes', childId).revision, reason, parentId: '' };
+      if (op === 'add_parent') args.name = parentName;
+      return { tool: { id: op, name: 'arcfold_revise_goal', args } };
+    }
+    resultRequest = row.body;
+    return reply;
+  });
+  f.runtime.attribution.timers = { setTimeout: fn => setTimeout(fn, 30000), clearTimeout };
+  const agent = await f.main('empty-parent-goal-operations');
+  childId = (await f.turn(agent, childName)).nodeIds[0];
+  async function revise(op, message, answer) {
+    action = op;
+    reason = message;
+    reply = answer;
+    resultRequest = undefined;
+    const turn = await f.turn(agent, message);
+    return f.repo.get('tree_turns', turn.id);
+  }
+  const added = await revise('add_parent', '这篇文章是为了完成申请，把申请加为上级。', `已加上级「${parentName}」。`);
+  const parentId = f.repo.get('tree_nodes', childId).parentId;
+  assert.equal(f.repo.get('tree_nodes', parentId).name, parentName);
+  assert.deepEqual(added.nodeIds, [parentId]);
+  assert.deepEqual(added.goalRevisions.map(r => [r.op, r.state, r.parentId]), [['add_parent', 'applied', undefined]]);
+  const switched = await revise('switch', '回到写第一篇文章。', `已切换到「${childName}」。`);
+  assert.deepEqual(switched.nodeIds, [childId]);
+  assert.deepEqual(switched.goalRevisions.map(r => [r.op, r.state, r.parentId]), [['switch', 'applied', undefined]]);
+  const refused = await revise('move', '我还没选好要把文章挪到哪个目标下面。', '等你选好上级再挪。');
+  assert.match(JSON.stringify(resultRequest), /Invalid parentId/);
+  assert.deepEqual(refused.goalRevisions ?? [], []);
+  assert.equal(f.repo.get('tree_nodes', childId).parentId, parentId);
+});
+
 // Synthetic shape of F34 (0.6.0 + 035, turn 29): the turn is filed under a
 // daily-plan goal while the conversation moves to another piece of work under
 // the application goal above it.
