@@ -164,7 +164,7 @@ export class TreeModelOwner {
       const own = events.filter(e => e.type === 'user/message' && e.data.source?.jobId === job.id);
       const start = own.length === 1 && events.findLast(e => e.type === 'turn/start' && e.seq < own[0].seq);
       const end = start && events.find(e => e.type === 'turn/end' && e.data.turn === start.data.turn && e.seq > own[0].seq);
-      if (end?.data.reason?.kind === 'error' && canonicalJson(own[0].data) === canonicalJson(job.nativeMessage)
+      if (end?.data?.reason?.kind === 'error' && canonicalJson(own[0].data) === canonicalJson(job.nativeMessage)
         && !events.some(e => e.type === 'assistant/message' && e.seq > start.seq && e.seq < end.seq))
         return this.jobs.failBeforeInvocation(id, { nativeLogRef: `${job.nativeSessionId}#${end.seq}`, eventsHash: digest(events), reason: end.data.reason.error?.message ?? 'Native request guard rejected before admission' });
     }

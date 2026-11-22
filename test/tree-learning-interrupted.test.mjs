@@ -37,6 +37,15 @@ test('a learning stopped before its request was released is resolved as not sent
   assert.equal(f.jobs.prepare(next.id).status, 'prepared');
 });
 
+test('an empty native log left by the stop is also resolved as not sent', async t => {
+  const f = await nativeFixture(t, ({ role }) => minimal[role], { nativeModels: true });
+  const job = f.enqueue('learning'); f.jobs.prepare(job.id); f.jobs.submit(job.id);
+  f.jobs.transition(job.id, 'unknown', { error: { code: 'HOST_ERROR', message: quit().message } });
+  f.owner.readEvents = async () => [];
+  const resolved = (await f.owner.recover()).find(r => r.id === job.id);
+  assert.equal(resolved.status, 'failed', JSON.stringify(resolved)); assert.equal(resolved.interrupted.code, 'LEARNING_INTERRUPTED');
+});
+
 test('a learning whose request was released but left no durable result is lost and never resent', async t => {
   const f = await nativeFixture(t, ({ role }) => minimal[role], { nativeModels: true });
   const job = await stopAfterRequest(f, false);
