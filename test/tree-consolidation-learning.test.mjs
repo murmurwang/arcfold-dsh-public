@@ -171,7 +171,7 @@ test('the compact consolidation prompt states the 60-character oneLine limit its
   assert.equal(prompt.version, 'arcfold.tree.consolidation/5.0.1');
   assert.match(prompt.text, /summary\.oneLine是60字以内的一句话/);
   assert.match(prompt.text, /"oneLine":"一句概况，60字以内"/);
-  for (const role of ['verification', 'improvement']) assert.equal(compilePrompt(role).version, `arcfold.tree.${role}/5.0.0`);
+  assert.equal(compilePrompt('improvement').version, 'arcfold.tree.improvement/5.0.0');
   const e = envelope('consolidation'), output = oneLine => ({ ...full.consolidation, broaden: [], retrospect: { understandings: [], methods: [] }, summary: { ...full.consolidation.summary, oneLine } });
   assert.equal(validateOutput('consolidation', output('概'.repeat(60)), e).summary.oneLine.length, 60);
   assert.throws(() => validateOutput('consolidation', output('概'.repeat(61)), e), { code: 'INVALID_OUTPUT' });

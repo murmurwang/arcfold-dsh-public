@@ -5,6 +5,7 @@ import { method } from './fixtures/tree-domain/helpers.mjs';
 import { VerificationService, ConsolidationReflection } from '../src/tree/verification.mjs';
 import { digest } from '../src/tree/contracts.mjs';
 import { ItemService } from '../src/tree/items.mjs';
+import { compilePrompt } from '../src/tree/prompts.mjs';
 
 function verifier(f) { return new VerificationService({ repository: f.repo, experience: f.experience, contextBuilder: f.builder, jobs: f.jobs, modelConfig: f.config, clusters: f.clusters }); }
 function propose(f, node, count = 1) { f.asModel('learning', [node]); return f.propose(node, { methods: Array.from({ length: count }, () => method([f.ref])) }).methods.itemIds; }
@@ -200,11 +201,26 @@ test('ancestor support needs two independent nodes and cannot be rewritten by on
 
 test('harden adds a finite hook in a new bundle; changed is a normal evolution, not a producer error', async t => {
   const f = learningFixture(t), a = f.create('我改进检查'), [id] = propose(f, a); await observe(f, a); const v = verifier(f), job = v.enqueue(a);
-  const op = operation(job, id, 'harden', { hooks: [{ moment: 'turn_end', conditions: [], action: 'remind_user', message: '说明实际检查结果' }], scriptRequests: [] }, 'use');
-  complete(f, v, job, { ...emptyVerification(), operations: [op], verifications: [evaluation(job, id, 'not_met')] });
-  assert.equal(f.repo.get('tree_items', id).activeVersion, 2); assert.equal(f.repo.get('tree_methods', digest(['method', id, 2])).hooks.length, 3);
+  const conditions = [{ field: 'toolsCalled', op: 'not_contains', value: 'read' }];
+  const reminder = { moment: 'turn_end', conditions, action: 'remind_user', message: '说明实际检查结果' };
+  const continuation = { moment: 'turn_end', conditions, action: 'continue', message: '读取材料后继续' };
+  const op = operation(job, id, 'harden', { hooks: [reminder, continuation], scriptRequests: [] }, 'use');
+  const reviewed = complete(f, v, job, { ...emptyVerification(), operations: [op], verifications: [evaluation(job, id, 'not_met')] });
+  assert.equal(f.repo.get('tree_items', id).activeVersion, 2);
+  const before = f.repo.get('tree_item_versions', digest(['item_version', id, 1])).content.hooks;
+  const after = f.repo.get('tree_item_versions', digest(['item_version', id, 2])).content.hooks;
+  assert.deepEqual(before, method([f.ref]).hooks, 'existing reminder is preserved');
+  assert.deepEqual(after, [...before, { moment: 'user_message', conditions: [], action: 'add_context', message: reminder.message }, continuation]);
+  assert.deepEqual(reviewed.resultRef.diagnostics, [{ code: 'HARDEN_REMINDER_TO_CONTEXT', itemId: id, itemVersion: 1, hookIndex: 0 }]);
   await observe(f, a); const next = v.enqueue(a), change = { ...operation(next, id, 'mark_changed'), targetVersion: 2 };
   complete(f, v, next, { ...emptyVerification(), operations: [change] }); assert.equal(f.repo.get('tree_items', id).lifecycle, 'changed'); assert.equal(f.repo.list('tree_repairs').length, 1);
+});
+
+test('verification shows a user-message context hook as the harden example', () => {
+  const prompt = compilePrompt('verification');
+  assert.equal(prompt.version, 'arcfold.tree.verification/5.0.1');
+  assert.match(prompt.text, /harden为\{"hooks":\[\{"moment":"user_message","conditions":\[\],"action":"add_context"/u);
+  assert.doesNotMatch(prompt.text, /"moment":"turn_end","conditions":\[\],"action":"remind_user"/u);
 });
 
 test('routine reflection rejects two proposals and exposes a valid probe next entry', async t => {

@@ -179,7 +179,7 @@ export class VerificationService {
       for (const e of input.exposures) if (digest(this.repo.get('tree_exposures', e.id)) !== digest(e)) fail('JOB_STALE', 'Actual exposure changed before batch commit');
       const frozenExposures = new Map(input.exposures.filter(e => !e.revoked).map(e => [e.id, e]));
       const service = new ItemService({ repository: this.repo, resolveSource: this.resolveSource, context: () => ({ actor, nodeIds: input.reviewNodeIds, reviewExposure: id => frozenExposures.get(id) }) });
-      const outcomes = [], repaired = [];
+      const outcomes = [], repaired = [], diagnostics = [];
       const actions = [...output.operations];
       for (const evaluation of output.verifications) if (!actions.some(o => o.targetId === evaluation.methodId)) actions.push({ op: 'support', targetId: evaluation.methodId, targetVersion: evaluation.methodVersion, stage: 'none', reason: evaluation.observed || '本窗口检验', evidence: evaluation.evidence, detail: {} });
       for (const [index, op] of actions.entries()) {
@@ -187,7 +187,15 @@ export class VerificationService {
         const opportunities = evaluation?.opportunityCount === 0 ? [] : evidenceFor(original.id, op.targetVersion, evaluation?.evidence ?? op.evidence), currentVersion = this.repo.get('tree_item_versions', versionKey(original.id, op.targetVersion));
         let operation = op.op, detail = op.detail, target = original, replacement;
         if (op.op === 'rewrite') replacement = original.kind === 'method' ? proposalInput({ methods: [op.detail.replacement] }, input).methods[0] : op.detail.replacement.content;
-        if (op.op === 'harden') replacement = { ...currentVersion.content, hooks: [...currentVersion.content.hooks, ...detail.hooks], scriptRequests: detail.scriptRequests };
+        if (op.op === 'harden') {
+          const additions = detail.hooks.map((hook, hookIndex) => {
+            if (hook.moment !== 'turn_end' || hook.action !== 'remind_user') return hook;
+            diagnostics.push({ code: 'HARDEN_REMINDER_TO_CONTEXT', itemId: original.id, itemVersion: op.targetVersion, hookIndex });
+            // End-of-turn tool and file conditions cannot be evaluated at the next user message.
+            return { moment: 'user_message', action: 'add_context', conditions: [], message: hook.message };
+          });
+          replacement = { ...currentVersion.content, hooks: [...currentVersion.content.hooks, ...additions], scriptRequests: detail.scriptRequests };
+        }
         if (op.op === 'merge') {
           target = this.repo.get('tree_items', detail.targetId); replacement = this.repo.get('tree_item_versions', versionKey(target.id, target.activeVersion)).content;
         }
@@ -233,7 +241,8 @@ export class VerificationService {
         const item = this.repo.get('tree_items', probe.itemId); if (item.lifecycle !== 'active' || item.activeVersion !== probe.itemVersion) fail('PROBE_STALE', 'Probe target was changed by this batch');
         this.repo.save('tree_items', { ...item, probe: { what: probe.what, evidenceRefs: refs(probe.evidence), version: item.activeVersion, windowId: input.window.id } }, item.revision); return { itemId: item.id };
       });
-      return { windowId: input.window.id, operations: outcomes, repairs: repaired, proposals, formatFixes, missed: output.missed, probes: output.probes };
+      return { windowId: input.window.id, operations: outcomes, repairs: repaired, proposals, formatFixes, missed: output.missed, probes: output.probes,
+        ...(diagnostics.length ? { diagnostics } : {}) };
     });
   }
   learnMissed(missed, job, requestId, service) {
