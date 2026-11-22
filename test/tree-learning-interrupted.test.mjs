@@ -85,9 +85,9 @@ test('after a stop mid-learning, a restart learns the interrupted turn once and 
   await first.shutdown();
   const restarted = await integratedFixture(t, answer, { root: first.root, evidenceName: 'after-restart.json' });
   await restarted.transport.recover({ exclusive: true });
-  await restarted.runtime.recover(); await restarted.runtime.idle();
+  const recovered = await restarted.runtime.recover(); await restarted.runtime.idle();
   const { repo } = restarted, state = restarted.jobs.get(job.id);
-  assert.equal(state.status, 'failed'); assert.equal(state.error.code, 'LEARNING_INTERRUPTED'); assert.equal(interruptedLearning(state), true);
+  assert.equal(state.status, 'failed', JSON.stringify({ error: state.error, recovered: recovered.filter(r => r.id === job.id), log: await restarted.owner.readEvents(state.nativeSessionId).then(e => e?.map(x => x.type), e => e.name + ': ' + e.message) })); assert.equal(state.error.code, 'LEARNING_INTERRUPTED'); assert.equal(interruptedLearning(state), true);
   const [retried] = learningOf(repo, stopped).filter(j => j.id !== job.id);
   assert.equal(retried.status, 'committed'); assert.equal(retried.nativeSessionId, uncertain.nativeSessionId);
   assert.deepEqual(learningOf(repo, later).map(j => j.status), ['committed']);
