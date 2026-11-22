@@ -4,7 +4,7 @@ import { validateOutput, resolveSourceIds } from './prompts.mjs';
 import { ScriptWriter } from './script-writer.mjs';
 import { learningCorrections, LearningObservations, quotedSource } from './observations.mjs';
 import { MetricsService } from './metrics.mjs';
-import { deferredLearning } from './jobs.mjs';
+import { deferredLearning, interruptedLearning } from './jobs.mjs';
 import { compactLearningSource } from './experience.mjs';
 
 const program = { kind: 'program', id: 'tree-learning' };
@@ -52,10 +52,11 @@ export class LearningService {
     const session = this.repo.list('tree_learning_sessions', s => s.nodeId === nodeId)[0];
     // Only an append stopped before submission, or one the provider refused
     // for context size without output, may be frozen again after the epoch
-    // changes. Paid/unknown and ordinary failures never retry.
-    const deferred = deferredLearning(old);
-    if (old && (!deferred || session?.paused || session?.contextEpoch <= old.contextEpoch)) return old;
-    const key = old ? digest(['epoch-learning', baseKey, session.contextEpoch]) : baseKey;
+    // changes. A request interrupted by a host stop before it was released is
+    // frozen again at once. Paid/unknown and ordinary failures never retry.
+    const deferred = deferredLearning(old), interrupted = interruptedLearning(old);
+    if (old && (interrupted ? session?.paused : !deferred || session?.paused || session?.contextEpoch <= old.contextEpoch)) return old;
+    const key = !old ? baseKey : interrupted ? digest(['interrupted-learning', baseKey, old.id]) : digest(['epoch-learning', baseKey, session.contextEpoch]);
     // Freeze after previous receipts, not eagerly while an earlier turn is still
     // producing the very constraints and acknowledgements this turn must read.
     if (this.repo.list('tree_jobs', j => ['learning', 'consolidation'].includes(j.role) && j.nodeIds.includes(nodeId) && !['committed', 'failed', 'invalid_output', 'stale', 'cancelled'].includes(j.status)).length) fail('NODE_BUSY', 'Earlier learning/summary must settle before freezing the next turn');

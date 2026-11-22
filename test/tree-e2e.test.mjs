@@ -297,16 +297,23 @@ for (const boundary of ['prepared', 'submitted', 'result_received', 'committed']
   await restarted.transport.recover({ exclusive: true });
   await restarted.runtime.recover(); await restarted.runtime.idle();
   const state = restarted.jobs.get(job.id);
-  assert.equal(state.status, boundary === 'submitted' ? 'unknown' : 'committed');
-  assert.equal(restarted.requests.length, boundary === 'prepared' ? 1 : 0);
+  // A job submitted without a released request is resolved as not sent and
+  // its turn is learned once by a fresh job.
+  assert.equal(state.status, boundary === 'submitted' ? 'failed' : 'committed');
+  if (boundary === 'submitted') {
+    assert.equal(state.error.code, 'LEARNING_INTERRUPTED'); assert.equal(state.notSent, true);
+    const retried = restarted.repo.list('tree_jobs', j => j.role === 'learning' && j.trigger.turnId === turn.id && j.id !== job.id);
+    assert.deepEqual(retried.map(j => j.status), ['committed']);
+  }
+  assert.equal(restarted.requests.filter(r => r.role === 'learning').length, ['prepared', 'submitted'].includes(boundary) ? 1 : 0);
   const signals = restarted.repo.list('tree_signals').length, sequence = restarted.repo.list('tree_learning_sessions')[0].appendSeq;
-  assert.equal(signals, boundary === 'submitted' ? 0 : 1); assert.equal(sequence, boundary === 'submitted' ? 0 : 1);
+  assert.equal(signals, 1); assert.equal(sequence, 1);
   await restarted.runtime.recover(); await restarted.runtime.idle();
   assert.equal(restarted.repo.list('tree_signals').length, signals);
   assert.equal(restarted.repo.list('tree_learning_sessions')[0].appendSeq, sequence);
   const allRequests = [...first.requests, ...restarted.requests];
   assert.equal(allRequests.filter(r => r.role === 'main').length, 1);
-  assert.equal(allRequests.filter(r => r.role === 'learning').length, boundary === 'submitted' ? 0 : 1);
+  assert.equal(allRequests.filter(r => r.role === 'learning').length, 1);
   const attributionCalls = allRequests.filter(r => r.role === 'attribution').length;
   assert.ok(attributionCalls <= 1);
   // Under full-suite CPU load the 12s attribution guard may cancel before
@@ -317,7 +324,7 @@ for (const boundary of ['prepared', 'submitted', 'result_received', 'committed']
     assert.equal(attribution.cancellationReason, 'ATTRIBUTION_DEADLINE');
     assert.equal(attribution.invocationIds.length, 0);
   }
-  assert.equal(restarted.requests.length + beforeRequests, 1 + (boundary === 'submitted' ? 0 : 1) + attributionCalls);
+  assert.equal(restarted.requests.length + beforeRequests, 2 + attributionCalls);
   assert.equal(restarted.repo.list('tree_turns').length, 1);
 });
 

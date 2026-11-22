@@ -16,6 +16,15 @@ export function deferredLearning(job) {
   if (job.error?.code === 'LEARNING_PRESSURE') return !job.submittedAt && !job.invocationIds.length;
   return job.error?.code === CONTEXT_REJECTED && job.providerRejected === true;
 }
+// Recovery after the host stopped mid-learning. With no request identity the
+// guard never released a provider request, so the turn may be learned again in
+// the same native session. A job that owns a request identity but left no
+// durable result is lost and never retried, so one turn is never paid twice.
+export const LEARNING_INTERRUPTED = 'LEARNING_INTERRUPTED';
+export const RESULT_LOST = 'RESULT_LOST';
+export function interruptedLearning(job) {
+  return job?.role === 'learning' && job.status === 'failed' && job.error?.code === LEARNING_INTERRUPTED && job.notSent === true && !job.invocationIds.length;
+}
 const priority = { attribution: 0, script_writer: 1, learning: 2, consolidation: 3, verification: 4, improvement: 5, main: 0 };
 const triggers = {
   main: ['user_turn'], attribution: ['human_input'], learning: ['settled_main_turn', 'assignment_correction'],
@@ -113,6 +122,19 @@ export class TreeJobs {
     text(nativeLogRef, 'native failure receipt', 4096); text(eventsHash, 'native failure hash', 128); text(reason, 'native failure reason', 4096);
     this.#command('recordPreDispatchFailure', digest(['not-sent', id, eventsHash]), { jobId: id, nativeLogRef, eventsHash, reason }, { [recordKey('tree_jobs', id)]: job.revision }, () => {
       this.#replace(job, { status: 'failed', leaseOwner: null, nativeLogRef, eventsHash, error: { code: 'NATIVE_PRE_DISPATCH', message: reason }, notSent: true }); return { jobId: id, status: 'failed' };
+    }); return this.get(id);
+  }
+  // Only recovery calls this, after the native session was read without a live
+  // owner and held no complete result and no input message for this job.
+  failInterrupted(id, { eventsHash }) {
+    const job = this.get(id);
+    if (job.role !== 'learning' || job.status !== 'unknown') fail('INTERRUPTION_STATE', 'Only an uncertain learning request can be resolved as interrupted');
+    text(eventsHash, 'native events hash', 128);
+    const sent = job.invocationIds.length > 0 || this.repo.list('tree_invocations', call => call.jobId === id).length > 0;
+    const error = sent ? { code: RESULT_LOST, message: 'Host stopped after the request was released; no durable result, not retried' }
+      : { code: LEARNING_INTERRUPTED, message: 'Host stopped before the request was released; not sent' };
+    this.#command('recordInterruptedLearning', digest(['interrupted', id, eventsHash]), { jobId: id, eventsHash, code: error.code }, { [recordKey('tree_jobs', id)]: job.revision }, () => {
+      this.#replace(job, { status: 'failed', leaseOwner: null, eventsHash, error, ...(sent ? { resultLost: true } : { notSent: true }) }); return { jobId: id, status: 'failed' };
     }); return this.get(id);
   }
   failRejected(id, { nativeLogRef, eventsHash, code, message }) {

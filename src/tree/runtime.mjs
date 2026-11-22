@@ -190,6 +190,7 @@ export class TreeRuntime {
       }
     });
     const recovered = await timing.step('recover-model-owner', () => this.owner.recover());
+    for (const r of recovered) if (r.interrupted) this.diagnostic('learning_interrupted', r.interrupted, { jobId: r.id, nodeId: r.nodeId });
     timing.step('recover-cancel-prepared', () => {
       for (const job of this.repo.list('tree_jobs', j => j.role === 'main' && j.status === 'prepared')) {
         // Native human sessions are never automatically resumed by this worker.

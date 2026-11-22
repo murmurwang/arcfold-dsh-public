@@ -90,13 +90,15 @@ for (const boundary of ['receive', 'validate', 'commit']) test(`R04: reopen SQLi
   await recovered.recover(); assert.equal((await recovered.run(first.id)).status, 'committed'); assert.equal(f.requests.length, 1); assert.equal(commits, 1);
 });
 
-test('R04: prepared input may send once; submitted intent without durable result becomes unknown and never resends', async t => {
+test('R04: prepared input may send once; submitted learning that never released a request is recorded as not sent and never resends', async t => {
   const f = await nativeFixture(t), prepared = f.jobs.prepare(f.enqueue('attribution').id);
   assert.ok(prepared.nativeSessionId); await f.owner.run(prepared.id); assert.equal(f.requests.length, 1);
   const uncertain = f.enqueue('learning'); f.jobs.prepare(uncertain.id); f.jobs.submit(uncertain.id);
-  await f.owner.recover(); assert.equal(f.jobs.get(uncertain.id).status, 'unknown');
+  await f.owner.recover();
+  const resolved = f.jobs.get(uncertain.id);
+  assert.equal(resolved.status, 'failed'); assert.equal(resolved.error.code, 'LEARNING_INTERRUPTED'); assert.equal(resolved.notSent, true);
   await f.owner.run(uncertain.id); assert.equal(f.requests.length, 1);
-  assert.throws(() => f.jobs.prepare(f.enqueue('learning').id), { code: 'LEARNING_UNKNOWN' });
+  assert.equal(f.jobs.prepare(f.enqueue('learning').id).status, 'prepared');
 });
 
 test('a durable native error before any guarded invocation is proved not sent, including cold reconciliation', async t => {
