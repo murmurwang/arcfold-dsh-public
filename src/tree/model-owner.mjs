@@ -1,5 +1,5 @@
 import { canonicalJson, digest, fail } from './contracts.mjs';
-import { WRITER_TOOLS, TERMINAL_JOBS, CONTEXT_REJECTED } from './jobs.mjs';
+import { WRITER_TOOLS, TERMINAL_JOBS, CONTEXT_REJECTED, RESULT_LOST, LEARNING_INTERRUPTED } from './jobs.mjs';
 import { directoryContext, contextMatches } from '../learning-runner.mjs';
 import { compilePrompt } from './prompts.mjs';
 import { nativeAgentOptions, nativeModel } from './native-models.mjs';
@@ -7,12 +7,13 @@ import { nativeResponseComplete } from './native-model-records.mjs';
 
 // The single turn carrying this job's input ended because the host disposed
 // the agent, and no assistant answer was recorded inside it.
+// Returns that turn's end event, or null.
 function disposedWithoutAnswer(events, own) {
-  if (own.length !== 1) return false;
+  if (own.length !== 1) return null;
   const start = events.findLast(e => e.type === 'turn/start' && e.seq < own[0].seq);
   const end = start && events.find(e => e.type === 'turn/end' && e.data?.turn === start.data?.turn && e.seq > own[0].seq);
-  if (!end || end.data?.reason?.kind !== 'aborted' || end.data.reason.reason?.kind !== 'disposed') return false;
-  return !events.some(e => e.type === 'assistant/message' && e.seq > start.seq && e.seq < end.seq);
+  if (!end || end.data?.reason?.kind !== 'aborted' || end.data.reason.reason?.kind !== 'disposed') return null;
+  return events.some(e => e.type === 'assistant/message' && e.seq > start.seq && e.seq < end.seq) ? null : end;
 }
 const requestHash = options =>digest({ messages: options.messages, tools: options.tools ?? [], toolHistory: options.toolHistory ?? null });
 function nativePosition(session) {
@@ -43,7 +44,10 @@ export class TreeModelOwner {
     // response and the rejection receipt can remain in this node's own worker.
     if (sourceJob.status === 'invalid_output' && sourceJob.resultHash && sourceJob.nativeLogRef && sourceJob.invocationIds.length)
       return sourceJob.invocationIds.every(id => { const call = this.jobs.repo.get('tree_invocations', id), receipt = call && this.ledgerLookup(call.ledgerRequestId); return call?.state === 'result_received' && (receipt?.status === 'settled' || nativeModel(sourceJob.modelConfig) && nativeResponseComplete(receipt)); });
-    return sourceJob.status === 'failed' && sourceJob.error?.code === 'NATIVE_PRE_DISPATCH' && sourceJob.nativeLogRef && !sourceJob.invocationIds.length;
+    if (sourceJob.status === 'failed' && sourceJob.error?.code === 'NATIVE_PRE_DISPATCH' && sourceJob.nativeLogRef && !sourceJob.invocationIds.length) return true;
+    // A turn the host disposed without an answer, resolved on recovery from
+    // that exact native log position, stays as unanswered history.
+    return sourceJob.status === 'failed' && [RESULT_LOST, LEARNING_INTERRUPTED].includes(sourceJob.error?.code) && Boolean(sourceJob.nativeLogRef);
   }
   assertProjection(job, options) {
     if (options.purpose !== undefined || options.system !== undefined) fail('PURPOSE_BYPASS', 'Tree roles use owned native messages, never purpose calls');
@@ -294,9 +298,9 @@ export class TreeModelOwner {
   #settleInterrupted(id, events) {
     const job = this.jobs.get(id);
     if (job.role !== 'learning' || job.status !== 'unknown') return null;
-    const own = events.filter(e => e.type === 'user/message' && e.data.source?.jobId === id);
-    if (own.length && !disposedWithoutAnswer(events, own)) return null;
-    return this.jobs.failInterrupted(id, { eventsHash: digest(events) });
+    const own = events.filter(e => e.type === 'user/message' && e.data.source?.jobId === id), end = own.length ? disposedWithoutAnswer(events, own) : null;
+    if (own.length && !end) return null;
+    return this.jobs.failInterrupted(id, { eventsHash: digest(events), ...(end ? { nativeLogRef: `${job.nativeSessionId}#${end.seq}` } : {}) });
   }
   async close() { this.closed = true; for (const handle of this.handles.values()) handle.agent.cancel({ kind: 'disposed' }, { keepInbox: true }); await Promise.allSettled([...this.running.values()]); }
 }
