@@ -175,4 +175,36 @@ test('the compact consolidation prompt states the 60-character oneLine limit its
   const e = envelope('consolidation'), output = oneLine => ({ ...full.consolidation, broaden: [], retrospect: { understandings: [], methods: [] }, summary: { ...full.consolidation.summary, oneLine } });
   assert.equal(validateOutput('consolidation', output('概'.repeat(60)), e).summary.oneLine.length, 60);
   assert.throws(() => validateOutput('consolidation', output('概'.repeat(61)), e), { code: 'INVALID_OUTPUT' });
+
+test('consolidation keeps long tool output by reference and carries only what each covered learning saw and produced', async t => {
+  const { LEARNING_TOOL_SOURCE_CHARS, compactLearningSource } = await import('../src/tree/experience.mjs');
+  const f = learningFixture(t), node = f.create('合成整理');
+  const { job: learned } = await f.feedback(node, 'approved', '合成用户反馈');
+  assert.equal(learned.status, 'committed');
+  const plan = f.consolidation.plan(node, 'leave_timeout'), size = LEARNING_TOOL_SOURCE_CHARS + 1;
+  const tool = (id, text) => ({ id, role: 'tool', origin: 'tool', ref: { sessionId: 'synthetic', seq: 900, sha256: id.padEnd(64, '0') }, sha256: id.padEnd(64, '0'), text, content: [{ type: 'text', text }], nativeType: 'tool/result', toolCallId: 'c-' + id, isError: false });
+  const long = tool('aa', 'x'.repeat(size)), short = tool('bb', '测试通过');
+  const material = plan.material.map((m, i) => i === 0 ? { ...m, sources: [...m.sources, long, short] } : m);
+  const input = f.consolidation.freeze({ ...plan, material }).input, byId = id => input.sources.find(s => s.id === id);
+  assert.equal(byId('aa').text, `[工具输出 ${size} 字符；原文按引用保留，未放入本次输入]`);
+  assert.deepEqual(byId('aa').content, [{ type: 'text', text: byId('aa').text }]);
+  assert.deepEqual(byId('aa').ref, long.ref); assert.deepEqual(byId('aa').elided, { chars: size, sha256: long.sha256 });
+  assert.deepEqual(byId('bb'), short);
+  const user = input.sources.find(s => s.role === 'user'), original = plan.material.flatMap(m => m.sources).find(s => s.id === user.id);
+  assert.deepEqual(user, original);
+  // A summary may cite the elided output; its frozen ref stays the original one.
+  const output = { summary: { oneLine: '合成概况', status: '合成进展', outputs: ['合成产出'], decisions: [], next: '', pending: [] }, broaden: [], retrospect: { understandings: [], methods: [] }, setDown: { reason: '合成理由', sourceIds: ['aa'] } };
+  assert.deepEqual(validateOutput('consolidation', output, input).setDown.sourceIds, ['aa']);
+  // Learning wording is unchanged.
+  assert.equal(compactLearningSource(long).text, `[工具输出 ${size} 字符；原文按引用保留，未放入学习输入]`);
+  // Each covered learning carries only its turn, source ids, output and receipt.
+  assert.equal(input.learningHistory.length, 1);
+  const [record] = input.learningHistory;
+  assert.deepEqual(Object.keys(record).sort(), ['input', 'invalidated', 'jobId', 'output', 'receipt']);
+  assert.deepEqual(Object.keys(record.input).sort(), ['currentTurn', 'sourceIds']);
+  assert.equal(record.jobId, learned.id); assert.deepEqual(record.input.currentTurn, learned.input.currentTurn);
+  assert.deepEqual(record.input.sourceIds, learned.input.sources.map(s => s.id));
+  assert.deepEqual(record.output, learned.validatedResult); assert.deepEqual(record.receipt, learned.resultRef);
+  const invalid = f.consolidation.freeze({ ...plan, learningRecords: [{ jobId: 'j-old', invalidated: true, reason: '合成作废原因', inputHash: 'h1', resultHash: 'h2' }] }).input.learningHistory;
+  assert.deepEqual(invalid, [{ jobId: 'j-old', invalidated: true, reason: '合成作废原因' }]);
 });

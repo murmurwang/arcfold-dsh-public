@@ -1,6 +1,14 @@
 import { CONTRACT, canonicalJson, digest, fail, integer, jsonClone } from './contracts.mjs';
 import { validateOutput } from './prompts.mjs';
 import { compactLearningSource } from './experience.mjs';
+
+// Long tool output is kept by reference, by the same rule as learning; the
+// marker names this input instead of learning. Ids, refs and hashes stay.
+function compactConsolidationSource(source) {
+  const compact = compactLearningSource(source); if (compact === source) return source;
+  const text = compact.text.replace('未放入学习输入', '未放入本次输入');
+  return { ...compact, text, content: [{ type: 'text', text }] };
+}
 import { TERMINAL_JOBS } from './jobs.mjs';
 
 export class ConsolidationService {
@@ -34,13 +42,14 @@ export class ConsolidationService {
     const context = this.builder.build([plan.nodeId], 'consolidation'), own = this.builder.node(plan.nodeId);
     const siblings = this.repo.list('tree_nodes', n => !n.deleted && n.parentId === own.parentId && n.id !== own.id).map(n => n.id);
     const items = this.builder.activeItems([...new Set([...context.ancestorPaths.flat(), ...siblings])], 'consolidation');
-    const sources = [...new Map(plan.material.flatMap(m => m.sources).map(s => [s.id, s])).values()];
+    const sources = [...new Map(plan.material.flatMap(m => m.sources).map(s => [s.id, s])).values()].map(compactConsolidationSource);
     const knownItems = items.map(({ item, version, method }) => ({ id: item.id, version: item.activeVersion, nodeId: item.nodeId, kind: item.kind, sourceKind: version.sourceKind, userProtected: item.userProtected, content: method ? { short: method.short, long: method.long } : version.content }));
     const { material: _material, learningRecords, ...summaryPlan } = plan;
+    // Each covered learning keeps what it saw and produced. Its then-current
+    // items, constraints and receipts are superseded by this input's own.
     const learningHistory = learningRecords.map(record => {
-      if (!record.input) return record;
-      const { sources: originalSources, ...input } = record.input;
-      return { ...record, input: { ...input, sourceIds: originalSources.map(s => s.id) } };
+      if (!record.input) return { jobId: record.jobId, invalidated: true, reason: record.reason };
+      return { jobId: record.jobId, input: { currentTurn: record.input.currentTurn, sourceIds: record.input.sources.map(s => s.id) }, output: record.output, receipt: record.receipt, invalidated: record.invalidated };
     });
     const input = { inputVersion: CONTRACT, role: 'consolidation', scope: { nodeIds: [plan.nodeId], ancestorPaths: context.ancestorPaths, treeRevision: context.treeRevision }, sources, knownItems,
       allowedIds: { nodeIds: [...new Set(context.ancestorPaths.flat())], fileIds: [], subjectIds: [] }, trigger: { reason: plan.reason }, changeReceipts: [], summaryPlan, learningHistory, constraints: context.segments };
