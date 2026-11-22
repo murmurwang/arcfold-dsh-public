@@ -57,7 +57,7 @@ const legacyLearning = obj({ understandings: arr(understanding, 20), revisions: 
 const schemas = {
   attribution: obj({ actions: arr(union(obj({ action: en(['continue', 'switch']), nodeId: id('node') }), obj({ action: literal('create'), name: str(80, 1) }), obj({ action: literal('create_child'), parentId: id('node'), name: str(80, 1) })), 8, 1), statusChanges: arr(obj({ nodeId: id('node'), status: en(['paused', 'completed', 'abandoned']), sourceId: id('source') }), 8) }),
   learning: obj({ categories: arr(category, 20), understandings: arr(learnedUnderstanding, LEARNING_LIMITS.understandings), changes: arr(learnedChange, LEARNING_LIMITS.changes), method: nullable(learnedMethod) }),
-  consolidation: obj({ summary, broaden: arr(obj({ kind: en(['understanding', 'method']), id: id('item'), version: num(1), toNodeId: id('node'), reason: str(2000, 1), sourceIds: sources }), 20), retrospect: obj({ understandings: arr(understanding, 20), methods: arr(method, 10) }), setDown: nullable(obj({ reason: str(2000, 1), sourceIds: sources })) }, ['setDown']),
+  consolidation: obj({ summary, kept: { type: 'array', items: obj({ id: id('item'), version: num(1), reason: str(2000, 1) }) }, broaden: arr(obj({ kind: en(['understanding', 'method']), id: id('item'), version: num(1), toNodeId: id('node'), reason: str(2000, 1), sourceIds: sources }), 20), retrospect: obj({ understandings: arr(understanding, 20), methods: arr(method, 10) }), setDown: nullable(obj({ reason: str(2000, 1), sourceIds: sources })) }, ['kept', 'setDown']),
   // Keep the original missed report even when its text exceeds the understanding limit.
   verification: obj({ operations: arr(operation, 20), missed: arr(obj({ what: str(null, 1), evidence }), 20), verifications: arr(obj({ methodId: id('item'), methodVersion: num(1), result: en(['met', 'not_met', 'unclear']), observed: str(2000), opportunityCount: num(0, 2000), evidence }), 20), formatFixes: arr(formats, 20), clusters: arr(obj({ clusterId: id('cluster'), clusterVersion: num(1), verdict: en(['common', 'none']), commonality: str(2000), evidence }), 20), proposals: obj({ understandings: arr(withOrigin(understanding), 20), methods: arr(withOrigin(method), 10) }), probes: arr(obj({ itemId: id('item'), itemVersion: num(1), what: str(2000, 1), evidence }), 20) }),
   improvement: obj({ same: { type: 'boolean' }, diagnosis: str(2000), kind: en(['personal', 'universal', 'none']), supplements: arr(improvementSupplement, 10), parameters: arr(union(...['retentionDays', 'leaveTimeoutHours'].map(name => obj({ name: literal(name), scopeNodeId: id('node'), value: num(1, name === 'retentionDays' ? 365 : 168), reason: str(2000, 1), sourceIds: sources }))), 20), report: nullable(report) }),
@@ -210,10 +210,24 @@ export function validateOutput(role, output, envelope) {
     }
   }
   if (role === 'consolidation') {
-    if (consolidationReason(envelope) === 'threshold' && (value.broaden.length || value.retrospect.understandings.length || value.retrospect.methods.length)) fail('OUTPUT_THRESHOLD', 'Threshold consolidation only summarizes its frozen watermark');
+    const kept = value.kept ?? [], decided = new Set();
+    if (consolidationReason(envelope) === 'threshold' && (kept.length || value.broaden.length || value.retrospect.understandings.length || value.retrospect.methods.length)) fail('OUTPUT_THRESHOLD', 'Threshold consolidation only summarizes its frozen watermark');
     if (!RETROSPECT_REASONS.includes(consolidationReason(envelope)) && (value.retrospect.understandings.length || value.retrospect.methods.length)) fail('OUTPUT_REFLECTION_TRIGGER', 'Only completing or leaving a goal may produce retrospective learning');
     if (value.setDown && !SET_DOWN_REASONS.includes(consolidationReason(envelope))) fail('OUTPUT_SET_DOWN_TRIGGER', 'Only leaving a goal may mark it as possibly put down');
-    for (const b of value.broaden) { const i = item(b.id, b.version); if (i.userProtected || i.sourceKind === 'unknown' || !ancestor(i.nodeId, b.toNodeId)) fail('OUTPUT_PROMOTION', 'Promotion must respect protection, provenance and the ancestor path'); }
+    for (const b of value.broaden) {
+      const i = item(b.id, b.version);
+      if (i.nodeId !== envelope.scope.nodeIds[0] || i.kind !== b.kind || i.userProtected || i.sourceKind === 'unknown' || !ancestor(i.nodeId, b.toNodeId)) fail('OUTPUT_PROMOTION', 'Only an eligible item of the current goal can move to an ancestor');
+      if (decided.has(b.id)) fail('OUTPUT_SCOPE_DECISION', 'Only one scope decision per item');
+      decided.add(b.id);
+    }
+    if (kept.length) {
+      const own = new Set(outputBindings(envelope).scopeReviewItemIds);
+      for (const k of kept) {
+        item(k.id, k.version);
+        if (!own.has(k.id) || decided.has(k.id) || !k.reason.trim()) fail('OUTPUT_SCOPE_DECISION', 'Kept requires one reason for a current item of the goal under review');
+        decided.add(k.id);
+      }
+    }
     for (const d of value.summary.decisions) if (d.by === 'user' && !human(d.sourceIds)) fail('OUTPUT_USER_SOURCE', 'Assistant suggestions cannot become user decisions');
   }
   if (role === 'verification') {
@@ -312,6 +326,19 @@ export function validateOutput(role, output, envelope) {
   return value;
 }
 
+function parsedResult(raw, result, rejectedItems, envelope) {
+  // Old, already queued jobs never asked the model to judge each item.
+  const review = envelope.outputBindings?.scopeReviewItemIds;
+  if (envelope.role === 'consolidation' && review?.length) {
+    const judged = new Set([...result.broaden, ...(result.kept ?? [])].map(row => row.id));
+    for (const itemId of review) if (!judged.has(itemId)) {
+      rejectedItems.push({ code: 'SCOPE_DECISION_MISSING', item: itemId, jobId: envelope.jobId,
+        message: 'Scope decision missing; item remains on its current goal.' });
+    }
+  }
+  return { raw, rawHash: digest(raw), result, rejectedItems };
+}
+
 export function parseFinalOutput(role, message, envelope) {
   if (message?.role !== 'assistant' || !Array.isArray(message.content) || message.content.some(b => !['text', 'reasoning'].includes(b.type))) fail('INVALID_OUTPUT', 'A complete final assistant text is required');
   const raw = message.content.filter(b => b.type === 'text').map(b => b.text).join('');
@@ -376,7 +403,7 @@ export function parseFinalOutput(role, message, envelope) {
       }
       return { raw, rawHash: digest(raw), result: normalized, rejectedItems };
     }
-    try { return { raw, rawHash: digest(raw), result: validateOutput(role, parsed, envelope), rejectedItems: [] }; }
+    try { return parsedResult(raw, validateOutput(role, parsed, envelope), [], envelope); }
     catch (error) {
       if (['consolidation', 'verification', 'improvement'].includes(role) && parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).every(key => Object.hasOwn(OUTPUT_SCHEMAS[role].properties, key))) {
         const rejectedItems = [];
@@ -386,6 +413,16 @@ export function parseFinalOutput(role, message, envelope) {
           // The summary is the unit of work; each lift or retrospective item is
           // admitted or rejected on its own.
           result = validateOutput(role, { summary: parsed.summary, broaden: [], retrospect: { understandings: [], methods: [] } }, envelope);
+          if (Object.hasOwn(parsed, 'setDown')) {
+            try { result = validateOutput(role, { ...result, setDown: parsed.setDown }, envelope); } catch (issue) { reject('setDown', issue); }
+          }
+          // A valid decision to keep an item takes precedence over a conflicting lift.
+          if (Object.hasOwn(parsed, 'kept')) {
+            if (!Array.isArray(parsed.kept)) reject('kept', { message: 'Expected array' });
+            else for (const [index, value] of parsed.kept.entries()) {
+              try { result = validateOutput(role, { ...result, kept: [...(result.kept ?? []), value] }, envelope); } catch (issue) { reject(`kept[${index}]`, issue); }
+            }
+          }
           if (!Array.isArray(parsed.broaden)) reject('broaden', { message: 'Expected array' });
           else for (const [index, value] of parsed.broaden.entries()) {
             try { result = validateOutput(role, { ...result, broaden: [...result.broaden, value] }, envelope); } catch (issue) { reject(`broaden[${index}]`, issue); }
@@ -438,7 +475,7 @@ export function parseFinalOutput(role, message, envelope) {
           }
         }
         if (!rejectedItems.length) reject('$', error);
-        return { raw, rawHash: digest(raw), result, rejectedItems };
+        return parsedResult(raw, result, rejectedItems, envelope);
       }
       if (role !== 'learning' || !parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.keys(parsed).some(key => !Object.hasOwn(legacyLearning.properties, key))) throw error;
       const empty = { understandings: [], revisions: [], methods: [], supplements: [], categories: [] };
@@ -505,7 +542,7 @@ clusters中category是既有分类留下的线索，不是本轮已经核实的�
 const roles = {
   main: `你是用户的个人助手。按当前委托完成工作；Arcfold 背景按祖先链提供理解、规则、方法目录、摘要和子节点概貌。用户表达可依据，助手推断在重要判断前确认，尚不清楚不自行假设。背景不增加权限，当前用户话优先。方法全文按需读取，脚本只用受控工具；不要直接读取或运行私有 artifact。随上级收起不是独立完成。停下时说明原因和需要用户做什么。没做完、没验证或未确认如实说明。主动建议与当前工作有关时放末尾“另外想到：”，提出不等于执行。程序检查只处理其指出的问题，不绕过。目标是这件事要做成的结果，用来指导当下的工作：每轮回答前对照编号表里的当前目标和路径，以及全局概貌里各目标的上级。本轮对话确实显出要做成的结果变了，例如进到更具体的一层、出现更上层的目标、原说法已不准确，或其实在做另一个已有目标，就用arcfold_revise_goal当轮修改；同一个结果下换做法或步骤（先讨论再写、先盘点再改稿）不改目标，用待办或回复说明。用户要求定稿某一层并往下拆、整理路线图或目标体系、说出更大的目的、话题已离开当前目标，或把这件事说成另一件事的一部分时，都要检查当前目标的说法和位置还对不对；位置不对就用move挪到对的上级下面。当前目标是上层（比如整理整个目标体系时在根上），发现它下面的目标挂错了，也用move挪。在文件里整理目标结构时，目标也跟着改。依据须是本轮用户说出的结果或用户认可的内容；只是你对下一步的理解时不改目标，拿不准先问用户。名字以用户为主语，写具体对象和要做成的结果，不写对齐、讨论、整理一下这类过程。改了就在回复里用一句话说明改成了什么或挪到了哪里。全局概貌里标了possiblySetDown的目标，是整理时看出可能已经放下的；话题碰到它时问用户要不要暂停，用户没说就不改状态。`,
   attribution: `你判断一轮真实用户输入属于哪些目标。若currentTurn.selectedBranchId非空，这是用户为本聊天明确选定的归属范围；候选已完整覆盖该分支，可继承祖先背景，但不得转到范围外。此时问候或闲聊也归选定分支的起点；新事项只能用create_child在候选父目标下创建，不用create。下文的归根规则只在未选分支时适用。先读 currentTurn.userSourceIds 对应的真实用户内容，再判断是否推进事项。若本轮只有问候、寒暄或无具体事务的闲聊，必须归根；这一判断优先于沿用当前 scope。根是 candidates 中 path 只有自身一个节点的候选；返回它已有的 id，不创建新的闲聊事项。短步骤或对前文的局部修改才继续当前。只有新的、会展开后续的事项才新建；新事项属于已有目标则创建子节点。一轮可有多个目标。先检查候选中是否已有所指事项，已有就使用原id，不能用同义名称重复创建。完成、暂停或放弃既有事项本身不是新事项；若本轮只改变某已有事项的状态，actions只返回该事项的continue或switch，statusChanges只修改它，不额外创建节点，也不带入未涉及的当前事项。只有用户另外明确提出新的持续事项时才同时创建它。状态变化只按明确用户来源，拿不准不改；“先放放”不自动等于放弃。名称以用户为主语，说具体的对象和要做成什么，通常40字以内。候选编号逐字使用，不能漏掉本轮明确涉及的目标。输出前逐项核对actions：每一项都必须对应本轮真实用户内容，删除无关或重复的项。`,
-  consolidation: `整理本节点自己的经历，不混入子节点进度。保留产出、已定决定、已约定下一步、尚未确认项；区分用户决定与助手建议。被推翻决定保留先后关系。可以建议将有独立依据、脱离本节点仍适用的内容提到祖先，不复制条目；unknown 不推广。完成或离开时回看有效做法，无依据可留空。threshold 触发只生成宿主给定覆盖范围的摘要，broaden 与 retrospect 必须为空；最近3轮由宿主保留，不自行扩大覆盖。`,
+  consolidation: `整理本节点自己的经历，不混入子节点进度。保留产出、已定决定、已约定下一步、尚未确认项；区分用户决定与助手建议。被推翻决定保留先后关系。离开或完成非根节点时，逐条判断本节点的有效理解和方法：有独立依据、离开具体任务仍成立的，提到需要它的最近祖先；其余在kept写明理由。受用户保护或来源不明的条目留在本节点。完成或离开时回看有效做法，无依据可留空。threshold 触发只生成宿主给定覆盖范围的摘要，broaden、kept 与 retrospect 必须为空；最近3轮由宿主保留，不自行扩大覆盖。`,
   verification: `根据实际暴露版本、后续反馈与适用机会检验理解/方法。分清生成、存放、进入上下文、实际使用哪个环节出错，再选操作；用户保护项只能附证据。祖先条目只提交本节点证据，不把局部例外推广到兄弟。方法未遇到情境是 unclear，不能把沉默算达标。读同类簇时可判断 none，类别相同不代表原因相同；强正面要与 ignored/unknown/rejected 对照。看有没有更好的做法，有依据才提出。检验标准不能被学习补充文字改动。`,
   improvement: `先判断跨节点修复是否真是同一问题；不同则 same=false、kind=none、不改。区分个人表达/特征与普遍工程问题。个人改动必须有 traitEvidence；普遍问题生成本地报告，可给关联的 universalStopgap。只能给 attribution/learning/consolidation 添加、修订、撤回有限补充文字，或调整 retentionDays/leaveTimeoutHours 范围内的参数；不能覆盖用户显式值。检验与改进本身只能报告，不能学习其检查规则。报告保留本地，不发送网络。`,
   script_writer: `你只为指定方法生成 Node.js ESM .mjs，只用内置模块。先用专用只读工具核文件，再经 writer_put 写当前草稿；不能使用通用 shell/edit 或改工作区。列工作区根目录时省略relativePath或传空字符串，不传点号。
@@ -531,7 +568,7 @@ changes 每项为 {"targetId":"已有理解编号","targetVersion":1,"mark":"cha
   }
   const schema = OUTPUT_SCHEMAS[role] ?? null, version = role === 'attribution' ? 'arcfold.tree.attribution/3.1.5' : role === 'verification' ? 'arcfold.tree.verification/3.1.16' : role === 'improvement' ? `arcfold.tree.${role}/3.1.15` : role === 'consolidation' ? 'arcfold.tree.consolidation/3.1.12' : role === 'script_writer' ? 'arcfold.tree.script_writer/3.1.7' : role === 'main' ? 'arcfold.tree.main/3.1.5' : PROMPT_VERSION;
   const binding = schema ? '\n编号必须按类型核对：evidence、sourceIds、sourceId只能用sources中原件的id；不能用turnId、windowId、exposureId、条目id、repairId或自编标签替代来源。targetId等条目引用只用knownItems的id和对应version；节点引用只用allowedIds.nodeIds。不能因为编号出现在输入某处，就把它放入任意引用字段。没有对应证据就不生成该项。' : '';
-  const roleChecks = role === 'consolidation' ? '\n先读trigger.reason选择本次允许的输出：threshold时只填写summary，broaden=[]，retrospect={"understandings":[],"methods":[]}；node_leave、leave_timeout或node_complete时可摘要、提出broaden，并回看有原话依据的新理解或方法；threshold和node_complete时setDown为null。进度、产出和本轮动作只放summary，不把它们重复存成理解。summary.next只写用户已约定的下一步；助手提议和待确认项放pending。不能从“保留草稿”推断用户决定暂停推进。' : role === 'verification' ? '\n先检查本次是否有sourceRecheck。有时用户把一条原话改归其他目标，原条目由多条原话形成，仍需按留下的证据复核；此时不是下面的常规效果检验。sources只含仍属于本目标的依据，knownItems中旧内容是待核主张，不能自己证明自己，也不能补回已移走的原文。只处理指定条目，operations或probes合计恰好一项，其余所有数组为空（proposals保留两个空数组）。证据仍完整支持原内容时support；只支持更窄的理解/纯文字方法时rewrite，替代文字只用剩余依据；已明确不再成立时withdraw；不足以判断时probe，说明缺什么。保护条目一律probe。补充做法需要改字，或带脚本方法需要改写时用probe，不能借复核增加/改动执行组件。operation.stage固定none；support会创建仅绑定所引剩余依据的新版本，不代表方法效果met；rewrite的sourceIds与evidence必须相同。不要留下空结果，也不要把归属调整自动算为模型生成错误。没有sourceRecheck时才做下面的常规检验。' : '';
+  const roleChecks = role === 'consolidation' ? '\n先读trigger.reason选择本次允许的输出：threshold时只填写summary，broaden=[]，kept=[]，retrospect={"understandings":[],"methods":[]}；node_leave、leave_timeout或node_complete时填写摘要，对outputBindings.scopeReviewItemIds逐条选择broaden或kept，并回看有原话依据的新理解或方法；threshold和node_complete时setDown为null。进度、产出和本轮动作只放summary，不把它们重复存成理解。summary.next只写用户已约定的下一步；助手提议和待确认项放pending。不能从“保留草稿”推断用户决定暂停推进。' : role === 'verification' ? '\n先检查本次是否有sourceRecheck。有时用户把一条原话改归其他目标，原条目由多条原话形成，仍需按留下的证据复核；此时不是下面的常规效果检验。sources只含仍属于本目标的依据，knownItems中旧内容是待核主张，不能自己证明自己，也不能补回已移走的原文。只处理指定条目，operations或probes合计恰好一项，其余所有数组为空（proposals保留两个空数组）。证据仍完整支持原内容时support；只支持更窄的理解/纯文字方法时rewrite，替代文字只用剩余依据；已明确不再成立时withdraw；不足以判断时probe，说明缺什么。保护条目一律probe。补充做法需要改字，或带脚本方法需要改写时用probe，不能借复核增加/改动执行组件。operation.stage固定none；support会创建仅绑定所引剩余依据的新版本，不代表方法效果met；rewrite的sourceIds与evidence必须相同。不要留下空结果，也不要把归属调整自动算为模型生成错误。没有sourceRecheck时才做下面的常规检验。' : '';
   const protocolChecks = role === 'verification' ? '\n每个新方法的expectedEffect须给出category、change、text，说明预期哪类反馈怎样变化；类别只能用固定枚举，不能以用户明确要求为由省略。只有输入trigger.directRequirement.category已由程序提供时，才可用null让宿主补齐。没有足够依据给预期效果时，不生成该方法。' + (role === 'verification' ? '\nproposals中origin表示本次提议来自哪种检查：常规检查填routine，漏做检查填missed，具体问题簇填cluster:<该簇id>；它不是节点归属，不得填nodeId。簇id只能来自输入allowedIds.clusters。输入把事件按反馈类别放在一起，只是待检查的候选，不表示此前有人已断言它们同因；不能把收到这个簇写成一次已经发生的错误或漏做。missed只列原文、实际结果或工具记录能证明已漏做的动作，没有这种证据就为空。' : '') : '';
   const evidenceChecks = {
     consolidation: '\n先按原文顺序区分四件事：已经发生的产出、说话人已作出的决定、仍是提议的动作、证据没有交代的部分。然后再填写摘要。decisions只收已经作出的决定；by=assistant不是收纳助手提议的许可，尚未被采纳的提议只放pending，并写明是谁提出。用户在前、助手提议在后而没有再回应时，不能虚构用户随后拒绝、推迟或同意该提议。status只说已知进度和明确状态，不补“等待批准继续”之类原文没有的控制条件。next没有已约定动作就留空，pending可以保留尚未核对的工作，不能因此宣称必须等用户批准。整理由离开或超时触发只是程序时机，不是用户暂停的决定。材料未拿到只说明尚未拿到，不推断是谁没有提供，也不转移获取材料的责任。用户明确确定以后沿用的做法属于已定约定，应保留为用户决定，不把其真实性或决定状态放回pending；实际效果只注明用户反馈，不冒充独立测得。每个带“已、仍、等待、同意、否认”的断言都检查其作者、时间和原文依据。未来行动的条件或许可顺序，只能作为约定保留，不能反推出条件目前尚未满足、相关工作尚未做过或对方已作出否定；当前事实必须另有原话或实际记录支持。',
@@ -547,7 +584,7 @@ changes 每项为 {"targetId":"已有理解编号","targetVersion":1,"mark":"cha
   const feedbackMeaning = ['consolidation', 'verification'].includes(role) ? '\n预期效果是在方法自己的适用情境里，希望哪种用户反馈怎样变化；category与change、text必须说同一件事。类别不是字面近似标签：not_understood=用户没听懂、要求换解释；misread=用户指出意思被读错；restart=用户要求回头梳理或换框架；repeated=用户再次交代已说过的背景或要求；overdone=用户指出多做；omitted=用户指出漏做；misreported=用户指出汇报与事实不符；redo=用户不接受成果并要求重做/撤回；proceeded=用户使用成果接着推进（弱支持）；approved=用户明确认可；adopted_proposal=用户采纳助手主动建议；confirmed_inference=用户证实既有助手推断。次数变化是该类反馈的减少/消失/增加，不是随便用一个带“确认”的类别表达已反馈效果。没有可对应的类别就不新建方法；摘要仍保留原事实与约定。' : '';
   const compact = {
     consolidation: `整理本节点自身经历，保留实际产出、用户已作决定、已约定的下一步和未确定事项，按发生顺序区分用户决定与助手建议。未被采纳的建议不是决定；未提供的内容保持未知。summary.oneLine是60字以内的一句话。
-先看summaryPlan.reason：threshold时只更新摘要，broaden和retrospect为空。leave_timeout或node_complete时，可把本节点已有的理解或方法提到上级（broaden）：去掉具体对象（某个文件、某个人、某次任务）仍然成立，别的节点也会用到才提；提到所有需要它的节点的最近共同上级，拿不准时只往上提一层；带具体文件、数字、时间的，来源为尚不清楚的，只在本节点成立的都不提。node_complete、node_leave或leave_timeout时回看这件事到目前为止是怎样推进的，把以后做类似的事值得沿用、且有原话依据的新认识或做法写进retrospect；进度和本轮动作不算认识。它会放到outputBindings.retrospectTarget指定的节点：完成时是上一级，离开时是本节点自己；isRoot为true时那里是所有事项共用的根节点，只写与具体任务无关的认识；没有就留空。node_leave或leave_timeout时，如果对话已经离开这个目标、它也没有用户约定的下一步，在setDown里写明理由和依据，表示可能已经放下；这只是提醒，不改状态；还有约定的下一步或拿不准时setDown为null。broaden的toNodeId只从outputBindings.broadenTargets中选。`,
+先看summaryPlan.reason：threshold时只更新摘要，broaden、kept和retrospect为空。node_leave、leave_timeout或node_complete时，对outputBindings.scopeReviewItemIds里本节点自己的每条有效理解或方法各做一次判断：去掉这项具体任务后仍成立的，放进broaden，提到需要它的最近祖先；原来写的适用场景窄，不能单凭这点判定内容只在本节点成立。只在此处成立、缺乏推广依据、受用户保护或来源不明的，放进kept，用一句话说明留在此处的原因。根节点没有上级，不要求逐条判断。node_complete、node_leave或leave_timeout时回看这件事到目前为止是怎样推进的，把以后做类似的事值得沿用、且有原话依据的新认识或做法写进retrospect；进度和本轮动作不算认识。它会放到outputBindings.retrospectTarget指定的节点：完成时是上一级，离开时是本节点自己；isRoot为true时那里是所有事项共用的根节点，只写与具体任务无关的认识；没有就留空。node_leave或leave_timeout时，如果对话已经离开这个目标、它也没有用户约定的下一步，在setDown里写明理由和依据，表示可能已经放下；这只是提醒，不改状态；还有约定的下一步或拿不准时setDown为null。broaden的toNodeId只从outputBindings.broadenTargets中选。`,
     verification: `检验已学内容在实际协作中的效果并就地修正。effects逐轮给出本轮输入放了哪些条目（itemVersions）、用户原话、助手回答和用户下一句；trace给出每个条目被用到的轮次、预期效果和进入输入的方式。先找信号：负面反馈类别、明确认可、采纳建议、确认推断；接受并推进只是弱支持；没回应既不是认可也不是反对。
 再判断出错环节，用operations修正：内容本身错了用rewrite并给新内容；原来就不成立用mark_invalid；以前成立、现在变了用mark_changed；放错节点用move，应给更多节点用promote，只适用于更小范围用demote；与另一条重复用merge；不该再进入输入用withdraw；方法进了输入却没做到，用harden在user_message时add_context，让助手收到用户消息时看到自查提醒。只有工具或文件条件能判断本轮漏做时，才用带条件的turn_end + continue；需要用户亲自处理的事才用remind_user；证据显示确实有用用support。stage写出错环节generate、store、enter或use，support写none。
 方法逐条写verifications：有适用机会且做到为met，有机会没做到为not_met，没有机会为unclear；opportunityCount只数evidence里真实的机会。repairTargets中的方法not_met时，必须在operations里给出修正它的操作。protectedItems是用户确认或修改过的，只能support，有冲突时用probes请用户确认。上级节点的条目只凭本节点证据只能support。
@@ -555,9 +592,9 @@ changes 每项为 {"targetId":"已有理解编号","targetVersion":1,"mark":"cha
     improvement: `根据repairs判断这一环节反复出错是否有共同原因，区分用户明确表达、系统事实和推测；fixedProducerSpecification是该环节当前的固定说明。没有共同原因时same为false、kind为none。原因在于这位用户的习惯或处境时kind为personal：可以在supplements中给该环节加一段补充说明（op为add），或修改、撤回已有的补充（revise、withdraw），traitEvidence须引用用户原话；也可以调整parameters中的设置。原因对所有用户都成立时kind为universal：必须写report，可以加一段临时补充，universalStopgap为true。补充只针对supplementTargets中的环节；explicitlyProtectedParameters中的设置由用户定过，不要改。mode为report_only时supplements和parameters为空。无充分依据时说明未知，不把风险当成已经发生的错误。`
   }[role];
   // Keep the emitted compact instructions versioned independently per role.
-  const effectiveVersion = compact ? `arcfold.tree.${role}/${role === 'improvement' ? '5.0.0' : '5.0.1'}` : version;
+  const effectiveVersion = compact ? `arcfold.tree.${role}/${role === 'consolidation' ? '5.1.0' : role === 'improvement' ? '5.0.0' : '5.0.1'}` : version;
   const conciseFormat = {
-    consolidation: `JSON格式：{"summary":{"oneLine":"一句概况，60字以内","status":"当前进展","outputs":[],"decisions":[],"next":"已约定的下一步","pending":[]},"broaden":[],"retrospect":{"understandings":[],"methods":[]},"setDown":null}。setDown不为null时为{"reason":"为什么看起来已经放下","sourceIds":["来源编号"]}。decisions每项为 {"what":"已作决定","by":"user或assistant","when":"时间或本轮","sourceIds":["来源编号"]}；用户决定须引用用户原话。没有已约定下一步时next为空字符串。broaden每项为{"kind":"understanding","id":"条目编号","version":1,"toNodeId":"上级节点编号","reason":"为什么别处也需要","sourceIds":["来源编号"]}。retrospect的理解为{"content":"一句话","source":"assistant_inferred","sourceIds":["来源编号"]}；方法为{"kind":"collaboration","short":{"situation":"何时适用","action":"怎么做","basis":"依据","notApplicable":"何时不适用"},"long":null,"hooks":[],"scriptRequests":[],"expectedEffect":{"category":"类别","change":"less","text":"预期反馈变化"},"sourceIds":["来源编号"]}。`,
+    consolidation: `JSON格式：{"summary":{"oneLine":"一句概况，60字以内","status":"当前进展","outputs":[],"decisions":[],"next":"已约定的下一步","pending":[]},"broaden":[],"kept":[],"retrospect":{"understandings":[],"methods":[]},"setDown":null}。setDown不为null时为{"reason":"为什么看起来已经放下","sourceIds":["来源编号"]}。decisions每项为 {"what":"已作决定","by":"user或assistant","when":"时间或本轮","sourceIds":["来源编号"]}；用户决定须引用用户原话。没有已约定下一步时next为空字符串。broaden每项为{"kind":"understanding","id":"条目编号","version":1,"toNodeId":"上级节点编号","reason":"为什么别处也需要","sourceIds":["来源编号"]}。kept每项为{"id":"条目编号","version":1,"reason":"只留在本节点的理由"}。retrospect的理解为{"content":"一句话","source":"assistant_inferred","sourceIds":["来源编号"]}；方法为{"kind":"collaboration","short":{"situation":"何时适用","action":"怎么做","basis":"依据","notApplicable":"何时不适用"},"long":null,"hooks":[],"scriptRequests":[],"expectedEffect":{"category":"类别","change":"less","text":"预期反馈变化"},"sourceIds":["来源编号"]}。`,
     verification: `JSON格式：{"operations":[],"missed":[],"verifications":[],"formatFixes":[],"clusters":[],"proposals":{"understandings":[],"methods":[]},"probes":[]}。operation为 {"op":"rewrite","targetId":"条目编号","targetVersion":1,"stage":"generate","reason":"理由","evidence":["来源编号"],"detail":{"replacement":{"content":"新理解","source":"assistant_inferred","sourceIds":["来源编号"]}}}；方法的replacement与方法同格式。support、mark_invalid、mark_changed、withdraw的detail为{}；move、promote、demote为{"toNodeId":"节点编号"}；merge为{"targetId":"保留的条目编号","targetVersion":1}；harden为{"hooks":[{"moment":"user_message","conditions":[],"action":"add_context","message":"交付前核对结果"}],"scriptRequests":[]}。verification为{"methodId":"方法编号","methodVersion":1,"result":"met","observed":"看到的情况","opportunityCount":1,"evidence":["来源编号"]}。missed为{"what":"漏记的认识","evidence":["来源编号"]}；probe为{"itemId":"条目编号","itemVersion":1,"what":"待用户确认的事","evidence":["来源编号"]}；cluster为{"clusterId":"簇编号","clusterVersion":1,"verdict":"common","commonality":"共同点","evidence":["来源编号"]}。`,
     improvement: `JSON格式：{"same":false,"diagnosis":"判断及未知","kind":"none","supplements":[],"parameters":[],"report":null}。新增补充为{"op":"add","target":"环节","scopeNodeId":"节点编号","text":{"situation":"何时适用","action":"怎么做","basis":"依据","notApplicable":"何时不适用"},"traitEvidence":["用户原话来源编号"],"universalStopgap":false}；revise在此基础上加"targetId"和"targetVersion"；withdraw为{"op":"withdraw","targetId":"条目编号","targetVersion":1,"target":"环节","scopeNodeId":"节点编号","traitEvidence":[],"universalStopgap":false}。参数为{"name":"retentionDays或leaveTimeoutHours","scopeNodeId":"节点编号","value":24,"reason":"理由","sourceIds":["来源编号"]}。report为{"step":"环节","problem":"问题","evidence":["来源编号"],"whyUniversal":"依据与限制","stopgap":"","suggestedFix":"建议"}。`
   }[role];
@@ -577,7 +614,10 @@ export function outputBindings(envelope) {
     // ConsolidationReflection uses the same rule.
     const node = envelope.scope.nodeIds[0], path = envelope.scope.ancestorPaths.find(p => p.at(-1) === node) ?? [node];
     const target = consolidationReason(envelope) === 'node_complete' && path.length > 1 ? path.at(-2) : node;
-    return { reason: consolidationReason(envelope), broadenTargets: path.slice(0, -1), retrospectTarget: { nodeId: target, isRoot: target === path[0] } };
+    const reason = consolidationReason(envelope);
+    const scopeReviewItemIds = path.length > 1 && RETROSPECT_REASONS.includes(reason)
+      ? envelope.knownItems.filter(i => i.nodeId === node && ['understanding', 'method'].includes(i.kind)).map(i => i.id) : [];
+    return { reason, scopeReviewItemIds, broadenTargets: path.slice(0, -1), retrospectTarget: { nodeId: target, isRoot: target === path[0] } };
   }
   if (envelope.role === 'learning' && envelope.outputProtocol === 'experience-v1') return {
     currentUserSourceIds: typed('user'), currentAssistantSourceIds: typed('assistant'), categorySourceIds: typed('user'), categorySubjectIds: envelope.allowedIds.subjectIds ?? [],

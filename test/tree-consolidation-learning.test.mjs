@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { learningFixture, emptyLearning } from './fixtures/tree-learning/helpers.mjs';
+import { nativeContext } from './fixtures/tree-context/native.mjs';
 import { method } from './fixtures/tree-domain/helpers.mjs';
 import { ConsolidationReflection } from '../src/tree/verification.mjs';
-import { validateOutput } from '../src/tree/prompts.mjs';
+import { outputBindings, parseFinalOutput, validateOutput } from '../src/tree/prompts.mjs';
 import { envelope, full } from './fixtures/tree-model/contracts.mjs';
 import { digest } from '../src/tree/contracts.mjs';
 
@@ -73,6 +74,111 @@ test('leaving a node lifts an own item to an ancestor without copying it', async
   assert.equal(f.repo.list('tree_items').length, 1);
 });
 
+test('leaving or completing a goal judges only its own items and saves the reason for keeping one', async t => {
+  for (const reason of ['node_leave', 'leave_timeout', 'node_complete']) await t.test(reason, async t => {
+    const f = learningFixture(t), parent = f.create('我制定检查标准'), node = f.create('我检查草稿', parent), sibling = f.create('我检查清单', parent);
+    await f.turn(node, '请帮我检查草稿');
+    const propose = (goal, contents) => {
+      f.asModel('learning', [goal]);
+      return f.propose(goal, { understandings: contents.map(content => ({ content, source: 'assistant_inferred', sourceRefs: [f.ref] })) }).understandings.itemIds;
+    };
+    const lesson = '检查任何材料前先确认验收日期。';
+    const [lifted, local] = propose(node, [lesson, '这份草稿要保留两个空行。']);
+    propose(parent, ['上级自己的理解']); propose(sibling, ['相邻目标自己的理解']);
+    if (reason === 'node_complete') {
+      f.asUser(); f.tree.setStatus(f.cmd({ nodeId: node, status: 'completed', sourceRefs: [] }, f.expected('tree_nodes', node)));
+    }
+    const job = enqueueLikeRuntime(f, f.consolidation.plan(node, reason));
+    assert.deepEqual(new Set(job.input.outputBindings.scopeReviewItemIds), new Set([lifted, local]));
+    const kept = [{ id: local, version: 1, reason: '两个空行是这一份草稿的版式要求。' }];
+    const result = run(f, job, { summary, broaden: [{ id: lifted, version: 1, kind: 'understanding', toNodeId: parent, reason: '几种材料都需要验收日期。', sourceIds: [userSource(job)] }], kept, retrospect: { understandings: [], methods: [] } });
+    assert.equal(result.status, 'committed'); assert.deepEqual(result.rejectedItems, []);
+    assert.deepEqual(f.repo.get('tree_summaries', result.resultRef.summaryId).kept, kept);
+    assert.equal(f.repo.get('tree_items', local).nodeId, node);
+    assert.deepEqual(result.resultRef.moved, [lifted]);
+    assert.ok(nodeContext(f, parent).understandings.some(item => item.id === lifted && item.content === lesson));
+    assert.ok(f.builder.build([sibling], 'main').segments.find(segment => segment.nodeId === parent).text.includes(lesson));
+  });
+});
+
+test('an omitted item stays local and the committed job names it while retaining the summary and other decision', async t => {
+  const f = learningFixture(t), parent = f.create('我做采购计划'), node = f.create('我核报价', parent);
+  await f.turn(node); f.asModel('learning', [node]);
+  const [keptId, missingId] = f.propose(node, { understandings: ['这份报价保留原顺序。', '报价中的邮费单列。'].map(content =>
+    ({ content, source: 'assistant_inferred', sourceRefs: [f.ref] })) }).understandings.itemIds;
+  const job = enqueueLikeRuntime(f, f.consolidation.plan(node, 'node_leave'));
+  const kept = [{ id: keptId, version: 1, reason: '只适用于这份报价单。' }];
+  const result = run(f, job, { summary, broaden: [], kept, retrospect: { understandings: [], methods: [] } });
+  assert.equal(result.status, 'committed');
+  assert.deepEqual(result.rejectedItems.map(({ code, jobId, item }) => [code, jobId, item]), [['SCOPE_DECISION_MISSING', job.id, missingId]]);
+  const saved = f.repo.get('tree_summaries', result.resultRef.summaryId);
+  assert.equal(saved.oneLine, summary.oneLine); assert.deepEqual(saved.kept, kept);
+  assert.equal(f.repo.get('tree_items', missingId).nodeId, node);
+});
+
+test('the next native main request for the parent contains the promoted understanding', async t => {
+  const label = 'promoted-parent-context', f = await nativeContext(t, label);
+  const parent = f.create('我准备说明材料'), child = f.create('我核对样张', parent);
+  const agent = await f.host.agent(label, f.mount);
+  f.target(child);
+  await f.host.run(agent, '先核对这份样张。');
+  await f.freeze(agent);
+  f.context.actor = { kind: 'program', id: 'fixture-host' };
+  f.experience.settle(f.attribution.existing(label, 1).id);
+  const lesson = '所有说明材料都要标注数据日期。';
+  f.asModel('learning', [child]);
+  const [id] = f.propose(child, { understandings: [{ content: lesson, source: 'assistant_inferred', sourceRefs: [f.ref] }] }).understandings.itemIds;
+  const job = enqueueLikeRuntime(f, f.consolidation.plan(child, 'node_leave'));
+  const result = run(f, job, { summary, broaden: [{ kind: 'understanding', id, version: 1, toNodeId: parent, reason: '同组材料共用这个要求。', sourceIds: [userSource(job)] }], kept: [], retrospect: { understandings: [], methods: [] } });
+  assert.deepEqual(result.resultRef.moved, [id]);
+  f.target(parent);
+  await f.host.run(agent, '回到说明材料整体。');
+  const message = f.host.requests.at(-1).messages.find(m => m.source?.componentKey === `node:${parent}` && m.content.some(part => part.type === 'text' && part.text.includes(lesson)));
+  assert.ok(message, 'the native request for the parent must carry the promoted item');
+});
+
+test('a job frozen before scope review accepts its original response without kept or omission diagnostics', () => {
+  const input = envelope('consolidation');
+  input.knownItems = input.knownItems.filter(item => item.id === 'i1');
+  input.trigger.reason = 'node_complete';
+  input.outputBindings = outputBindings(input);
+  assert.deepEqual(input.outputBindings.scopeReviewItemIds, ['i1']);
+  const plain = { summary, broaden: [], retrospect: { understandings: [], methods: [] } };
+  const message = { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(plain) }] };
+  assert.deepEqual(parseFinalOutput('consolidation', message, input).rejectedItems.map(row => row.item), ['i1']);
+  delete input.outputBindings.scopeReviewItemIds;
+  const legacy = parseFinalOutput('consolidation', message, input);
+  assert.deepEqual(legacy.result, plain); assert.deepEqual(legacy.rejectedItems, []);
+});
+
+test('root and threshold do not require scope decisions; malformed or conflicting entries do not authorize a move', () => {
+  const input = envelope('consolidation'), retained = { id: 'i1', version: 1, reason: '只适用于这一件事。' };
+  const plain = { summary, broaden: [], retrospect: { understandings: [], methods: [] } };
+  const parse = output => parseFinalOutput('consolidation', { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(output) }] }, input);
+  input.trigger.reason = 'threshold'; input.outputBindings = outputBindings(input);
+  assert.deepEqual(input.outputBindings.scopeReviewItemIds, []);
+  assert.throws(() => validateOutput('consolidation', { ...plain, kept: [retained] }, input), { code: 'OUTPUT_THRESHOLD' });
+  assert.deepEqual(parse(plain).rejectedItems, []);
+  input.trigger.reason = 'node_complete'; input.scope.nodeIds = ['root']; input.scope.ancestorPaths = [['root']];
+  input.knownItems[0].nodeId = 'root'; input.outputBindings = outputBindings(input);
+  assert.deepEqual(input.outputBindings.scopeReviewItemIds, []); assert.deepEqual(parse(plain).rejectedItems, []);
+  input.scope.nodeIds = ['n1']; input.scope.ancestorPaths = [['root', 'n1']]; input.knownItems[0].nodeId = 'n1';
+  input.outputBindings = outputBindings(input);
+  const lift = full.consolidation.broaden[0];
+  for (const change of [{ userProtected: true }, { sourceKind: 'unknown' }]) {
+    const item = input.knownItems[0], original = { ...item };
+    Object.assign(item, change);
+    assert.throws(() => validateOutput('consolidation', { ...plain, broaden: [lift] }, input), { code: 'OUTPUT_PROMOTION' });
+    Object.assign(item, original);
+  }
+  const conflict = parse({ ...plain, broaden: [lift], kept: [retained] });
+  assert.deepEqual(conflict.result.broaden, []); assert.deepEqual(conflict.result.kept, [retained]);
+  assert.ok(conflict.rejectedItems.some(item => item.code === 'OUTPUT_SCOPE_DECISION'));
+  const malformed = parse({ ...plain, broaden: [lift], kept: [{ ...retained, version: 0 }] });
+  assert.deepEqual(malformed.result.broaden, [lift]);
+  assert.ok(malformed.rejectedItems.some(item => item.item === 'kept[0]'));
+});
+
 test('a completed top-level goal is told that its retrospect goes to the shared root', async t => {
   const f = learningFixture(t), goal = f.create('我写好推荐信');
   await f.turn(goal, '推荐信写好了。');
@@ -93,7 +199,7 @@ test('leaving a node keeps its retrospect on the node itself, and one bad lift d
   const result = run(f, job, { summary, broaden: [{ kind: 'method', id, version: 1, toNodeId: 'not-an-ancestor', reason: '编造的节点', sourceIds: [source] }],
     retrospect: { understandings: [{ content: '推荐信先列事实再写评价', source: 'assistant_inferred', sourceIds: [source] }], methods: [] } });
   assert.equal(result.status, 'committed');
-  assert.deepEqual(result.rejectedItems.map(r => [r.item, r.code]), [['broaden[0]', 'OUTPUT_REFERENCE']]);
+  assert.deepEqual(result.rejectedItems.map(r => [r.item, r.code]), [['broaden[0]', 'OUTPUT_REFERENCE'], [id, 'SCOPE_DECISION_MISSING']]);
   assert.equal(f.repo.get('tree_items', id).nodeId, a);
   assert.deepEqual(f.repo.list('tree_items', i => i.kind === 'understanding').map(i => i.nodeId), [a], 'the new understanding stays on the goal that was left');
   assert.equal(f.repo.get('tree_summaries', f.repo.get('tree_nodes', a).currentSummaryId).oneLine, '合成概况');
@@ -168,7 +274,9 @@ test('a goal that was left may be marked as possibly put down; the mark never ch
 // the oneLine limit that the schema enforces on the whole summary.
 test('the compact consolidation prompt states the 60-character oneLine limit its schema enforces', async () => {
   const { compilePrompt } = await import('../src/tree/prompts.mjs'), prompt = compilePrompt('consolidation');
-  assert.equal(prompt.version, 'arcfold.tree.consolidation/5.0.1');
+  assert.equal(prompt.version, 'arcfold.tree.consolidation/5.1.0');
+  assert.match(prompt.text, /scopeReviewItemIds/);
+  assert.match(prompt.text, /"kept":\[\]/);
   assert.match(prompt.text, /summary\.oneLine是60字以内的一句话/);
   assert.match(prompt.text, /"oneLine":"一句概况，60字以内"/);
   assert.equal(compilePrompt('improvement').version, 'arcfold.tree.improvement/5.0.0');

@@ -100,6 +100,38 @@
       ],
       "additionalProperties": false
     },
+    "kept": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 512,
+            "x-reference": "item"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
     "broaden": {
       "type": "array",
       "items": {
