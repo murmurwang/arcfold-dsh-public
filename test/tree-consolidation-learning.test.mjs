@@ -175,6 +175,7 @@ test('the compact consolidation prompt states the 60-character oneLine limit its
   const e = envelope('consolidation'), output = oneLine => ({ ...full.consolidation, broaden: [], retrospect: { understandings: [], methods: [] }, summary: { ...full.consolidation.summary, oneLine } });
   assert.equal(validateOutput('consolidation', output('概'.repeat(60)), e).summary.oneLine.length, 60);
   assert.throws(() => validateOutput('consolidation', output('概'.repeat(61)), e), { code: 'INVALID_OUTPUT' });
+});
 
 test('consolidation keeps long tool output by reference and carries only what each covered learning saw and produced', async t => {
   const { LEARNING_TOOL_SOURCE_CHARS, compactLearningSource } = await import('../src/tree/experience.mjs');
