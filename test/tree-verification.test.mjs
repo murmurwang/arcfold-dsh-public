@@ -311,3 +311,109 @@ test('missed learning is attributable only to a committed producer and new propo
   assert.equal(result.status, 'committed'); const repair = f.repo.list('tree_repairs')[0]; assert.equal(repair.producerJobId, learned.id); assert.equal(repair.countsAsError, true);
   const item = f.repo.list('tree_items')[0]; assert.equal(item.producerRole, 'verification'); assert.equal(item.producerJobId, job.id);
 });
+
+test('missed evidence becomes unverified understanding once per exact node and text', async t => {
+  const f = learningFixture(t), node = f.create('合成范围');
+  await observe(f, node);
+  const v = verifier(f), job = v.enqueue(node);
+  const user = job.input.effects[0].input[0], assistant = job.input.effects[0].answer[0];
+  const output = { ...emptyVerification(), missed: [
+    { what: '保留原始格式', evidence: [assistant.id, user.id] },
+    { what: '这是一项推断', evidence: [assistant.id] },
+    { what: '保留原始格式', evidence: [user.id] },
+    { what: '已记录的要求', evidence: [user.id] },
+  ], proposals: { understandings: [{ content: '已记录的要求', source: 'user_expressed', sourceIds: [user.id], origin: 'routine' }], methods: [] } };
+  const done = complete(f, v, job, output);
+  assert.equal(done.status, 'committed');
+  const rows = f.builder.activeItems([node]);
+  assert.equal(rows.length, 3);
+  for (const [content, sourceKind, refs] of [
+    ['保留原始格式', 'user_expressed', [assistant.ref, user.ref]],
+    ['这是一项推断', 'assistant_inferred', [assistant.ref]],
+  ]) {
+    const { item, version } = rows.find(row => row.version.content === content);
+    assert.equal(item.validation, 'unverified');
+    assert.equal(item.producerJobId, job.id);
+    assert.equal(item.producerRole, 'verification');
+    assert.equal(version.sourceKind, sourceKind);
+    assert.deepEqual(version.sourceRefs, refs);
+    assert.ok(done.resultRef.proposals.some(p => p.origin === 'missed' && p.result.understandings.itemIds.includes(item.id)));
+  }
+  const repairs = f.repo.list('tree_repairs');
+  assert.equal(repairs.length, 4);
+  assert.ok(repairs.every(r => !r.countsAsError && r.type === 'missed'));
+  assert.equal(f.jobs.commit(job.id).id, job.id);
+  assert.equal(f.repo.list('tree_item_versions').length, 3);
+});
+
+test('missed findings follow the cited episode owners inside a cross-node review', async t => {
+  const f = learningFixture(t), a = f.create('合成甲'), b = f.create('合成乙');
+  const first = await f.feedback(a, 'not_understood', '甲的要求');
+  const second = await f.feedback(b, 'not_understood', '乙的要求');
+  await f.feedback(a, 'not_understood', '甲再次反馈');
+  const root = f.repo.rootId(), cluster = f.clusters.candidate('not_understood', 'negative');
+  const v = verifier(f), job = v.enqueue(root, { reason: 'cluster', clusterIds: [cluster.id] });
+  const done = complete(f, v, job, { ...emptyVerification(), missed: [
+    { what: '乙的特定要求', evidence: [second.source.id] },
+    { what: '两处都适用', evidence: [first.source.id, second.source.id] },
+  ] });
+  assert.equal(done.status, 'committed');
+  const contents = id => f.builder.activeItems([id]).map(r => r.version.content).sort();
+  assert.deepEqual(contents(root), []);
+  assert.deepEqual(contents(a), ['两处都适用']);
+  assert.deepEqual(contents(b), ['乙的特定要求', '两处都适用'].sort());
+});
+
+test('a frozen control source owned outside the review falls back to its review node', async t => {
+  const f = learningFixture(t), node = f.create('合成检验'), other = f.create('合成对照');
+  await f.turn(node);
+  const external = await f.turn(other, '合成对照证据');
+  const v = verifier(f), { input, revisions } = v.freeze(node);
+  const control = f.sources.resolve(external.userSourceRefs[0]);
+  input.sources.push(control);
+  const job = f.jobs.enqueue({ role: 'verification', key: 'synthetic-control', nodeIds: [node], input, revisionSet: revisions, config: f.config(), trigger: { kind: 'window', producerRole: 'program' } });
+  assert.equal(complete(f, v, job, { ...emptyVerification(), missed: [{ what: '对照中发现的问题', evidence: [control.id] }] }).status, 'committed');
+  assert.deepEqual(f.builder.activeItems([node]).map(r => r.version.sourceRefs), [[control.ref]]);
+  assert.deepEqual(f.builder.activeItems([other]), []);
+});
+
+test('oversized and unresolvable missed findings keep their repairs and diagnostics while valid siblings apply', async t => {
+  const f = learningFixture(t), node = f.create('合成写入失败');
+  await observe(f, node);
+  const v = verifier(f), job = v.enqueue(node);
+  const user = job.input.effects[0].input[0], assistant = job.input.effects[0].answer[0];
+  // The item writer rechecks immutable evidence separately from the frozen job admission.
+  v.resolveSource = ref => digest(ref) === digest(assistant.ref) ? null : f.resolveSource(ref);
+  const tooLong = '长'.repeat(2001);
+  const output = { ...emptyVerification(), missed: [
+    { what: tooLong, evidence: [user.id] },
+    { what: '此条的一个来源不可读', evidence: [user.id, assistant.id] },
+    { what: '正常的遗漏', evidence: [user.id] },
+  ], proposals: { understandings: [{ content: '正常的常规提议', source: 'user_expressed', sourceIds: [user.id], origin: 'routine' }], methods: [] } };
+  const done = complete(f, v, job, output);
+  assert.equal(done.status, 'committed');
+  assert.deepEqual(f.repo.list('tree_repairs').map(r => r.reason).sort(), output.missed.map(r => r.what).sort());
+  assert.deepEqual(f.builder.activeItems([node]).map(r => r.version.content).sort(), ['正常的遗漏', '正常的常规提议'].sort());
+  assert.equal(f.repo.list('tree_item_versions').length, 2);
+  const diagnostics = Object.values(f.repo.meta().runtimeDiagnostics).filter(d => d.kind === 'missed_understanding');
+  assert.deepEqual(diagnostics.map(d => [d.jobId, d.index, d.code]).sort((a, b) => a[1] - b[1]), [[job.id, 0, 'INVALID_FIELD'], [job.id, 1, 'SOURCE_CHANGED']]);
+});
+
+test('a source failure on the second goal rolls back all new copies of that finding', async t => {
+  const f = learningFixture(t), a = f.create('合成范围甲'), b = f.create('合成范围乙');
+  const first = await f.feedback(a, 'not_understood', '甲的依据');
+  const second = await f.feedback(b, 'not_understood', '乙的依据');
+  await f.feedback(a, 'not_understood', '再次观察');
+  const cluster = f.clusters.candidate('not_understood', 'negative');
+  const v = verifier(f), job = v.enqueue(f.repo.rootId(), { reason: 'cluster', clusterIds: [cluster.id] });
+  let reads = 0;
+  v.resolveSource = ref => digest(ref) === digest(first.source.ref) && ++reads === 2 ? null : f.resolveSource(ref);
+  const done = complete(f, v, job, { ...emptyVerification(), missed: [{ what: '跨节点但写入失败', evidence: [first.source.id, second.source.id] }] });
+  assert.equal(done.status, 'committed');
+  assert.equal(reads, 2);
+  assert.equal(done.resultRef.proposals.length, 0);
+  assert.equal(f.repo.list('tree_repairs', r => r.type === 'missed').length, 1);
+  assert.equal(f.repo.list('tree_items').length, 0);
+  assert.equal(f.repo.list('tree_item_versions').length, 0);
+  assert.ok(Object.values(f.repo.meta().runtimeDiagnostics).some(d => d.jobId === job.id && d.code === 'SOURCE_CHANGED'));
+});

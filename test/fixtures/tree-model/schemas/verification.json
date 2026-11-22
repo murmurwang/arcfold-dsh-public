@@ -2109,8 +2109,7 @@
           "what": {
             "type": "string",
             "minLength": 1,
-            "pattern": "^[^\\u0000]*$",
-            "maxLength": 2000
+            "pattern": "^[^\\u0000]*$"
           },
           "evidence": {
             "type": "array",

@@ -226,14 +226,74 @@ export class VerificationService {
         this.repo.save('tree_repairs', { id, producerRole: 'learning', producerJobId: producerJobs.length === 1 ? producerJobs[0].id : null, producerJobIds: producerJobs.map(j => j.id), stage: 'generate', type: 'missed', category: 'missed_learning', nodeIds: [...new Set(producerJobs.flatMap(j => j.nodeIds))], sourceSignalIds: [], reason: missed.what, evidenceRefs, requestId, countsAsError: producerJobs.length > 0, attribution: producerJobs.length ? 'bound_committed_producer' : 'unresolved' });
         repaired.push(id); return { repairId: id };
       });
-      const proposals = this.applyProposals(output, job, requestId);
+      const { proposals } = this.applyProposals(output, job, requestId);
+      proposals.push(...this.learnMissed(output.missed, job, requestId, service));
       const formatFixes = this.applyFormatFixes(output.formatFixes, job, requestId);
       for (const [index, probe] of output.probes.entries()) this.repo.command('recordVerificationProbe', { requestId: digest([requestId, 'probe', index]), expected: {}, input: probe }, actor, () => {
         const item = this.repo.get('tree_items', probe.itemId); if (item.lifecycle !== 'active' || item.activeVersion !== probe.itemVersion) fail('PROBE_STALE', 'Probe target was changed by this batch');
         this.repo.save('tree_items', { ...item, probe: { what: probe.what, evidenceRefs: refs(probe.evidence), version: item.activeVersion, windowId: input.window.id } }, item.revision); return { itemId: item.id };
       });
-      return { windowId: input.window.id, operations: outcomes, repairs: repaired, ...proposals, formatFixes, missed: output.missed, probes: output.probes };
+      return { windowId: input.window.id, operations: outcomes, repairs: repaired, proposals, formatFixes, missed: output.missed, probes: output.probes };
     });
+  }
+  learnMissed(missed, job, requestId, service) {
+    if (!missed.length) return [];
+    const { reviewNodeIds, sources } = job.input;
+    const cited = new Set(missed.flatMap(gap => gap.evidence));
+    const nodesByRef = new Map(sources.filter(source => cited.has(source.id)).map(source => [canonicalJson(source.ref), new Set()]));
+    // Feedback on one effect belongs to the turn that actually contains the
+    // source. Match its immutable reference, including sources from cluster controls.
+    const links = this.repo.listByNodeIds('tree_links', reviewNodeIds, link => link.active);
+    for (const turnId of new Set(links.map(link => link.turnId))) {
+      const turn = this.repo.get('tree_turns', turnId);
+      for (const ref of turn.experienceRefs ?? turn.sourceRefs) {
+        const targets = nodesByRef.get(canonicalJson(ref));
+        if (targets) {
+          for (const id of turn.nodeIds) if (reviewNodeIds.includes(id)) targets.add(id);
+        }
+      }
+    }
+    const known = new Map(reviewNodeIds.map(id => [id, new Set()]));
+    for (const { item, version } of this.builder.activeItems(reviewNodeIds)) {
+      if (item.kind === 'understanding') known.get(item.nodeId).add(version.content);
+    }
+    const proposals = [];
+    for (const [index, gap] of missed.entries()) {
+      const evidence = sources.filter(source => gap.evidence.includes(source.id));
+      const targets = new Set(evidence.flatMap(source => [...nodesByRef.get(canonicalJson(source.ref))]));
+      if (!targets.size) targets.add(job.input.window.nodeId);
+      const source = evidence.some(s => s.role === 'user' && s.origin === 'user') ? 'user_expressed' : 'assistant_inferred';
+      const understanding = { content: gap.what, source, sourceIds: gap.evidence };
+      const input = proposalInput({ understandings: [understanding] }, job.input);
+      const pending = [...targets].filter(nodeId => !known.get(nodeId).has(gap.what));
+      if (!pending.length) continue;
+      let rejection;
+      try {
+        // A finding shared by several goals becomes visible on all of them together.
+        const written = this.repo.transaction(() => pending.map(nodeId => {
+          const key = digest([requestId, 'missed-understanding', index, nodeId]);
+          const result = service.commitProposal({ requestId: key, expected: {}, input: { ...input, nodeId } }).result;
+          const outcome = result.understandings;
+          if (outcome.status === 'rejected') {
+            rejection = { kind: 'missed_understanding', jobId: job.id, index, nodeId, code: outcome.code, message: outcome.reason };
+            throw new Error(outcome.reason);
+          }
+          recordOrigins(this.repo, outcome.itemIds, job, digest([key, 'origin']));
+          return { origin: 'missed', partition: 'understandings', result };
+        }));
+        proposals.push(...written);
+        for (const nodeId of pending) known.get(nodeId).add(gap.what);
+      } catch (error) {
+        if (!rejection) throw error;
+        const key = digest([requestId, 'missed-understanding-diagnostic', index]);
+        this.repo.command('recordMissedUnderstandingDiagnostic', { requestId: key, expected: {}, input: rejection }, { kind: 'program', id: 'reflection' }, () => {
+          const meta = this.repo.meta();
+          this.repo.save('tree_meta', { ...meta, runtimeDiagnostics: { ...meta.runtimeDiagnostics, [key]: { ...rejection, at: this.repo.now() } } }, meta.revision);
+          return rejection;
+        });
+      }
+    }
+    return proposals;
   }
   applyProposals(output, job, requestId) {
     const items = new ItemService({ repository: this.repo, resolveSource: this.resolveSource, context: () => ({ actor: { kind: 'model', id: job.id, role: 'verification' }, nodeIds: job.nodeIds }) });
