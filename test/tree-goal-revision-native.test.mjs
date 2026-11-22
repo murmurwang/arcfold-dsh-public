@@ -10,7 +10,7 @@ const text = body => body.messages.flatMap(m => m.content ?? []).filter(b => b.t
 // conversation names its real direction and goes one layer deeper.
 async function planningConversation(t, { announce = true, extra = {} } = {}) {
   let phase = 'open', step = 0, goal;
-  const seen = [];
+  const seen = [], raw = [];
   const f = await integratedFixture(t, (row, { repo }) => {
     if (row.role === 'attribution') return phase === 'open'
       ? { actions: [{ action: 'create', name: '把计划拆成每日待办' }], statusChanges: [] }
@@ -18,7 +18,7 @@ async function planningConversation(t, { announce = true, extra = {} } = {}) {
     if (row.role === 'learning') return emptyLearning();
     if (row.role === 'verification') return emptyVerification();
     if (row.role !== 'main' || phase !== 'deepen') return '合成答复。';
-    seen.push(text(row.body)); step++;
+    seen.push(text(row.body)); raw.push(JSON.stringify(row.body)); step++;
     if (step === 1) return { tool: { id: 'rename-goal', name: 'arcfold_revise_goal', args: { op: 'rename', nodeId: goal, expectedRevision: repo.get('tree_nodes', goal).revision, name: RENAMED, reason: '用户把整个计划概括成两条主线', ...extra } } };
     if (step === 2) return { tool: { id: 'child-goal', name: 'arcfold_revise_goal', args: { op: 'create_child', nodeId: goal, expectedRevision: repo.get('tree_nodes', goal).revision, name: CHILD, reason: '讨论进到两条主线的具体内容', ...extra } } };
     return announce ? `我把目标改成了「${RENAMED}」，并在下面新建「${CHILD}」，这一轮记在它下面。` : '好的，继续讨论。';
@@ -30,7 +30,7 @@ async function planningConversation(t, { announce = true, extra = {} } = {}) {
   phase = 'deepen';
   const second = await f.turn(agent, '整个计划其实是两条线，我们先讨论这两条线的具体内容。');
   phase = 'after';
-  return { f, agent, goal, second, seen };
+  return { f, agent, goal, second, seen, raw };
 }
 
 test('main revises its goal in the turn: a rename is visible on the next step, a child takes the turn at its end', async t => {
@@ -65,8 +65,8 @@ for (const [label, parentId] of [['an empty parentId', ''], ['a blank parentId',
 }
 
 test('rename with a real parentId is refused with a hint to leave it out', async t => {
-  const { f, goal, second, seen } = await planningConversation(t, { extra: { parentId: 'f2db1f1f-6468-4780-9327-4a4b536b99bb' } });
-  assert.match(seen[1], /parentId is only for move[^"]*omit parentId/, 'main is told to omit parentId');
+  const { f, goal, second, raw } = await planningConversation(t, { extra: { parentId: 'f2db1f1f-6468-4780-9327-4a4b536b99bb' } });
+  assert.match(raw[1], /parentId is only for move[^"]*omit parentId/, 'main is told to omit parentId');
   assert.notEqual(f.repo.get('tree_nodes', goal).name, RENAMED);
   assert.deepEqual(f.repo.get('tree_turns', second.id).goalRevisions ?? [], []);
 });
