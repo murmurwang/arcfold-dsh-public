@@ -163,3 +163,16 @@ test('a goal that was left may be marked as possibly put down; the mark never ch
   await learnedTurn(f, a, '回到每日待办');
   assert.equal(f.builder.glance(f.repo.get('tree_nodes', a)).possiblySetDown, undefined, 'coming back to the goal clears the mark');
 });
+
+// The compact consolidation prompt carries no output schema, so it must state
+// the oneLine limit that the schema enforces on the whole summary.
+test('the compact consolidation prompt states the 60-character oneLine limit its schema enforces', async () => {
+  const { compilePrompt } = await import('../src/tree/prompts.mjs'), prompt = compilePrompt('consolidation');
+  assert.equal(prompt.version, 'arcfold.tree.consolidation/5.0.1');
+  assert.match(prompt.text, /summary\.oneLine是60字以内的一句话/);
+  assert.match(prompt.text, /"oneLine":"一句概况，60字以内"/);
+  for (const role of ['verification', 'improvement']) assert.equal(compilePrompt(role).version, `arcfold.tree.${role}/5.0.0`);
+  const e = envelope('consolidation'), output = oneLine => ({ ...full.consolidation, broaden: [], retrospect: { understandings: [], methods: [] }, summary: { ...full.consolidation.summary, oneLine } });
+  assert.equal(validateOutput('consolidation', output('概'.repeat(60)), e).summary.oneLine.length, 60);
+  assert.throws(() => validateOutput('consolidation', output('概'.repeat(61)), e), { code: 'INVALID_OUTPUT' });
+});
