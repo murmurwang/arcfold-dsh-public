@@ -5,7 +5,16 @@ import { compilePrompt } from './prompts.mjs';
 import { nativeAgentOptions, nativeModel } from './native-models.mjs';
 import { nativeResponseComplete } from './native-model-records.mjs';
 
-const requestHash = options => digest({ messages: options.messages, tools: options.tools ?? [], toolHistory: options.toolHistory ?? null });
+// The single turn carrying this job's input ended because the host disposed
+// the agent, and no assistant answer was recorded inside it.
+function disposedWithoutAnswer(events, own) {
+  if (own.length !== 1) return false;
+  const start = events.findLast(e => e.type === 'turn/start' && e.seq < own[0].seq);
+  const end = start && events.find(e => e.type === 'turn/end' && e.data?.turn === start.data?.turn && e.seq > own[0].seq);
+  if (!end || end.data?.reason?.kind !== 'aborted' || end.data.reason.reason?.kind !== 'disposed') return false;
+  return !events.some(e => e.type === 'assistant/message' && e.seq > start.seq && e.seq < end.seq);
+}
+const requestHash = options =>digest({ messages: options.messages, tools: options.tools ?? [], toolHistory: options.toolHistory ?? null });
 function nativePosition(session) {
   const events = session.snapshotEvents(), start = events.findLast(e => e.type === 'step/start'), turn = events.findLast(e => e.type === 'turn/start');
   if (!start || !turn || !Number.isSafeInteger(start.data.turn) || !Number.isSafeInteger(start.data.step) || turn.data.turn !== start.data.turn || turn.seq >= start.seq || events.slice(start.seq + 1).some(e => ['assistant/message', 'assistant/attempt', 'step/end', 'turn/end'].includes(e.type))) fail('NATIVE_STEP', 'No live unattempted native step');
@@ -279,12 +288,14 @@ export class TreeModelOwner {
     } return results;
   }
   // A learning request interrupted when the host stopped: readable session, no
-  // complete result, and this job's input never became durable there. A job
-  // whose input did reach the session keeps the existing unknown protection.
+  // complete result, and either this job's input never became durable there or
+  // the native log ended its turn as disposed without any answer. Any other
+  // turn ending, or no ending, keeps the existing unknown protection.
   #settleInterrupted(id, events) {
     const job = this.jobs.get(id);
     if (job.role !== 'learning' || job.status !== 'unknown') return null;
-    if (events.some(e => e.type === 'user/message' && e.data.source?.jobId === id)) return null;
+    const own = events.filter(e => e.type === 'user/message' && e.data.source?.jobId === id);
+    if (own.length && !disposedWithoutAnswer(events, own)) return null;
     return this.jobs.failInterrupted(id, { eventsHash: digest(events) });
   }
   async close() { this.closed = true; for (const handle of this.handles.values()) handle.agent.cancel({ kind: 'disposed' }, { keepInbox: true }); await Promise.allSettled([...this.running.values()]); }
