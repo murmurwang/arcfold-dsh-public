@@ -13,7 +13,7 @@ import { registerTreeRequestAuthority, ownEvidenceDirectory } from '../native-re
 import { ScriptArtifacts, MethodScriptBroker } from './scripts.mjs';
 import { SnapshotService, ConfinedWorkspaceIO } from './snapshots.mjs';
 import { canonicalPath, processPolicy, beneath } from './host-process.mjs';
-import { TreeJobs, deferredLearning } from './jobs.mjs';
+import { TreeJobs, deferredLearning, interruptedLearning, movedLearning, preDispatchLearning, NATIVE_PRE_DISPATCH } from './jobs.mjs';
 import { TreeModelOwner } from './model-owner.mjs';
 import { NativeSources, ExperienceService } from './experience.mjs';
 import { ContextBuilder, mountTreeContext } from './context.mjs';
@@ -636,7 +636,7 @@ export class TreeRuntime {
       try { this.afterCommit(job); } catch (error) { if (!busy.has(error.code)) this.diagnostic('epoch_completion', error, { jobId: job.id }); }
     }
     for (const intent of this.repo.list('tree_jobs', j => !j.role && j.kind === 'learning' && j.status === 'queued')) {
-      try { this.learning.enqueue(intent.input.turnId, intent.nodeIds[0]); }
+      try { this.closeLearningIntent(intent, this.learning.enqueue(intent.input.turnId, intent.nodeIds[0])); }
       catch (error) { if (!busy.has(error.code)) this.diagnostic('learning_queue', error, { intentId: intent.id }); }
     }
     for (const intent of this.repo.list('tree_jobs', j => !j.role && j.kind === 'verification' && j.status === 'queued')) {
@@ -681,10 +681,21 @@ export class TreeRuntime {
       try { this.improvement.enqueue(role); } catch (error) { if (!busy.has(error.code)) this.diagnostic('improvement_queue', error, { role }); }
     }
   }
+  // A turn whose learning ended for good, with nothing left to retry, stops
+  // being asked for again on every scan.
+  closeLearningIntent(intent, job) {
+    if (!job || !['failed', 'invalid_output', 'stale', 'cancelled'].includes(job.status)) return;
+    if (deferredLearning(job) || interruptedLearning(job) || preDispatchLearning(job) || movedLearning(job)) return;
+    const status = job.status === 'stale' || job.status === 'cancelled' ? job.status : 'failed';
+    this.repo.command('closeLearningIntent', { requestId: digest(['close-learning-intent', intent.id, job.id]), expected: { ['tree_jobs:' + intent.id]: intent.revision }, input: { intentId: intent.id, jobId: job.id, status } },
+      program, () => { this.repo.save('tree_jobs', { ...intent, status, ownedJobId: job.id }, intent.revision); return { intentId: intent.id }; });
+  }
   async runWorker(id) {
     const slot = await this.requestSlots.acquire(this.shutdown.signal);
     try {
       const result = await this.owner.run(id), release = await this.admissions.acquire(this.shutdown.signal);
+      if (result?.role === 'learning' && result.status === 'failed' && result.error?.code === NATIVE_PRE_DISPATCH)
+        this.diagnostic('learning_pre_dispatch', result.error, { jobId: result.id, nodeId: result.nodeIds[0], nativeLogRef: result.nativeLogRef ?? null, retried: result.trigger?.retriesPreDispatch === true });
       try { if (!this.handlePressure(result)) this.afterCommit(result); }
       finally { release(); }
     } finally { slot(); }

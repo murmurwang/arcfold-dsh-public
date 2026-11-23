@@ -4,7 +4,7 @@ import { validateOutput, resolveSourceIds } from './prompts.mjs';
 import { ScriptWriter } from './script-writer.mjs';
 import { learningCorrections, LearningObservations, quotedSource } from './observations.mjs';
 import { MetricsService } from './metrics.mjs';
-import { deferredLearning, interruptedLearning } from './jobs.mjs';
+import { deferredLearning, interruptedLearning, movedLearning, preDispatchLearning } from './jobs.mjs';
 import { compactLearningSource } from './experience.mjs';
 
 const program = { kind: 'program', id: 'tree-learning' };
@@ -50,14 +50,19 @@ export class LearningService {
     const turn = this.repo.get('tree_turns', turnId);
     if (!turn || turn.status !== 'settled' || !turn.nodeIds.includes(nodeId)) fail('LEARNING_EXPERIENCE', 'Learning needs a settled own main turn');
     const baseKey = digest(['turn-learning', turnId, nodeId, turn.assignmentRevision]), old = this.existing(turn, nodeId);
-    const session = this.repo.list('tree_learning_sessions', s => s.nodeId === nodeId)[0];
+    let session = this.repo.list('tree_learning_sessions', s => s.nodeId === nodeId)[0];
     // Only an append stopped before submission, or one the provider refused
     // for context size without output, may be frozen again after the epoch
     // changes. A request interrupted by a host stop before it was released is
     // frozen again at once. Paid/unknown and ordinary failures never retry.
-    const deferred = deferredLearning(old), interrupted = interruptedLearning(old);
-    if (old && (interrupted ? session?.paused : !deferred || session?.paused || session?.contextEpoch <= old.contextEpoch)) return old;
-    const key = !old ? baseKey : interrupted ? digest(['interrupted-learning', baseKey, old.id]) : digest(['epoch-learning', baseKey, session.contextEpoch]);
+    const deferred = deferredLearning(old), interrupted = interruptedLearning(old), refused = preDispatchLearning(old), moved = movedLearning(old);
+    // A refused append cannot go back into the same native session: its
+    // position is already taken. Start a new session first (once per turn).
+    if (refused && !session?.paused && session?.contextEpoch === old.contextEpoch) session = this.jobs.restartEpoch(nodeId);
+    const ready = interrupted || moved ? !session?.paused : (deferred || refused) && !session?.paused && session?.contextEpoch > old.contextEpoch;
+    if (old && !ready) return old;
+    const key = !old ? baseKey : interrupted ? digest(['interrupted-learning', baseKey, old.id]) : refused ? digest(['pre-dispatch-learning', baseKey, old.id])
+      : moved ? digest(['moved-learning', baseKey, old.id]) : digest(['epoch-learning', baseKey, session.contextEpoch]);
     // Freeze after previous receipts, not eagerly while an earlier turn is still
     // producing the very constraints and acknowledgements this turn must read.
     if (this.repo.list('tree_jobs', j => ['learning', 'consolidation'].includes(j.role) && j.nodeIds.includes(nodeId) && !['committed', 'failed', 'invalid_output', 'stale', 'cancelled'].includes(j.status)).length) fail('NODE_BUSY', 'Earlier learning/summary must settle before freezing the next turn');
@@ -91,15 +96,25 @@ export class LearningService {
       allowedIds: { nodeIds: context.ancestorPaths.flat(), fileIds: annotations.fileIds ?? [], subjectIds: [...rows.map(r => r.item.id), ...observed.proposals.map(p => p.id), ...observed.fragments.map(f => f.id)] }, changeReceipts: receipts,
       ...(compact ? {} : { observationContext: { proposals: observed.proposals, fragments: observed.fragments } }),
       currentTurn: { id: turnId, sourceIds: material.sources.map(s => s.id), assignmentRevision: turn.assignmentRevision }, constraints: context.segments.filter(s => s.nodeId !== null),
-      previousReceipt: rejectedOutputs.length ? { ...(previousReceipt ?? {}), rejectedOutputs } : previousReceipt, epochSeed: this.consolidation.learningSeed(nodeId), rootOnly: nodeId === this.repo.rootId() };
+      previousReceipt: rejectedOutputs.length ? { ...(previousReceipt ?? {}), rejectedOutputs } : previousReceipt, epochSeed: this.epochSeed(nodeId, session), rootOnly: nodeId === this.repo.rootId() };
     const revisionSet = { ['tree_turns:' + turnId]: turn.revision };
     for (const row of rows) revisionSet['tree_items:' + row.item.id] = row.item.revision;
     // Node changes invalidate scope, but ordinary newer settled turns need not
     // stale this input. TreeService separately marks affected jobs invalidated.
     const trigger = { kind: 'settled_main_turn', producerRole: 'main', status: 'settled', turnId, watermark: digest([turnId, turn.assignmentRevision]),
-      ...(old?.providerRejected ? { retriesProviderRejection: true } : {}),
+      ...(old?.providerRejected ? { retriesProviderRejection: true } : {}), ...(refused ? { retriesPreDispatch: true } : {}), ...(moved ? { refreezesMove: true } : {}),
       ...(annotations.correction ? { correction: annotations.correction } : {}), ...(annotations.directRequirement ? { directRequirement: annotations.directRequirement } : {}) };
     return this.jobs.enqueue({ role: 'learning', key, nodeIds: [nodeId], input, revisionSet, config: this.config('learning', { turnId, nodeIds: [nodeId] }), trigger });
+  }
+  // A session restarted without a summary starts from its latest learning jobs
+  // alone; every other session uses the verified summary seed.
+  epochSeed(nodeId, session) {
+    if (!session || session.summaryId !== null || session.contextEpoch === 1 || session.appendSeq > 0) return this.consolidation.learningSeed(nodeId);
+    const recent = session.recentJobIds.map(id => this.jobs.get(id)).filter(job => job?.status === 'committed' && !job.invalidated && job.nodeIds[0] === nodeId).map(job => {
+      const input = jsonClone(job.input); delete input.epochSeed; input.sources = input.sources.map(compactLearningSource);
+      return { jobId: job.id, input, output: job.validatedResult, receipt: job.resultRef, nativeLogRef: job.nativeLogRef };
+    });
+    return { contextEpoch: session.contextEpoch, summary: null, recent, constraints: this.builder.build([nodeId], 'learning').segments };
   }
   applyResult(result, { job, requestId }) {
     const output = validateOutput('learning', result, job.input), turn = this.repo.get('tree_turns', job.trigger.turnId);
