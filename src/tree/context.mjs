@@ -175,13 +175,11 @@ export class ContextBuilder extends DomainService {
 }
 
 /** Per-component native projection: unchanged ancestors keep their position. */
-export function mountTreeContext(ctx, { builder, sessionId, createUserMessage }) {
-  let session; const disposers = [];
-  disposers.push(ctx.on('agent/pre-step', async (payload, next) => {
-    const decision = await next(); if (decision.kind === 'reject') return decision;
-    payload.signal.throwIfAborted(); session = payload.agent.session;
-    if (session.id !== sessionId) fail('CONTEXT_SESSION', 'Context owner cannot mount another native session');
-    assertOwnedCompaction(session); const snapshot = builder.capture(sessionId), current = new Map(snapshot.segments.map(s => [s.key, s])), retainedMessages = [], latest = new Map();
+export function mountTreeContext(ctx, { builder, sessionId, createUserMessage, checkRefresh }) {
+  let session, prepared; const disposers = [];
+  const project = snapshot => {
+    assertOwnedCompaction(session);
+    const current = new Map(snapshot.segments.map(s => [s.key, s])), retainedMessages = [], latest = new Map();
     for (const seq of [...session.surface.nodes]) {
       const event = session.eventAt(seq); if (event.type !== 'user/message' || event.data.source?.kind !== TREE_CONTEXT_SOURCE) continue;
       const source = event.data.source, segment = current.get(source.componentKey);
@@ -192,7 +190,6 @@ export function mountTreeContext(ctx, { builder, sessionId, createUserMessage })
       }
       session.append('user/message', createUserMessage({ source: { kind: retired }, content: [{ type: 'text', text: '[previous Arcfold component retired]' }] }), { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] });
     }
-    if (decision.messages.some(m => [TREE_CONTEXT_SOURCE, retired].includes(m.source?.kind))) fail('CONTEXT_OWNER', 'Only the scoped context owner may inject its messages');
     const additions = [];
     for (const segment of snapshot.segments) {
       const previous = latest.get(segment.key); if (previous?.source.componentVersion === segment.version) continue;
@@ -208,8 +205,40 @@ export function mountTreeContext(ctx, { builder, sessionId, createUserMessage })
       additions.push(createUserMessage({ source: { kind: TREE_CONTEXT_SOURCE, componentKey: segment.key, componentVersion: segment.version, sourceRefs: segment.sourceRefs, itemVersions: segment.itemVersions, summaryVersions: segment.summaryVersions, ...(segment.turnAssignments ? { turnAssignments: segment.turnAssignments } : {}), ...(overview ? { overview } : {}) }, content: [{ type: 'text', text }] }));
     }
     builder.mounted.set(sessionId, { snapshotKey: snapshot.key, messages: [...retainedMessages, ...additions] });
-    return { ...decision, messages: [...decision.messages, ...additions] };
+    return additions;
+  };
+  disposers.push(ctx.on('agent/pre-step', async (payload, next) => {
+    const decision = await next(); if (decision.kind === 'reject') return decision;
+    payload.signal.throwIfAborted(); session = payload.agent.session;
+    if (session.id !== sessionId) fail('CONTEXT_SESSION', 'Context owner cannot mount another native session');
+    if (decision.messages.some(m => [TREE_CONTEXT_SOURCE, retired].includes(m.source?.kind))) fail('CONTEXT_OWNER', 'Only the scoped context owner may inject its messages');
+    prepared = { turn: payload.turn, step: payload.step, messages: [...decision.messages, ...project(builder.capture(sessionId))] };
+    return { ...decision, messages: prepared.messages };
   }));
+  // DSH asks for request configuration on every attempt, including retries
+  // that do not repeat pre-step. Refresh before DSH freezes the request, so
+  // its durable surface, token count, invocation hash and exposure all agree.
+  disposers.push(ctx.on('agent/request', async (payload, next) => {
+    const config = await next();
+    if (!checkRefresh || !session || !prepared || payload.turn !== prepared.turn || payload.step !== prepared.step) return config;
+    payload.signal.throwIfAborted();
+    const admitted = new Set(session.snapshotEvents().filter(e => e.type === 'user/message').map(e => e.data.id));
+    const pending = prepared.messages.filter(m => !admitted.has(m.id));
+    checkRefresh({ sessionId, messages: [...session.deriveMessages(), ...pending] });
+    const snapshot = builder.capture(sessionId);
+    if (builder.mounted.get(sessionId)?.snapshotKey === snapshot.key) return config;
+    const additions = project(snapshot);
+    if (pending.length) {
+      // First attempt: DSH has not appended this step's messages yet. Keep the
+      // same decision array and only replace our own pending components.
+      prepared.messages.splice(0, prepared.messages.length, ...pending.filter(m => m.source?.kind !== TREE_CONTEXT_SOURCE), ...additions);
+    } else {
+      // Retry: its human input and previous components are already durable.
+      // Append the refreshed components without replaying any input or tools.
+      for (const message of additions) session.append('user/message', message, { surfaceOp: 'append' });
+    }
+    return config;
+  }, { prepend: true }));
   disposers.push(ctx.on('llm/stream', (options, next) => {
     if (!session || options.sessionId !== sessionId) return next();
     return (async function* () {

@@ -5,6 +5,7 @@ import { compilePrompt } from './prompts.mjs';
 import { modelView } from './model-view.mjs';
 import { nativeAgentOptions, nativeModel } from './native-models.mjs';
 import { nativeResponseComplete } from './native-model-records.mjs';
+import { LlmError } from '@deepseek-ai/dsh-llm';
 
 // The single turn carrying this job's input ended because the host disposed
 // the agent, and no assistant answer was recorded inside it.
@@ -59,7 +60,7 @@ export class TreeModelOwner {
     const systems = options.messages.filter(m => m.role === 'system').flatMap(m => m.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('\n');
     if (job.role === 'main') {
       const check = this.verifyMainInput?.(job, options);
-      if (check !== true || check?.then) fail('MAIN_INPUT_GUARD', 'Main requires its current trusted context and user-turn guard');
+      if (check !== true) throw new LlmError(check?.message ?? '主对话发送前核对未通过，请重新发送本轮原话。', 'MAIN_INPUT_GUARD');
     } else {
       if (systems !== job.prompt.text) fail('PROMPT_CHANGED', 'Auxiliary fixed prompt changed');
       let current = 0;
