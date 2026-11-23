@@ -73,10 +73,13 @@ test('a retry refused again stays failed with a diagnostic and is not tried a th
   const { restarted, two } = await refusedSecondTurn(t);
   const { repo } = restarted, retried = learningOf(repo, two).find(j => j.trigger.retriesPreDispatch);
   // Treat the committed retry as refused, to check that a second refusal ends the turn.
-  repo.save('tree_jobs', { ...retried, status: 'failed', error: { code: 'NATIVE_PRE_DISPATCH', message: 'synthetic second refusal' }, notSent: true, invocationIds: [] }, retried.revision);
-  assert.equal(preDispatchLearning(repo.get('tree_jobs', retried.id)), false);
   const [intent] = intentsOf(repo, two);
-  repo.save('tree_jobs', { ...intent, status: 'queued' }, intent.revision);
+  repo.command('syntheticSecondRefusal', { requestId: 'synthetic-second-refusal', expected: {}, input: { jobId: retried.id } }, { kind: 'program', id: 'synthetic-test' }, () => {
+    repo.save('tree_jobs', { ...retried, status: 'failed', error: { code: 'NATIVE_PRE_DISPATCH', message: 'synthetic second refusal' }, notSent: true, invocationIds: [] }, retried.revision);
+    repo.save('tree_jobs', { ...intent, status: 'queued' }, intent.revision);
+    return { jobId: retried.id };
+  });
+  assert.equal(preDispatchLearning(repo.get('tree_jobs', retried.id)), false);
   const sent = restarted.requests.length;
   await restarted.runtime.idle();
   assert.equal(restarted.requests.length, sent);
