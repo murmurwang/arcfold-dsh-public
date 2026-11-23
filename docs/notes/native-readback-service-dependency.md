@@ -1,4 +1,4 @@
-# 决策：[080-D1] 选模同步缺少服务声明，目标面板同时消失
+# 决策：[080-D2] 选模同步缺少服务声明，目标面板同时消失
 
 Status: proposed
 observed_in_version: 0.8.0
@@ -9,7 +9,7 @@ user_verified: pending
 
 073-D2 已按 Murphy 原话纳入 #79，发行 PR #81 已合入。候选 2 的两份原包经过两次构建，逐字节一致，但普通测试账户的真实窗口仍未通过选模核对。候选完整标识为 `64f3b303039d299ac40ecc9b2ec71778ae774e3eb45b0a5d008fa9313b1a012f`，源码为 `dfeaa46ae40ede3197dbcbe6dae9bf62b942656d`。
 
-固定诊断回执：`/Users/Shared/Arcfold-Test-Results-7ceaff5cad7b42acd9de/31f38405f629becbae6f9f12177e38824201b1b94a05636b552f0b75f206bc7f-smoke-result.json`。真实模型请求为零。
+固定诊断回执编号：`31f38405f629becbae6f9f12177e38824201b1b94a05636b552f0b75f206bc7f`；回执 SHA-256：`39e291f633cc30ac781c4f139c8404c46e17e174fc507ee8ebf68a1737e9f730`。完整本机路径仅留本地发行证据，不进入公开源码。真实模型请求为零。
 
 ## 问题
 
