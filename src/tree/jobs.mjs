@@ -3,6 +3,7 @@ import { CONTRACT, ROLES, array, canonicalJson, digest, fail, integer, jsonClone
 import { compilePrompt, parseFinalOutput, outputBindings } from './prompts.mjs';
 import { recordKey } from './repository.mjs';
 import { modelView } from './model-view.mjs';
+import { MOVE_INVALIDATIONS } from './tree.mjs';
 
 export const ROLE_LIMITS = Object.freeze({ main: 8192, attribution: 2048, learning: 8192, consolidation: 8192, verification: 8192, improvement: 8192, script_writer: 8192 });
 export const WRITER_TOOLS = Object.freeze(['writer_read', 'writer_list', 'writer_search', 'writer_put', 'writer_probe', 'writer_finish']);
@@ -25,6 +26,20 @@ export const LEARNING_INTERRUPTED = 'LEARNING_INTERRUPTED';
 export const RESULT_LOST = 'RESULT_LOST';
 export function interruptedLearning(job) {
   return job?.role === 'learning' && job.status === 'failed' && job.error?.code === LEARNING_INTERRUPTED && job.notSent === true && !job.invocationIds.length;
+}
+// The native guard refused a learning before any request was released, most
+// often because the position it was given already belongs to another request
+// (the node's native log no longer matches the tree). Nothing was sent, so the
+// turn may be learned once more in a new native session; a retry that is
+// refused again stays failed.
+export const NATIVE_PRE_DISPATCH = 'NATIVE_PRE_DISPATCH';
+export function preDispatchLearning(job) {
+  return job?.role === 'learning' && job.status === 'failed' && job.error?.code === NATIVE_PRE_DISPATCH && job.notSent === true && !job.invocationIds.length && !job.trigger?.retriesPreDispatch;
+}
+// A frozen learning that went stale because its goal moved before it was sent.
+// Its experience is unchanged; it may be frozen again once over the new ancestors.
+export function movedLearning(job) {
+  return job?.role === 'learning' && job.status === 'stale' && job.invalidated === true && MOVE_INVALIDATIONS.includes(job.error) && !job.submittedAt && !job.invocationIds.length && !job.trigger?.refreezesMove;
 }
 const priority = { attribution: 0, script_writer: 1, learning: 2, consolidation: 3, verification: 4, improvement: 5, main: 0 };
 const triggers = {
@@ -154,6 +169,19 @@ export class TreeJobs {
     if (!session.summaryId) fail('EPOCH_COVERAGE', 'A first epoch without a verified summary cannot rotate');
     return this.replaceEpoch(nodeId, { summaryId: session.summaryId, summaryHash: session.summaryHash, sourceWatermark: session.sourceWatermark, recentJobIds: session.recentJobIds });
   }
+  // A new native session for a node whose current one cannot take the next
+  // append. With a summary that covers the session this is the ordinary
+  // rotation. Otherwise the new session starts from the latest three learning
+  // jobs alone; earlier ones stay represented by the items they produced.
+  restartEpoch(nodeId) {
+    const session = this.repo.get('tree_learning_sessions', digest(['learning_session', nodeId])); if (!session) fail('SESSION_REQUIRED', 'Learning session missing');
+    if (session.summaryId) { try { return this.rotateEpoch(nodeId); } catch (error) { if (error.code !== 'EPOCH_COVERAGE') throw error; } }
+    if (this.repo.list('tree_jobs', j => j.nodeIds?.includes(nodeId) && ['prepared', 'submitted', 'result_received', 'validated'].includes(j.status)).length) fail('NODE_BUSY', 'Cannot replace an active learning epoch');
+    const id = digest(['epoch-restart', nodeId, session.contextEpoch + 1]), recentJobIds = session.history.slice(-3).map(h => h.jobId);
+    this.#command('restartLearningEpoch', id, { nodeId, contextEpoch: session.contextEpoch }, { [recordKey('tree_learning_sessions', session.id)]: session.revision }, () => {
+      this.repo.save('tree_learning_sessions', { ...session, sessionId: `session-${randomUUID()}`, previousSessions: [...(session.previousSessions ?? []), { sessionId: session.sessionId, contextEpoch: session.contextEpoch }], contextEpoch: session.contextEpoch + 1, appendSeq: 0, summaryId: null, summaryHash: null, recentJobIds, paused: false, estimateTokens: 0 }, session.revision); return { nodeId, epoch: session.contextEpoch + 1 };
+    }); return this.repo.get('tree_learning_sessions', session.id);
+  }
   recordError(id, error) {
     const job = this.get(id), details = { code: error.code ?? 'HOST_ERROR', message: error.message };
     this.#command('recordModelJobError', digest(['job-error', id, job.revision]), { jobId: id, error: details }, { [recordKey('tree_jobs', id)]: job.revision }, () => {
@@ -171,7 +199,7 @@ export class TreeJobs {
     for (const n of [turn, step, stepStartSeq]) integer(n, 'native position', 0);
     const position = { sessionId: job.nativeSessionId, turn, step, stepStartSeq }, requestId = `dsh-messages-${digest(position)}`, invocationId = digest(['tree_invocation', requestId]);
     const existing = this.repo.get('tree_invocations', invocationId);
-    if (existing) { if (existing.jobId !== id || existing.requestHash !== requestHash || existing.state !== 'admitted') fail('INVOCATION_REPLAY', 'Native position already owns a different or finished request'); return existing; }
+    if (existing) { if (existing.jobId !== id || existing.requestHash !== requestHash || existing.state !== 'admitted') fail('INVOCATION_REPLAY', `Native position already owns a different or finished request (${existing.jobId})`); return existing; }
     if (job.role !== 'main' && job.role !== 'script_writer' && job.invocationIds.length >= 1) fail('ROLE_CALL_LIMIT', 'Reader roles have one model request per job');
     if (job.role === 'script_writer' && (job.invocationIds.length >= 12 || this.now() - job.startedMs >= 120000)) fail('WRITER_LIMIT', 'Writer step/time limit reached');
     const tools = [...allowedTools].sort();

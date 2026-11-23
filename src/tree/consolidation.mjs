@@ -92,14 +92,15 @@ export class ConsolidationService {
   learningSeed(nodeId) {
     const session = this.repo.list('tree_learning_sessions', s => s.nodeId === nodeId)[0];
     if (!session || session.contextEpoch === 1 || session.appendSeq > 0) return null;
-    const summary = this.repo.get('tree_summaries', session.summaryId);
-    if (!summary || digest(summary) !== session.summaryHash || !this.builder.summary({ ...this.builder.node(nodeId), currentSummaryId: summary.id })) fail('EPOCH_COVERAGE', 'The new epoch requires its exact verified summary');
+    // An epoch restarted without a summary starts from its latest learning jobs alone.
+    const summary = session.summaryId === null ? null : this.repo.get('tree_summaries', session.summaryId);
+    if (session.summaryId !== null && (!summary || digest(summary) !== session.summaryHash || !this.builder.summary({ ...this.builder.node(nodeId), currentSummaryId: summary.id }))) fail('EPOCH_COVERAGE', 'The new epoch requires its exact verified summary');
     const recent = session.recentJobIds.map(id => {
       const job = this.jobs.get(id); if (job.status !== 'committed' || job.invalidated || job.nodeIds[0] !== nodeId || job.input.sources.some(s => !this.experience.sources.resolve(s.ref))) fail('EPOCH_COVERAGE', 'Recent learning receipt or source is no longer valid');
       const input = jsonClone(job.input); delete input.epochSeed; input.sources = input.sources.map(compactLearningSource);
       return { jobId: job.id, input, output: job.validatedResult, receipt: job.resultRef, nativeLogRef: job.nativeLogRef };
     });
-    return { contextEpoch: session.contextEpoch, summary: { id: summary.id, version: summary.version, oneLine: summary.oneLine, body: summary.body, sourceWatermark: summary.sourceWatermark }, recent, constraints: this.builder.build([nodeId], 'learning').segments };
+    return { contextEpoch: session.contextEpoch, summary: summary && { id: summary.id, version: summary.version, oneLine: summary.oneLine, body: summary.body, sourceWatermark: summary.sourceWatermark }, recent, constraints: this.builder.build([nodeId], 'learning').segments };
   }
   pressure({ fullRequest, measure, contextWindow, maxOutputTokens, estimated = false }) {
     if (estimated) {

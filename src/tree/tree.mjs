@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { array, canonicalJson, digest, fail, integer, oneOf, shape, sourceRefs, text, CATEGORIES, STATUSES } from './contracts.mjs';
 import { recordKey } from './repository.mjs';
 
+// Invalidations that only change where a goal sits. A learning not yet frozen
+// reads the new ancestors when it is frozen, so these leave it queued.
+export const MOVE_INVALIDATIONS = Object.freeze(['goal_moved', 'goal_parent_added', 'node_moved']);
+
 // The current goal of a turn that a goal is, or sits below; null when the goal
 // is outside the turn. main may move such a goal, so tidying the tree from an
 // upper goal can fix a misplaced goal under it.
@@ -46,7 +50,10 @@ export class TreeService extends DomainService {
   }
   #invalidateScope(ids, reason) {
     for (const e of this.repo.list('tree_exposures', e => !e.revoked && e.nodeIds.some(id => ids.includes(id)))) this.replace('tree_exposures', e, { revoked: true, invalidationReason: reason });
-    for (const j of this.repo.list('tree_jobs', j => !['committed', 'failed', 'cancelled', 'unknown', 'invalid_output', 'stale'].includes(j.status) && (j.nodeIds ?? [j.scopeKey]).some(id => ids.includes(id)))) this.replace('tree_jobs', j, { status: j.status === 'submitted' ? 'submitted' : 'stale', invalidated: true, error: reason });
+    for (const j of this.repo.list('tree_jobs', j => !['committed', 'failed', 'cancelled', 'unknown', 'invalid_output', 'stale'].includes(j.status) && (j.nodeIds ?? [j.scopeKey]).some(id => ids.includes(id)))) {
+      if (!j.role && j.kind === 'learning' && MOVE_INVALIDATIONS.includes(reason)) continue;
+      this.replace('tree_jobs', j, { status: j.status === 'submitted' ? 'submitted' : 'stale', invalidated: true, error: reason });
+    }
   }
   applyAttribution(command) {
     const actor = this.actor(['attribution']);
