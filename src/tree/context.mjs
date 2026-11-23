@@ -22,7 +22,10 @@ export class ContextBuilder extends DomainService {
         if (!method || method.pendingScriptRequests.length) return [];
         return [{ item, version, method }];
       }
-      return [{ item, version }];
+      // A developed understanding shows the one version it grew from, so the
+      // reader can tell what was judged before and what this step added.
+      const before = version.reason === 'developed' ? this.repo.get('tree_item_versions', versionId(item.id, version.supersedes)) : null;
+      return [{ item, version, ...(before ? { previous: { content: before.content, basis: version.basis } } : {}) }];
     }).sort((a, b) => nodeIds.indexOf(a.item.nodeId) - nodeIds.indexOf(b.item.nodeId) || a.item.id.localeCompare(b.item.id));
   }
   // What a list of goals shows about one goal. A summary written before main
@@ -96,7 +99,7 @@ export class ContextBuilder extends DomainService {
     const segments = ordered.map(node => {
       const rows = items.filter(i => i.item.nodeId === node.id), summary = summaries.find(s => s.nodeId === node.id), own = nodeIds.includes(node.id);
       const value = { target: { id: node.id, name: node.name, status: node.status, statusOrigin: node.statusOrigin },
-        understandings: rows.filter(r => r.item.kind === 'understanding').map(({ item, version }) => ({ id: item.id, version: item.activeVersion, source: version.sourceKind, validation: item.validation, content: version.content })),
+        understandings: rows.filter(r => r.item.kind === 'understanding').map(({ item, version, previous }) => ({ id: item.id, version: item.activeVersion, source: version.sourceKind, validation: item.validation, content: version.content, ...(previous ? { previous } : {}) })),
         rules: rows.filter(r => r.method?.short).map(({ item, method }) => ({ id: item.id, version: item.activeVersion, text: method.short })),
         methods: rows.filter(r => r.method?.long).map(({ item, method }) => ({ id: item.id, version: item.activeVersion, name: method.long.name, description: method.long.description })),
         supplements: rows.filter(r => r.supplement).map(({ item, version }) => ({ id: item.id, version: item.activeVersion, text: version.content })),

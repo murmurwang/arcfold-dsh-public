@@ -178,6 +178,68 @@
       "minItems": 0,
       "maxItems": 2
     },
+    "developments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "targetId": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 512,
+            "x-reference": "item"
+          },
+          "targetVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 300
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "user_expressed",
+              "assistant_inferred"
+            ]
+          },
+          "basis": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 200
+          },
+          "sourceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 512,
+              "x-reference": "source"
+            },
+            "minItems": 1,
+            "maxItems": 20
+          }
+        },
+        "required": [
+          "targetId",
+          "targetVersion",
+          "content",
+          "source",
+          "basis",
+          "sourceIds"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 2
+    },
     "method": {
       "anyOf": [
         {

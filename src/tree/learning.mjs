@@ -12,9 +12,9 @@ const program = { kind: 'program', id: 'tree-learning' };
 // contract stay readable for jobs frozen before the upgrade and for fixtures.
 export const COMPACT_PROTOCOLS = Object.freeze(['correction-v1', 'experience-v1']);
 const unique = values => [...new Map(values.map(v => [canonicalJson(v), v])).values()];
-export function itemInput({ item, version, method }) {
+export function itemInput({ item, version, method, previous }) {
   return { id: item.id, version: item.activeVersion, nodeId: item.nodeId, kind: item.kind, sourceKind: version.sourceKind, userProtected: item.userProtected,
-    originNodeId: item.originNodeId, originChain: item.originChain, content: version.content, method: method ?? null, validation: item.validation };
+    originNodeId: item.originNodeId, originChain: item.originChain, content: version.content, ...(previous ? { previous } : {}), method: method ?? null, validation: item.validation };
 }
 export function proposalInput(output, envelope) {
   const refs = ids => resolveSourceIds(ids, envelope);
@@ -27,7 +27,8 @@ export function proposalInput(output, envelope) {
     methods: (output.methods ?? []).map(method), supplements: (output.supplements ?? []).map(({ sourceIds, ...value }) => {
       const actual = refs(sourceIds); if (!actual.some(ref => envelope.sources.some(s => digest(s.ref) === digest(ref) && s.role === 'user' && s.origin === 'user'))) fail('SUPPLEMENT_USER_REQUIRED', 'Learning supplements need a real user requirement');
       return { ...value, sourceRefs: actual, traitEvidence: actual, universalStopgap: false };
-    }), revisions: (output.revisions ?? []).map(({ sourceIds, correctionEvidence: _evidence, ...value }) => ({ ...value, sourceRefs: refs(sourceIds) })) };
+    }), revisions: (output.revisions ?? []).map(({ sourceIds, correctionEvidence: _evidence, ...value }) => ({ ...value, sourceRefs: refs(sourceIds) })),
+    ...(output.developments?.length ? { developments: output.developments.map(({ sourceIds, ...value }) => ({ ...value, sourceRefs: refs(sourceIds) })) } : {}) };
 }
 export function itemServiceFor(repo, resolveSource, job, corrections) {
   const correction = job.trigger.correction;
@@ -107,7 +108,7 @@ export class LearningService {
     // three new understandings, two source-quoted changes and one method that
     // cites this turn's user input. Older protocols keep the single-correction
     // rule: an ordinary statement or a model inference alone is not saved.
-    const selected = job.input.outputProtocol === 'experience-v1' ? { ...output, supplements: [] } : { ...output, understandings: [], methods: [], supplements: [], revisions: [] };
+    const selected = job.input.outputProtocol === 'experience-v1' ? { ...output, supplements: [] } : { ...output, understandings: [], methods: [], supplements: [], revisions: [], developments: [] };
     if (job.input.outputProtocol !== 'experience-v1') {
       const revision = output.revisions.find(value => value.correctionEvidence?.quotes?.length || job.trigger.correction?.itemIds?.includes(value.targetId));
       if (revision) {

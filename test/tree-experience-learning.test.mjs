@@ -10,15 +10,15 @@ const current = (job, role = 'user') => job.input.sources.find(s => s.role === r
 const version = (f, id) => { const item = f.repo.get('tree_items', id); return f.repo.get('tree_item_versions', digest(['item_version', id, item.activeVersion])); };
 const nodeContext = (f, node) => JSON.parse(f.builder.build([node], 'main').segments.find(s => s.key === `node:${node}`).text);
 
-test('experience-v1 is the default learning contract with four wire fields and current-turn bindings', async t => {
+test('experience-v1 is the default learning contract with its wire fields and current-turn bindings', async t => {
   const f = learningFixture(t, { outputProtocol: undefined }), node = f.create('合成目标');
   const turn = await f.turn(node, '我更看重准确，慢一点没关系。'), job = f.learning.enqueue(turn.id, node), source = current(job);
   assert.equal(job.input.outputProtocol, 'experience-v1');
   assert.equal(job.input.observationContext, undefined);
-  assert.deepEqual(Object.keys(OUTPUT_SCHEMAS.learning.properties), ['categories', 'understandings', 'changes', 'method']);
+  assert.deepEqual(Object.keys(OUTPUT_SCHEMAS.learning.properties), ['categories', 'understandings', 'changes', 'developments', 'method']);
   const prompt = compilePrompt('learning');
-  assert.equal(prompt.version, 'arcfold.tree.learning/6.0.0'); assert.ok(prompt.text.length < 3000); assert.equal(job.prompt.hash, prompt.hash);
-  assert.deepEqual(job.input.outputBindings.limits, { understandings: 3, changes: 2, method: 1 });
+  assert.equal(prompt.version, 'arcfold.tree.learning/6.1.0'); assert.ok(prompt.text.length < 3000); assert.equal(job.prompt.hash, prompt.hash);
+  assert.deepEqual(job.input.outputBindings.limits, { understandings: 3, changes: 2, developments: 2, method: 1 });
   assert.ok(job.input.outputBindings.currentUserSourceIds.includes(source.id));
 });
 
@@ -120,6 +120,76 @@ test('a quoted change replaces an understanding, while user-protected content is
   assert.equal(old.lifecycle, 'changed'); assert.equal(old.replacedBy, replacement);
   assert.equal(f.repo.get('tree_items', guess).lifecycle, 'active');
   assert.deepEqual(nodeContext(f, node).understandings.map(u => u.content).sort(), ['用户可能要把表格转给同事', '用户现在只要一句话结论'].sort());
+});
+
+const learnFirst = async (f, node, text, understandings) => {
+  const turn = await f.turn(node, text), job = f.learning.enqueue(turn.id, node), source = current(job);
+  return f.complete(job, { ...empty(), understandings: understandings(source) }).resultRef.understandings.itemIds;
+};
+
+test('a development carries an understanding forward as its next version and the next contexts show what it grew from', async t => {
+  const f = learningFixture(t, { outputProtocol: 'experience-v1' }), node = f.create('合成文章');
+  const [id] = await learnFirst(f, node, '这一段要说清过去的判断会影响以后的选择。', s => [{ content: '这一段的中轴是过去形成的判断持续影响后续选择', source: 'user_expressed', sourceIds: [s.id] }]);
+  const firstRefs = version(f, id).sourceRefs;
+  const second = await f.turn(node, '还要说出新的经历会不断更新这些判断。'), job = f.learning.enqueue(second.id, node), source = current(job);
+  const done = f.complete(job, { ...empty(), developments: [{ targetId: id, targetVersion: 1, content: '这一段的中轴是过去的判断持续影响后续选择，新的经历又不断更新这些判断', source: 'assistant_inferred', basis: '用户补充了判断会被新经历更新', sourceIds: [source.id] }] });
+  assert.equal(done.status, 'committed'); assert.deepEqual(done.rejectedItems, []);
+  assert.deepEqual(done.resultRef.developments.itemIds, [id]); assert.deepEqual(done.resultRef.understandings.itemIds, []);
+  const item = f.repo.get('tree_items', id), now = version(f, id);
+  assert.equal(item.activeVersion, 2); assert.equal(item.lifecycle, 'active'); assert.equal(item.producerRole, 'learning');
+  assert.equal(now.reason, 'developed'); assert.equal(now.supersedes, 1); assert.equal(now.basis, '用户补充了判断会被新经历更新'); assert.equal(now.sourceKind, 'assistant_inferred');
+  assert.equal(f.repo.get('tree_item_versions', digest(['item_version', id, 1])).content, '这一段的中轴是过去形成的判断持续影响后续选择');
+  assert.equal(now.sourceRefs.length, firstRefs.length + 1); assert.ok(firstRefs.every(ref => now.sourceRefs.some(r => digest(r) === digest(ref))));
+  const [shown] = nodeContext(f, node).understandings;
+  assert.deepEqual(shown.previous, { content: '这一段的中轴是过去形成的判断持续影响后续选择', basis: '用户补充了判断会被新经历更新' });
+  const third = await f.turn(node, '继续。'), next = f.learning.enqueue(third.id, node);
+  assert.deepEqual(next.input.knownItems.find(i => i.id === id).previous, shown.previous);
+});
+
+test('an understanding that was never developed carries no previous version', async t => {
+  const f = learningFixture(t, { outputProtocol: 'experience-v1' }), node = f.create('合成文章');
+  await learnFirst(f, node, '读者是开发者。', s => [{ content: '这篇文章的读者是开发者', source: 'user_expressed', sourceIds: [s.id] }]);
+  assert.equal(Object.hasOwn(nodeContext(f, node).understandings[0], 'previous'), false);
+});
+
+test('a development of a method, protected or unknown item, or without this turn’s source is rejected alone', async t => {
+  const f = learningFixture(t, { outputProtocol: 'experience-v1' }), node = f.create('合成文章');
+  const turn = await f.turn(node, '以后先给结论。我想要短一点。'), firstJob = f.learning.enqueue(turn.id, node), s = current(firstJob);
+  const saved = f.complete(firstJob, { ...empty(), understandings: [
+    { content: '这篇文章要短', source: 'user_expressed', sourceIds: [s.id] }, { content: '这篇文章面向新读者', source: 'assistant_inferred', sourceIds: [s.id] }, { content: '这篇文章先给结论', source: 'user_expressed', sourceIds: [s.id] }],
+    method: { kind: 'collaboration', situation: '写文章段落时', action: '先给结论', basis: '用户要求以后先给结论', notApplicable: '', expectedEffect: { category: 'omitted', change: 'less', text: '少漏结论' }, sourceIds: [s.id] } });
+  const [short, readers, conclusion] = saved.resultRef.understandings.itemIds, [method] = saved.resultRef.methods.itemIds;
+  f.asUser(); f.items.confirm(f.cmd({ itemId: readers, version: 1 }, f.expected('tree_items', readers)));
+  const second = await f.turn(node, '短到三段以内。'), job = f.learning.enqueue(second.id, node), source = current(job);
+  const previous = job.input.sources.find(x => !job.input.currentTurn.sourceIds.includes(x.id));
+  const develop = (targetId, targetVersion, sourceIds) => ({ targetId, targetVersion, content: `${targetId} 推进后的判断`, source: 'assistant_inferred', basis: '本轮补充', sourceIds });
+  const done = f.complete(job, { ...empty(), developments: [develop(method, 1, [source.id]), develop(readers, 2, [source.id]), develop('missing-item', 1, [source.id]), develop(short, 1, [previous.id]), develop(conclusion, 1, [source.id])] });
+  assert.equal(done.status, 'committed');
+  assert.deepEqual(done.rejectedItems.map(r => [r.item, r.code]), [['developments[0]', 'OUTPUT_DEVELOPMENT'], ['developments[1]', 'OUTPUT_PROTECTED'], ['developments[2]', 'OUTPUT_REFERENCE'], ['developments[3]', 'OUTPUT_CURRENT_SOURCE']]);
+  assert.deepEqual(done.resultRef.developments.itemIds, [conclusion]);
+  assert.equal(f.repo.get('tree_items', short).activeVersion, 1); assert.equal(f.repo.get('tree_items', readers).activeVersion, 2);
+});
+
+test('one understanding is either corrected or developed in a turn', async t => {
+  const f = learningFixture(t, { outputProtocol: 'experience-v1' }), node = f.create('合成文章');
+  const [id] = await learnFirst(f, node, '用详细表格。', s => [{ content: '这份材料用详细表格', source: 'user_expressed', sourceIds: [s.id] }]);
+  const text = '不要表格了，改成一句话结论。';
+  const second = await f.turn(node, text), job = f.learning.enqueue(second.id, node), source = current(job);
+  const done = f.complete(job, { ...empty(),
+    changes: [{ targetId: id, targetVersion: 1, mark: 'changed', scope: 'local', content: '这份材料只要一句话结论', quote: { sourceId: source.id, text } }],
+    developments: [{ targetId: id, targetVersion: 1, content: '这份材料用详细表格，附一句结论', source: 'assistant_inferred', basis: '本轮提到结论', sourceIds: [source.id] }] });
+  assert.deepEqual(done.rejectedItems.map(r => [r.item, r.code]), [['developments[0]', 'OUTPUT_DEVELOPMENT']]);
+  assert.equal(f.repo.get('tree_items', id).lifecycle, 'changed');
+});
+
+test('the learning prompt frames understanding around the current goal and drops the old preference example', () => {
+  const { text } = compilePrompt('learning');
+  assert.ok(!text.includes('用户把数字准确看得比速度重要'));
+  assert.ok(text.includes('理解的核心是当前目标'));
+  assert.ok(text.includes('不以“用户认为”“用户希望”开头'));
+  assert.ok(text.includes('用户没有接受或没有用上的助手建议'));
+  assert.ok(!text.includes('、助手给用户的建议。'));
+  assert.ok(text.includes('developments 最多 2 条'));
 });
 
 test('native conversation learns an ordinary statement and the next main request carries it', async t => {
