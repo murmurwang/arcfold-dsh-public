@@ -5,6 +5,10 @@ import { emptyLearning, emptyVerification } from './fixtures/tree-learning/helpe
 
 const RENAMED = '从两条主线推导计划并接上每日安排', CHILD = '讨论对产品和对用户本人的认知';
 const text = body => body.messages.flatMap(m => m.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+const currentNodes = body => body.messages.flatMap(m => m.content ?? []).flatMap(b => {
+  if (b.type !== 'text') return [];
+  try { const value = JSON.parse(b.text); return value.logicalTurnId && value.nodes ? [value.nodes] : []; } catch { return []; }
+}).at(-1);
 
 // Synthetic replay of the 0.6.0 shape: a planning goal, then a turn in which the
 // conversation names its real direction and goes one layer deeper.
@@ -84,7 +88,7 @@ test('empty parentId allows adding a parent and switching back to the child, but
     if (action) {
       const op = action;
       action = undefined;
-      const args = { op, nodeId: childId, expectedRevision: repo.get('tree_nodes', childId).revision, reason, parentId: '' };
+      const args = { op, nodeId: childId, expectedRevision: op === 'switch' ? currentNodes(row.body)[0].expectedRevision : repo.get('tree_nodes', childId).revision, reason, parentId: '' };
       if (op === 'add_parent') args.name = parentName;
       return { tool: { id: op, name: 'arcfold_revise_goal', args } };
     }
@@ -165,7 +169,7 @@ test('a revision the reply never mentions is recorded as unannounced', async t =
 
 // Shape of 042-F1 (0.7.0, gpt-6.1-sol): switching to an existing goal, the
 // model always filled `name` — first with the goal's own name, then with "".
-async function switchConversation(t, names) {
+async function switchConversation(t, names, { revision = 'current', changeCurrent = false, target = 'candidate' } = {}) {
   const A = '盘点申请所需的结果、已有证据与缺口', B = '把方向稿定下来';
   let turnNo = 0, step = 0;
   const ids = {}, raw = [];
@@ -180,7 +184,16 @@ async function switchConversation(t, names) {
     if (row.role !== 'main' || turnNo !== 3) return '合成答复。';
     raw.push(JSON.stringify(row.body)); step++;
     if (step <= names.length) {
-      const args = { op: 'switch', nodeId: ids.a, expectedRevision: repo.get('tree_nodes', ids.a).revision, reason: '用户要求改一下目标' };
+      const current = currentNodes(row.body)[0];
+      assert.equal(current.id, ids.b);
+      const expectedRevision = revision === 'target' ? repo.get('tree_nodes', ids.a).revision : current.expectedRevision;
+      assert.notEqual(current.expectedRevision, repo.get('tree_nodes', ids.a).revision, 'the two versions must differ to expose the old guard');
+      if (changeCurrent) {
+        const node = repo.get('tree_nodes', current.id);
+        repo.transaction(() => repo.save('tree_nodes', { ...node, name: '把方向稿写成可交付的正文' }, node.revision));
+      }
+      const nodeId = target === 'current' ? ids.b : target === 'missing' ? 'missing-goal' : ids.a;
+      const args = { op: 'switch', nodeId, expectedRevision, reason: '用户要求改一下目标' };
       if (names[step - 1] !== undefined) args.name = names[step - 1];
       return { tool: { id: 'switch-' + step, name: 'arcfold_revise_goal', args } };
     }
@@ -190,8 +203,46 @@ async function switchConversation(t, names) {
   const agent = await f.main('goal-switch-name-native');
   turnNo = 1; ids.a = (await f.turn(agent, '先盘点申请需要的结果。')).nodeIds[0];
   turnNo = 2; ids.b = (await f.turn(agent, '换个话题，先把方向稿定下来。')).nodeIds[0];
+  // A long-lived target can have changed many times; its version is absent
+  // from the overview, while the current goal's version is in the node table.
+  for (let i = 0; i < 5; i++) {
+    const node = f.repo.get('tree_nodes', ids.a);
+    f.repo.transaction(() => f.repo.save('tree_nodes', { ...node }, node.revision));
+  }
+  const targetBefore = f.repo.get('tree_nodes', ids.a);
   turnNo = 3; const third = await f.turn(agent, '改一下目标');
-  return { f, ids, raw, A, turn: f.repo.get('tree_turns', third.id) };
+  return { f, agent, ids, raw, A, targetBefore, turn: f.repo.get('tree_turns', third.id) };
+}
+
+test('switch quotes the current goal from the model input and changes assignment only at turn end', async t => {
+  const { f, agent, ids, raw, targetBefore, turn } = await switchConversation(t, [undefined]);
+  assert.deepEqual(turn.goalRevisions.map(r => [r.op, r.state, r.nodeId]), [['switch', 'applied', ids.a]]);
+  assert.deepEqual(turn.nodeIds, [ids.a]);
+  assert.equal(turn.assignmentRevision, 2);
+  assert.ok(currentNodes(JSON.parse(raw[1])).some(n => n.id === ids.b), 'the tool-result step still has the original assignment');
+  assert.equal(f.repo.get('tree_nodes', ids.a).name, targetBefore.name);
+  const tool = JSON.parse(raw[0]).tools.find(tool => tool.name === 'arcfold_revise_goal');
+  assert.match(tool.description, /switch：[^。]*expectedRevision填编号表里当前目标的版本/);
+  const next = await f.turn(agent, '继续。');
+  assert.deepEqual(next.nodeIds, [ids.a]);
+});
+
+for (const [label, options] of [['the target version', { revision: 'target' }], ['a current goal changed after the request', { changeCurrent: true }]]) {
+  test(`switch refuses ${label} and points to the current node table`, async t => {
+    const { ids, raw, turn } = await switchConversation(t, [undefined], options);
+    assert.match(raw[1], /The current goal changed; use its revision from this turn's node table/);
+    assert.deepEqual(turn.goalRevisions ?? [], []);
+    assert.deepEqual(turn.nodeIds, [ids.b]);
+  });
+}
+
+for (const [target, message] of [['current', /already current/], ['missing', /existing candidate goal/]]) {
+  test(`switch still refuses a ${target} target`, async t => {
+    const { ids, raw, turn } = await switchConversation(t, [undefined], { target });
+    assert.match(raw[1], message);
+    assert.deepEqual(turn.goalRevisions ?? [], []);
+    assert.deepEqual(turn.nodeIds, [ids.b]);
+  });
 }
 
 for (const [label, name] of [['its own name with spaces', '  盘点申请所需的结果、已有证据与缺口 '], ['an empty name', '']]) {
