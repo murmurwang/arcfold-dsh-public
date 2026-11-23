@@ -36,6 +36,9 @@ export function itemServiceFor(repo, resolveSource, job, corrections) {
     ...(correction ? { correction: { ...correction, sourceRefs: resolveSourceIds(correction.sourceIds, job.input) } } : {}), ...(corrections ? { corrections } : {}) }) });
 }
 
+// Beyond this many other goals the learning input carries none.
+export const OTHER_GOALS_LIMIT = 200;
+
 export class LearningService {
   constructor({ repository, experience, contextBuilder, consolidation, jobs, modelConfig, signals, writerRouter, annotations = () => ({}), outputProtocol = 'experience-v1' }) {
     Object.assign(this, { repo: repository, experience, builder: contextBuilder, consolidation, jobs, config: modelConfig, signals, writers: writerRouter, annotations, outputProtocol });
@@ -73,6 +76,7 @@ export class LearningService {
     }
     const material = this.experience.material(turn); if (material.revokedRefs.length) fail('SOURCE_CHANGED', 'Original experience was withdrawn');
     const context = this.builder.build([nodeId], 'learning'), rows = this.builder.activeItems(context.ancestorPaths.flat(), 'learning');
+    const otherGoals = this.otherGoals(context.ancestorPaths.flat());
     const priorTurns = turns.slice(0, turns.findIndex(t => t.id === turnId));
     // Compact protocols read this turn plus the previous own turn, and never
     // the legacy observation records.
@@ -95,7 +99,7 @@ export class LearningService {
     const input = { inputVersion: CONTRACT, role: 'learning', ...(compact ? { outputProtocol: this.outputProtocol } : {}), scope: { nodeIds: [nodeId], ancestorPaths: context.ancestorPaths, treeRevision: context.treeRevision }, sources, knownItems: rows.map(itemInput),
       allowedIds: { nodeIds: context.ancestorPaths.flat(), fileIds: annotations.fileIds ?? [], subjectIds: [...rows.map(r => r.item.id), ...observed.proposals.map(p => p.id), ...observed.fragments.map(f => f.id)] }, changeReceipts: receipts,
       ...(compact ? {} : { observationContext: { proposals: observed.proposals, fragments: observed.fragments } }),
-      currentTurn: { id: turnId, sourceIds: material.sources.map(s => s.id), assignmentRevision: turn.assignmentRevision }, constraints: context.segments.filter(s => s.nodeId !== null),
+      ...(compact ? { otherGoals } : {}), currentTurn: { id: turnId, sourceIds: material.sources.map(s => s.id), assignmentRevision: turn.assignmentRevision }, constraints: context.segments.filter(s => s.nodeId !== null),
       previousReceipt: rejectedOutputs.length ? { ...(previousReceipt ?? {}), rejectedOutputs } : previousReceipt, epochSeed: this.epochSeed(nodeId, session), rootOnly: nodeId === this.repo.rootId() };
     const revisionSet = { ['tree_turns:' + turnId]: turn.revision };
     for (const row of rows) revisionSet['tree_items:' + row.item.id] = row.item.revision;
@@ -115,6 +119,36 @@ export class LearningService {
       return { jobId: job.id, input, output: job.validatedResult, receipt: job.resultRef, nativeLogRef: job.nativeLogRef };
     });
     return { contextEpoch: session.contextEpoch, summary: null, recent, constraints: this.builder.build([nodeId], 'learning').segments };
+  }
+  // Goals a turn's learning may place a new item on: every active or paused
+  // goal outside the turn's own path. A large tree gets no list at all.
+  otherGoals(path) {
+    const rows = this.repo.list('tree_nodes', n => !n.deleted && ['active', 'paused'].includes(n.status) && !path.includes(n.id));
+    if (rows.length > OTHER_GOALS_LIMIT) return [];
+    return rows.sort((a, b) => a.id.localeCompare(b.id)).map(n => ({ id: n.id, name: n.name, oneLine: this.builder.summary(n)?.oneLine ?? '', path: this.repo.ancestors(n.id).map(a => a.name) }));
+  }
+  // Split placed items off the proposal. A placement whose goal is no longer
+  // usable keeps its item on the turn's goal and is reported.
+  placements(selected, job) {
+    const own = job.nodeIds[0], path = job.input.scope.ancestorPaths.flat(), listed = new Set((job.input.otherGoals ?? []).map(g => g.id));
+    const replaced = new Set((selected.revisions ?? []).map(r => r.replacedByIndex)), groups = new Map(), issues = [], moved = { understanding: new Set(), method: new Set() };
+    for (const p of job.input.outputProtocol === 'experience-v1' ? selected.placements ?? [] : []) {
+      const node = this.repo.get('tree_nodes', p.goalId), list = p.kind === 'understanding' ? selected.understandings : selected.methods;
+      const problem = !list?.[p.index] || p.kind === 'understanding' && replaced.has(p.index) ? 'PLACEMENT_ITEM'
+        : !listed.has(p.goalId) || path.includes(p.goalId) ? 'PLACEMENT_GOAL'
+        : !node || node.deleted || !['active', 'paused'].includes(node.status) ? 'PLACEMENT_GOAL_CLOSED' : null;
+      if (problem) { issues.push({ code: problem, goalId: p.goalId, itemKind: p.kind, index: p.index }); continue; }
+      if (!groups.has(p.goalId)) groups.set(p.goalId, { understandings: [], methods: [], reasons: [] });
+      const group = groups.get(p.goalId);
+      group[p.kind === 'understanding' ? 'understandings' : 'methods'].push(list[p.index]); group.reasons.push({ kind: p.kind, reason: p.reason });
+      moved[p.kind].add(p.index);
+    }
+    const keep = (rows, set) => rows.filter((_, i) => !set.has(i));
+    const shift = index => index - [...moved.understanding].filter(i => i < index).length;
+    const ownSelected = { ...selected, understandings: keep(selected.understandings ?? [], moved.understanding), methods: keep(selected.methods ?? [], moved.method),
+      revisions: (selected.revisions ?? []).map(r => ({ ...r, replacedByIndex: shift(r.replacedByIndex) })) };
+    delete ownSelected.placements;
+    return { own, ownSelected, groups, issues };
   }
   applyResult(result, { job, requestId }) {
     const output = validateOutput('learning', result, job.input), turn = this.repo.get('tree_turns', job.trigger.turnId);
@@ -137,17 +171,32 @@ export class LearningService {
         if (item) selected[partition] = [item];
       }
     }
+    const { ownSelected, groups, issues } = this.placements(selected, job);
     return this.repo.transaction(() => {
-      const items = itemServiceFor(this.repo, this.resolveSource, job, learningCorrections(selected, job.input)), input = proposalInput(selected, job.input);
+      const items = itemServiceFor(this.repo, this.resolveSource, job, learningCorrections(ownSelected, job.input)), input = proposalInput(ownSelected, job.input);
       const receipt = items.commitProposal({ requestId: digest([requestId, 'items']), expected: job.inputRevisionSet, input }).result;
+      const placed = [...groups].map(([goalId, group]) => {
+        const service = new ItemService({ repository: this.repo, resolveSource: this.resolveSource, context: () => ({ actor: { kind: 'model', id: job.id, role: job.role }, nodeIds: [goalId] }) });
+        const proposal = { ...proposalInput({ understandings: group.understandings, methods: group.methods, supplements: [], revisions: [] }, job.input), nodeId: goalId };
+        return { goalId, reasons: group.reasons, receipt: service.commitProposal({ requestId: digest([requestId, 'placed', goalId]), expected: {}, input: proposal }).result };
+      });
       const categories = this.signals.recordCategories(output.categories, { job, requestId });
       // Per-turn learning is limited to corrections and feedback categories.
       // Do not promote model-extracted proposals, results or decisions into
       // additional observation records; old records remain available to read.
       const methodIds = receipt.methods.itemIds ?? [];
-      this.repo.command('recordLearningOrigins', { requestId, expected: {}, input: { jobId: job.id, receipt, categories } }, program, () => {
+      this.repo.command('recordLearningOrigins', { requestId, expected: {}, input: { jobId: job.id, receipt, categories, ...(placed.length || issues.length ? { placed, issues } : {}) } }, program, () => {
         for (const partition of ['understandings', 'methods', 'supplements']) for (const id of receipt[partition].itemIds ?? []) {
           const item = this.repo.get('tree_items', id); this.repo.save('tree_items', { ...item, producerJobId: job.id, producerRole: 'learning', sourceTurnId: turn.id }, item.revision);
+        }
+        for (const { goalId, reasons, receipt: placedReceipt } of placed) for (const [partition, kind] of [['understandings', 'understanding'], ['methods', 'method']]) for (const id of placedReceipt[partition]?.itemIds ?? []) {
+          const item = this.repo.get('tree_items', id);
+          this.repo.save('tree_items', { ...item, producerJobId: job.id, producerRole: 'learning', sourceTurnId: turn.id, placedFromNodeId: job.nodeIds[0], placementReason: reasons.find(r => r.kind === kind)?.reason ?? null }, item.revision);
+        }
+        if (issues.length) {
+          const meta = this.repo.meta(), diagnostics = { ...meta.runtimeDiagnostics };
+          for (const issue of issues) { const value = { kind: 'learning_placement', ...issue, message: 'The item stayed on the turn\'s goal', jobId: job.id, nodeId: job.nodeIds[0] }; diagnostics[digest(value)] = { ...value, at: this.repo.now() }; }
+          this.repo.save('tree_meta', { ...meta, runtimeDiagnostics: diagnostics }, meta.revision);
         }
         for (const intent of this.repo.list('tree_jobs', j => !j.role && j.kind === 'learning' && j.scopeKey === job.nodeIds[0] && j.input.turnId === turn.id && j.input.assignmentRevision === turn.assignmentRevision && j.status === 'queued')) this.repo.save('tree_jobs', { ...intent, status: 'committed', ownedJobId: job.id }, intent.revision);
         const meta = this.repo.meta();
@@ -157,7 +206,7 @@ export class LearningService {
       });
       if (!this.writers && methodIds.some(id => this.repo.get('tree_items', id).lifecycle === 'draft')) fail('WRITER_ROUTER_REQUIRED', 'Script proposals require the owned writer router');
       const writerJobs = this.writers ? methodIds.flatMap(id => this.writers.enqueueDraft(id, job).map(j => j.id)) : [];
-      return { ...receipt, categories, writerJobs };
+      return { ...receipt, categories, writerJobs, ...(placed.length ? { placed: placed.map(p => ({ goalId: p.goalId, understandings: p.receipt.understandings, methods: p.receipt.methods })) } : {}) };
     });
   }
 }

@@ -92,6 +92,18 @@
             },
             "minItems": 1,
             "maxItems": 20
+          },
+          "goalId": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 512
+          },
+          "goalReason": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]*$",
+            "maxLength": 200
           }
         },
         "required": [
@@ -332,6 +344,18 @@
               },
               "minItems": 1,
               "maxItems": 20
+            },
+            "goalId": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 512
+            },
+            "goalReason": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000]*$",
+              "maxLength": 200
             }
           },
           "required": [
