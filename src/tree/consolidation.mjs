@@ -72,7 +72,7 @@ export class ConsolidationService {
       const setDown = ['node_leave', 'leave_timeout'].includes(plan.reason) && output.setDown ? { reason: output.setDown.reason, sourceIds: output.setDown.sourceIds } : null;
       this.repo.save('tree_summaries', { id, nodeId: node.id, version, oneLine, body, throughTurnIds: plan.throughTurnIds, sourceRefs, previousVersion: plan.previousVersion,
         sourceWatermark: plan.sourceWatermark, assignmentVersions: plan.assignmentVersions, coveredJobIds: plan.coveredJobIds, recentJobIds: plan.recentJobIds, reason: plan.reason, jobId: job.id,
-        ...(setDown ? { setDown } : {}) });
+        ...(output.kept?.length ? { kept: output.kept } : {}), ...(setDown ? { setDown } : {}) });
       this.repo.save('tree_nodes', { ...node, currentSummaryId: id, lastSummaryWatermark: plan.sourceWatermark, summaryNameStale: false }, node.revision);
       // Broaden/retrospect remain versioned proposals for B5; this service never
       // silently grants them item/method activation authority.
