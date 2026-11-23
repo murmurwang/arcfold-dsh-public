@@ -46,7 +46,7 @@ export function installNativeModelReadback(ctx) {
   let attach;
   const clear = () => { for (const watch of watches.values()) watch.stop(); watches.clear(); };
   ctx.effect(() => {
-    ctx.inject(['modelDirectories', 'sessions', 'remote.session'], owner => {
+    ctx.inject(['modelDirectories', 'sessions', 'remote', 'remote.session'], owner => {
       const sessions = owner.sessions, models = owner.modelDirectories;
       const bind = sessionId => {
         const binding = sessions.binding(sessionId), prior = watches.get(sessionId);
