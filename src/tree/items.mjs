@@ -69,9 +69,11 @@ export class ItemService extends DomainService {
   }
   commitProposal(command) {
     return this.repo.command('commitProposal', command, this.actor(['learning', 'consolidation', 'verification', 'improvement']), () => {
-      const input = command.input; shape(input, ['nodeId', 'understandings', 'methods', 'supplements'], ['revisions']); this.node(input.nodeId); this.scoped(input.nodeId);
+      const input = command.input; shape(input, ['nodeId', 'understandings', 'methods', 'supplements'], ['revisions', 'developments']); this.node(input.nodeId); this.scoped(input.nodeId);
       const result = {};
-      for (const [partition, limit, apply] of [['understandings', 20, p => this.#understanding(p, input.nodeId)], ['methods', 10, p => this.#method(p, input.nodeId)], ['supplements', 10, p => this.#supplement(p, input.nodeId)]]) {
+      const partitions = [['understandings', 20, p => this.#understanding(p, input.nodeId)], ['methods', 10, p => this.#method(p, input.nodeId)], ['supplements', 10, p => this.#supplement(p, input.nodeId)]];
+      if (Object.hasOwn(input, 'developments')) partitions.push(['developments', 2, p => this.#develop(p, input.nodeId, command)]);
+      for (const [partition, limit, apply] of partitions) {
         try {
           result[partition] = this.repo.transaction(() => {
             const ids = array(input[partition], partition, limit).map(apply);
@@ -101,6 +103,22 @@ export class ItemService extends DomainService {
       this.replace('tree_items', replacement, { nodeId: item.nodeId, originChain: [...new Set([...replacement.originChain, item.nodeId])] });
     }
     this.replace('tree_items', item, { lifecycle: revision.mark, replacedBy: replacements[revision.replacedByIndex], correctionSourceRefs: revision.sourceRefs });
+  }
+  // Carry an existing understanding forward as its next version. The old
+  // version stays readable; the basis records what moved it this turn.
+  #develop(development, nodeId, command) {
+    shape(development, ['targetId', 'targetVersion', 'content', 'source', 'basis', 'sourceRefs']); text(development.content, 'content', 2000); text(development.basis, 'basis', 200);
+    oneOf(development.source, ['user_expressed', 'assistant_inferred'], 'source');
+    const item = this.item(development.targetId); this.repo.requireExpected(command, 'tree_items', item.id);
+    if (item.kind !== 'understanding') fail('UNDERSTANDING_REQUIRED', 'Only an understanding can be developed');
+    if (item.lifecycle !== 'active' || item.activeVersion !== development.targetVersion) fail('VERSION_CONFLICT', 'Target version changed');
+    if (item.userProtected) fail('USER_PROTECTED', 'User-protected content is not revised automatically');
+    if (!this.repo.ancestors(nodeId).some(n => n.id === item.nodeId)) fail('OUT_OF_SCOPE', 'Only an understanding in this goal or its ancestors can be developed');
+    const refs = this.refs(development.sourceRefs, { user: development.source === 'user_expressed' }), old = this.version(item.id, item.activeVersion), version = old.version + 1;
+    const sourceKind = old.sourceKind === 'unknown' || old.sourceKind === development.source ? development.source : 'assistant_inferred';
+    this.repo.save('tree_item_versions', { id: versionId(item.id, version), itemId: item.id, version, content: development.content, sourceKind,
+      sourceRefs: [...new Map([...old.sourceRefs, ...refs].map(ref => [canonicalJson(ref), ref])).values()], developedRefs: refs, basis: development.basis, supersedes: old.version, reason: 'developed' });
+    this.replace('tree_items', item, { activeVersion: version, validation: 'unverified' }); return item.id;
   }
   #copyBundle(item, from, to, updates = {}) {
     if (item.kind === 'method') {
