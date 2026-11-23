@@ -17,7 +17,7 @@ test('experience-v1 is the default learning contract with its wire fields and cu
   assert.equal(job.input.observationContext, undefined);
   assert.deepEqual(Object.keys(OUTPUT_SCHEMAS.learning.properties), ['categories', 'understandings', 'changes', 'developments', 'method']);
   const prompt = compilePrompt('learning');
-  assert.equal(prompt.version, 'arcfold.tree.learning/6.1.0'); assert.ok(prompt.text.length < 3000); assert.equal(job.prompt.hash, prompt.hash);
+  assert.equal(prompt.version, 'arcfold.tree.learning/6.2.0'); assert.ok(prompt.text.length < 3000); assert.equal(job.prompt.hash, prompt.hash);
   assert.deepEqual(job.input.outputBindings.limits, { understandings: 3, changes: 2, developments: 2, method: 1 });
   assert.ok(job.input.outputBindings.currentUserSourceIds.includes(source.id));
 });
