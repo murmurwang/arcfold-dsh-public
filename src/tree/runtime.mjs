@@ -2,7 +2,7 @@ import { canonicalJson, digest, fail } from './contracts.mjs';
 import { mkdirSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createUserMessage, HarnessError } from '@deepseek-ai/dsh-llm';
+import { createUserMessage, HarnessError, LlmError } from '@deepseek-ai/dsh-llm';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { TreeRepository } from './repository.mjs';
 import { TreeTestLedger, TREE_TEST_SCOPE } from './experiment-budget.mjs';
@@ -227,12 +227,37 @@ export class TreeRuntime {
     return services[job.role].applyResult(result, context);
   }
   mainJob(sessionId, nativeTurn) { return this.repo.list('tree_jobs', j => j.role === 'main' && j.trigger.nativeSessionId === sessionId && j.trigger.nativeTurn === nativeTurn)[0]; }
-  verifyMainInput(job, request) {
+  verifyMainInput(job, request, { recordFailure = true } = {}) {
     const agent = this.mainAgents.get(request.sessionId), scope = this.builder.scope(request.sessionId), turn = this.repo.get('tree_turns', job.trigger.turnId);
-    if (!agent || job.role !== 'main' || scope?.phase !== 'active' || scope.turnId !== turn?.id || turn.assignmentRevision !== job.input.assignmentRevision) return false;
-    if (!job.input.sources.every(source => request.messages.some(m => m.source?.kind === 'user' && m.id === source.ref.messageId && canonicalJson(m.content) === canonicalJson(source.content)))) return false;
-    const mounted = this.builder.mounted.get(request.sessionId), snapshot = this.builder.capture(request.sessionId);
-    return mounted?.snapshotKey === snapshot.key && canonicalJson(request.messages.filter(m => m.source?.kind === 'arcfold/tree-context')) === canonicalJson(mounted.messages);
+    const mounted = this.builder.mounted.get(request.sessionId);
+    const reject = (reason, snapshotKey = null) => {
+      const messages = {
+        scope: '当前目标范围尚未就绪，本轮未发送。请等目标切换完成后重新发送原话。',
+        turn: '当前对话回合已变化，本轮未发送。请在当前回合重新发送原话。',
+        assignment: '本轮所属目标已变化，本轮未发送。请确认目标后重新发送原话。',
+        user_message: '本轮用户原话缺失或内容已变化，本轮未发送。请重新发送原话。',
+        context_messages: '本轮目标背景缺失或内容已变化，本轮未发送。请重新发送原话。',
+        snapshot: '目标背景在发送前又有更新，本轮未发送。请点继续以重新准备。',
+        snapshot_unavailable: '当前目标背景暂时无法核对，本轮未发送。请确认目标后重新发送原话。',
+      };
+      const result = { ok: false, reason, message: messages[reason], sessionId: request.sessionId, jobId: job.id,
+        turnId: job.trigger.turnId, nativeTurn: job.trigger.nativeTurn,
+        mountedSnapshotKey: mounted?.snapshotKey ?? null, currentSnapshotKey: snapshotKey };
+      if (recordFailure) this.diagnostic('main_input_guard', { code: 'MAIN_INPUT_GUARD', message: result.message }, result);
+      return result;
+    };
+    if (!agent || job.role !== 'main' || scope?.phase !== 'active') return reject('scope');
+    if (job.trigger.nativeSessionId !== request.sessionId || scope.turnId !== turn?.id ||
+      agent.session.snapshotEvents().findLast(e => e.type === 'turn/start')?.data.turn !== job.trigger.nativeTurn) return reject('turn');
+    if (turn.assignmentRevision !== job.input.assignmentRevision || scope.assignmentRevision !== turn.assignmentRevision) return reject('assignment');
+    if (!job.input.sources.every(source => request.messages.some(m => m.source?.kind === 'user' && m.id === source.ref.messageId && canonicalJson(m.content) === canonicalJson(source.content)))) return reject('user_message');
+    // Check the prepared messages before considering a refresh. A changed
+    // snapshot must never excuse a modified or missing trusted message.
+    if (!mounted || canonicalJson(request.messages.filter(m => m.source?.kind === 'arcfold/tree-context')) !== canonicalJson(mounted.messages)) return reject('context_messages');
+    let snapshot;
+    try { snapshot = this.builder.capture(request.sessionId); }
+    catch { return reject('snapshot_unavailable'); }
+    return mounted.snapshotKey === snapshot.key ? true : reject('snapshot', snapshot.key);
   }
   hooks(sessionId) {
     const agent = this.mainAgents.get(sessionId); if (!agent) fail('MAIN_REQUIRED', 'Only an attached native main session has hook authority');
@@ -377,7 +402,17 @@ export class TreeRuntime {
     if (this.nativeModels) ctx.effect(() => bindNativeTurnSelection(agent), 'keep the originating model until the native turn ends');
     this.owner.attachMain(ctx);
     mountHookContext(ctx, { service: this.hooks(sessionId), sessionId, createUserMessage: this.createUserMessage });
-    mountTreeContext(ctx, { builder: this.builder, sessionId, createUserMessage: this.createUserMessage });
+    mountTreeContext(ctx, { builder: this.builder, sessionId, createUserMessage: this.createUserMessage,
+      checkRefresh: request => {
+        const result = this.verifyMainInput(this.owner.jobFor(sessionId), request, { recordFailure: false });
+        if (result === true) return;
+        if (result.reason === 'snapshot') {
+          this.diagnostic('main_input_refresh', { code: 'MAIN_INPUT_REFRESH', message: '发送前刷新已变化的目标背景。' }, result);
+          return;
+        }
+        this.diagnostic('main_input_guard', { code: 'MAIN_INPUT_GUARD', message: result.message }, result);
+        throw new LlmError(result.message, 'MAIN_INPUT_GUARD');
+      } });
     // Prepare wraps the downstream host decision. It only admits accepted human
     // input; subsequent tool/program steps reuse the existing logical turn.
     ctx.on('agent/pre-step', async (payload, next) => this.prepare(payload, await next()));
