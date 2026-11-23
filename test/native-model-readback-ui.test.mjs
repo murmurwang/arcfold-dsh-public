@@ -148,15 +148,27 @@ for (const failure of ['error', 'missing', 'unsequenced']) test(failure + ' read
 
 test('Cordis integration attaches late native services and retires replaced session bindings', async t => {
   const f = fixture(t, { watch: false }), ctx = new Cordis.Context(); t.after(() => ctx.fiber.dispose());
-  ctx.provide('connection', { generation: f.generation });
+  // Native services live in sibling plugins. Root provisions would make an
+  // undeclared service accessible and hide the real renderer access guard.
+  const host = ctx.plugin(owner => {
+    owner.provide('connection', { generation: f.generation });
+    owner.provide('remote', { session: f.remote });
+    owner.provide('remote.session', f.remote);
+  });
+  await host.await();
   let watch;
-  const plugin = ctx.plugin(owner => { watch = installNativeModelReadback(owner); }); await plugin.await();
+  const plugin = ctx.plugin({ inject: ['connection'], apply(owner) {
+    watch = installNativeModelReadback(owner);
+  } }); await plugin.await();
   watch('main'); watch('main');
-  ctx.provide('remote', { session: f.remote }); ctx.provide('remote.session', f.remote);
-  ctx.provide('modelDirectories', { directoryFor: () => f.directory });
   const list = store({});
-  ctx.provide('sessions', { ...f.sessions, list, subagentAddress: () => undefined });
+  const late = ctx.plugin(owner => {
+    owner.provide('modelDirectories', { directoryFor: () => f.directory });
+    owner.provide('sessions', { ...f.sessions, list, subagentAddress: () => undefined });
+  });
+  await late.await();
   await ctx.loader?.await(); await tick();
+  assert.doesNotThrow(() => watch('main'), 'the real plugin service access guard must allow binding');
   await f.directory.select(next); await tick(); assert.equal(f.calls.length, 1);
   f.manager.handleControlFrame({ type: 'projection', sessionId: 'main', seq: 50,
     changes: [{ key: 'agentPreset', val: 'standard' }] }); list.set({}); await tick();
