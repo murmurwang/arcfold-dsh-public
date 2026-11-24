@@ -213,7 +213,9 @@ export class TreeRuntime {
       }
     });
     timing.step('recover-learning-pressure', () => { for (const job of this.repo.list('tree_jobs', j => j.role === 'learning' && j.status === 'failed')) this.handlePressure(job); });
+    const replayStarted = performance.now();
     timing.step('recover-replay-committed', () => { for (const job of this.repo.list('tree_jobs', j => j.role && j.status === 'committed')) this.afterCommit(job); });
+    this.diagnostic('recovery_timing', { code: 'RECOVERY_TIMING', message: 'Committed job recovery completed' }, { durationMs: Math.round(performance.now() - replayStarted) });
     timing.step('recover-kick', () => this.kick()); return recovered;
   }
   applyResult(result, context) {
@@ -664,8 +666,15 @@ export class TreeRuntime {
   }
   async scanAdmitted() {
     const release = await this.admissions.acquire(this.shutdown.signal);
-    try { return this.scanOne(); }
-    finally { release(); }
+    const started = performance.now();
+    try { return await this.scanOne(); }
+    finally {
+      release();
+      if (!this.closed && !this.scanTimingRecorded) {
+        this.scanTimingRecorded = true;
+        this.diagnostic('scan_timing', { code: 'SCAN_TIMING', message: 'First admitted background scan completed' }, { durationMs: Math.round(performance.now() - started) });
+      }
+    }
   }
   async scanOne() {
     if (this.closed) return false;
