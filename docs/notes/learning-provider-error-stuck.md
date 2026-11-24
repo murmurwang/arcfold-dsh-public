@@ -1,4 +1,4 @@
-# 决策：[083-D1] 学习碰到超时或断线就卡住，这个目标不再学习
+# 决策：[083-D2] 学习碰到超时或断线就卡住，这个目标不再学习
 
 Status: proposed
 observed_in_version: 0.7.0 + main@21f8624 与 main@d32cd0b（测试版，从第 30 轮回放）
@@ -34,7 +34,7 @@ Murphy 原话：看有哪些可以合并的，然后起草全部的决策，做�
 - `jobs.mjs` 在同一目标有 unknown 学习时拒绝启动新学习（LEARNING_UNKNOWN），扫描把它当成"忙"，静默跳过，不写诊断。于是后面的学习一直停在排队。
 - `consolidation.mjs` 的 `departed()` 在目标还有未结束的学习时跳过整理。它用的终态清单 `TERMINAL_JOBS` 包含 unknown，所以 unknown 本身不挡整理；直接挡住的是那 13 个一直排队的学习，而它们排队不动又是因为前面的 unknown。
 
-证据：测试版目标树 `~/.arcfold-test/home/arcfold-desktop/tree.sqlite` 中这两个学习任务及其 invocation，学习会话 session-ab2a3873（第 25 轮）和 session-f1f55a56（第 1 轮）。
+证据：测试版目标树 （路径仅保留在本机原始证据中） 中这两个学习任务及其 invocation，学习会话 session-ab2a3873（第 25 轮）和 session-f1f55a56（第 1 轮）。
 
 ## 方案
 
