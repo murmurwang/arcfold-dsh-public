@@ -699,7 +699,7 @@ export class TreeRuntime {
       if (job.role === 'script_writer' && [...this.workers.keys()].some(id => this.jobs.get(id).role === 'script_writer')) continue;
       try { this.jobs.prepare(job.id); }
       catch (error) { if (!busy.has(error.code)) { this.jobs.transition(job.id, 'stale', { error: { code: error.code, message: error.message } }); this.diagnostic('job_preparation', error, { jobId: job.id }); } continue; }
-      if (!this.admitRecoveredLearning(this.jobs.get(job.id))) continue;
+      if (!this.admitRecoveredLearning(job)) continue;
       const promise = this.runWorker(job.id).catch(error => { if (!this.closed && !busy.has(error.code)) this.diagnostic('job_worker', error, { jobId: job.id }); })
         .finally(() => { this.workers.delete(job.id); if (!this.closed) this.kick(); });
       this.workers.set(job.id, promise);
@@ -753,8 +753,10 @@ export class TreeRuntime {
     this.diagnostic('learning_backlog_skipped', error, { nodeId, turnId, intentIds: intents.map(i => i.id) });
   }
   admitRecoveredLearning(job) {
-    const batch = this.recoveredLearning, nodeId = job.nodeIds[0];
-    if (!batch || job.role !== 'learning' || !batch.keys.has(digest([nodeId, job.trigger.turnId])) || batch.jobs.has(job.id)) return true;
+    const batch = this.recoveredLearning;
+    if (!batch || job.role !== 'learning') return true;
+    const nodeId = job.nodeIds[0];
+    if (!batch.keys.has(digest([nodeId, job.trigger.turnId])) || batch.jobs.has(job.id)) return true;
     if ((batch.perNode.get(nodeId) ?? 0) >= 15 || batch.total >= 20) { this.skipRecoveredLearning(nodeId, job.trigger.turnId); return false; }
     batch.jobs.add(job.id); batch.total++; batch.perNode.set(nodeId, (batch.perNode.get(nodeId) ?? 0) + 1); return true;
   }
