@@ -39,11 +39,11 @@ test('a refusal previously left unknown is recognized from its durable records o
   assert.equal(resolved.status, 'failed'); assert.equal(resolved.providerRejected, true); assert.equal(f.requests.length, sent);
 });
 
-test('other provider errors keep the existing unknown protection', async t => {
+test('other durably ended provider errors become known learning failures', async t => {
   const f = await nativeFixture(t, ({ role }) => role === 'learning' ? otherError : minimal[role], { nativeModels: true });
   const job = await f.owner.run(f.enqueue('learning').id);
-  assert.equal(job.status, 'unknown'); assert.equal(job.providerRejected, undefined); assert.equal(deferredLearning(job), false);
-  assert.throws(() => f.jobs.prepare(f.enqueue('learning').id), { code: 'LEARNING_UNKNOWN' });
+  assert.equal(job.status, 'failed'); assert.equal(job.error.code, 'LEARNING_PROVIDER_ERROR'); assert.equal(job.providerRejected, undefined); assert.equal(deferredLearning(job), false);
+  assert.equal(f.jobs.prepare(f.enqueue('learning').id).status, 'prepared');
 });
 
 test('long tool output is kept by reference in learning input; wording and short output stay original', () => {
