@@ -18,7 +18,9 @@ export function evidenceResolver(repo, nativeResolve) {
 export function effectiveSignals(repo, resolveSource = () => true) {
   const rows = repo.list('tree_signals'), byId = new Map(rows.map(r => [r.id, r]));
   const ordinals = new Map();
-  for (const event of repo.list('tree_change_events')) for (const [index, key] of event.entityIds.entries()) if (key.startsWith('tree_signals:') && event.beforeVersions[index] === 0) ordinals.set(key.slice('tree_signals:'.length), event.ordinal);
+  // Only events that created a signal matter; a filtered list avoids parsing
+  // every change event on each call (F56: 83 full reads during one startup).
+  for (const event of repo.list('tree_change_events', e => e.entityIds.some(key => key.startsWith('tree_signals:')))) for (const [index, key] of event.entityIds.entries()) if (key.startsWith('tree_signals:') && event.beforeVersions[index] === 0) ordinals.set(key.slice('tree_signals:'.length), event.ordinal);
   const root = row => { const seen = new Set(); while (row.correctionOf) { if (seen.has(row.id) || !byId.has(row.correctionOf)) fail('SIGNAL_HISTORY', 'Broken correction chain'); seen.add(row.id); row = byId.get(row.correctionOf); } return row.id; };
   const latest = new Map();
   for (const row of rows) { const key = root(row), old = latest.get(key); if (!old || (ordinals.get(row.id) ?? 0) > (ordinals.get(old.id) ?? 0)) latest.set(key, row); }

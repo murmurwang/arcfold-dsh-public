@@ -13,6 +13,35 @@ const TABLES = [
   "CREATE UNIQUE INDEX learning_node_identity ON records(json_extract(body,'$.nodeId')) WHERE kind='tree_learning_sessions'",
 ];
 const schemaHash = digest(TABLES);
+// Large job fields no list predicate reads. In the 0.8.0 test copy they were
+// ~44MB of 47MB of tree_jobs; parsing them on every filtered list blocked the
+// host for over a second each time (F56). Reading one of them in a predicate
+// throws LIGHT_FIELD instead of silently seeing undefined.
+const LIGHT_OMIT = Object.freeze({
+  tree_jobs: ['$.nativeMessage', '$.rawMessage', '$.prompt', '$.outputEnvelope', '$.inputRevisionSet',
+    '$.input.context', '$.input.sources', '$.input.constraints', '$.input.knownItems', '$.input.exposures', '$.input.effects',
+    '$.input.learningHistory', '$.input.epochSeed', '$.input.changeReceipts', '$.input.trace', '$.input.candidates', '$.input.clusters'],
+});
+const byCreated = (a, b) => a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+function pathParts(path) { return path.slice(2).split('.'); }
+function removePath(record, path) {
+  const parts = pathParts(path), last = parts.pop();
+  const parent = parts.reduce((value, key) => value && typeof value === 'object' ? value[key] : undefined, record);
+  if (parent && typeof parent === 'object' && !Array.isArray(parent)) delete parent[last];
+}
+function deepFreeze(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.freeze(value); for (const child of Object.values(value)) deepFreeze(child); }
+  return value;
+}
+function lightRecord(record, omit) {
+  for (const path of omit) {
+    const parts = pathParts(path), last = parts.pop();
+    const parent = parts.reduce((value, key) => value && typeof value === 'object' ? value[key] : undefined, record);
+    if (parent && typeof parent === 'object' && !Array.isArray(parent))
+      Object.defineProperty(parent, last, { enumerable: false, get() { fail('LIGHT_FIELD', `List predicates cannot read ${path}`); } });
+  }
+  return deepFreeze(record);
+}
 export const recordKey = (kind, id) => `${kind}:${id}`;
 function inventory(filename) {
   return ['', '-journal'].map(suffix => {
@@ -32,7 +61,7 @@ function durableJson(filename, data) {
 const recordsHash = db => digest(db.prepare('SELECT kind,id,revision,body FROM records ORDER BY kind,id').all().map(r => ({ ...r })));
 
 export class TreeRepository {
-  #db; #depth = 0; #changes = new Map(); #closed = false; #nodeIndexes = new Map();
+  #db; #depth = 0; #changes = new Map(); #closed = false; #nodeIndexes = new Map(); #lightCaches = new Map();
   constructor({ treeFilename, userId, legacyFilename, now = () => new Date().toISOString() }) {
     text(userId, 'userId', 512); text(treeFilename, 'treeFilename', 4096);
     if (treeFilename !== ':memory:' && !treeFilename.startsWith('/')) fail('DATABASE_PATH', 'Explicit absolute treeFilename required');
@@ -116,11 +145,40 @@ export class TreeRepository {
       const result = fn();
       if (result?.then) { Promise.resolve(result).catch(() => {}); fail('ASYNC_TRANSACTION', 'No model, file-copy or network operation inside transactions'); }
       this.#db.exec(nested ? `RELEASE ${name}` : 'COMMIT'); return result;
-    } catch (e) { this.#db.exec(nested ? `ROLLBACK TO ${name}; RELEASE ${name}` : 'ROLLBACK'); this.#changes = changes; this.#nodeIndexes.clear(); throw e; }
+    } catch (e) { this.#db.exec(nested ? `ROLLBACK TO ${name}; RELEASE ${name}` : 'ROLLBACK'); this.#changes = changes; this.#nodeIndexes.clear(); this.#lightCaches.clear(); throw e; }
     finally { this.#depth--; }
   }
   get(kind, id) { const row = this.#db.prepare('SELECT body FROM records WHERE kind=? AND id=?').get(kind, id); return row ? JSON.parse(row.body) : null; }
-  list(kind, predicate = () => true) { return this.#db.prepare('SELECT body FROM records WHERE kind=? ORDER BY created_at,id').all(kind).map(r => JSON.parse(r.body)).filter(predicate); }
+  // A filtered list runs the predicate over a cached, frozen light copy of each
+  // record (large fields left out, see LIGHT_OMIT) and parses full bodies only
+  // for the matches. The cache follows the same rules as #nodeIndexes: own
+  // writes maintain it, rollback clears it, other connections invalidate it via
+  // data_version. Without a predicate every body is needed, so read directly.
+  list(kind, predicate) {
+    if (predicate === undefined) return this.#db.prepare('SELECT body FROM records WHERE kind=? ORDER BY created_at,id').all(kind).map(r => JSON.parse(r.body));
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const version = this.#db.prepare('PRAGMA data_version').get().data_version;
+      let cache = this.#lightCaches.get(kind);
+      if (!cache || cache.version !== version) {
+        const omit = LIGHT_OMIT[kind] ?? [];
+        const sql = omit.length ? `SELECT id,created_at,json_remove(body,${omit.map(() => '?').join(',')}) AS body FROM records WHERE kind=?` : 'SELECT id,created_at,body FROM records WHERE kind=?';
+        const rows = new Map();
+        for (const row of this.#db.prepare(sql).all(...omit, kind)) rows.set(row.id, { id: row.id, createdAt: row.created_at, light: lightRecord(JSON.parse(row.body), omit) });
+        cache = { version, rows, ordered: null };
+        this.#lightCaches.set(kind, cache);
+      }
+      cache.ordered ??= [...cache.rows.values()].sort(byCreated);
+      const selected = cache.ordered.filter(row => predicate(row.light)).map(row => row.id);
+      const bodies = new Map();
+      for (let offset = 0; offset < selected.length; offset += 500) {
+        const batch = selected.slice(offset, offset + 500);
+        for (const row of this.#db.prepare(`SELECT id,body FROM records WHERE kind=? AND id IN (${batch.map(() => '?').join(',')})`).all(kind, ...batch)) bodies.set(row.id, row.body);
+      }
+      if (this.#db.prepare('PRAGMA data_version').get().data_version !== version || bodies.size !== selected.length) { this.#lightCaches.delete(kind); continue; }
+      return selected.map(id => JSON.parse(bodies.get(id)));
+    }
+    fail('QUERY_BUSY', 'Records changed repeatedly while reading; retry the read');
+  }
   listByNodeIds(kind, nodeIds, predicate = () => true) {
     if (!Array.isArray(nodeIds) || nodeIds.some(id => typeof id !== 'string')) fail('INVALID_FIELD', 'Node ids must be strings');
     const ids = [...new Set(nodeIds)];
@@ -174,8 +232,18 @@ export class TreeRepository {
     for (const field of ['reviews', 'exportAudit']) if (old?.[field] && canonicalJson(copy[field]?.slice(0, old[field].length) ?? null) !== canonicalJson(old[field])) fail('IMMUTABLE_HISTORY', 'History must be append-only');
     const at = this.now(); if (new Date(at).toISOString() !== at) fail('CLOCK_INVALID', 'Host UTC timestamp required');
     const saved = { ...copy, revision: old ? old.revision + 1 : 1, createdAt: old?.createdAt ?? at, updatedAt: at };
+    const body = canonicalJson(saved);
     this.#db.prepare('INSERT INTO records VALUES (?,?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at,body=excluded.body')
-      .run(kind, saved.id, saved.revision, saved.createdAt, saved.updatedAt, canonicalJson(saved));
+      .run(kind, saved.id, saved.revision, saved.createdAt, saved.updatedAt, body);
+    const cache = this.#lightCaches.get(kind);
+    if (cache) {
+      const omit = LIGHT_OMIT[kind] ?? [], parsed = JSON.parse(body);
+      for (const path of omit) removePath(parsed, path);
+      const light = lightRecord(parsed, omit), row = cache.rows.get(saved.id);
+      // createdAt never changes on update, so an existing row keeps its place.
+      if (row) row.light = light;
+      else { cache.rows.set(saved.id, { id: saved.id, createdAt: saved.createdAt, light }); cache.ordered = null; }
+    }
     const index = this.#nodeIndexes.get(kind);
     if (index) {
       if (typeof old?.nodeId === 'string') index.nodes.get(old.nodeId)?.delete(saved.id);
