@@ -26,12 +26,18 @@ export class NativeModelRecords {
     return receipt;
   }
   async *stream(options, next) {
-    const { requestId } = this.owner.assertRequest(options);
-    if (this.get(requestId)) fail('INVOCATION_REPLAY', 'This native request already has an attempt; do not resend');
+    const { requestId, metadata } = this.owner.assertRequest(options);
+    const previous = this.get(requestId), retryCount = metadata?.nativeRetry ?? 0;
+    if (previous && !(previous.status === 'failed' && previous.finish === 'error' &&
+      retryCount === (previous.retryCount ?? 0) + 1)) fail('INVOCATION_REPLAY', 'This native request has no authorized next retry');
+    if (!previous && retryCount !== 0) fail('INVOCATION_REPLAY', 'Native retry is missing its previous attempt record');
+    const { attemptHistory = [], ...priorAttempt } = previous ?? {};
+
     options.signal?.throwIfAborted();
-    this.write(requestId, { kind: 'dsh-native-response-v1', requestId, status: 'started',
+    this.write(requestId, { kind: 'dsh-native-response-v1', requestId, status: 'started', retryCount,
+      ...(previous ? { attemptHistory: [...attemptHistory, priorAttempt] } : {}),
       provider: options.provider, model: options.model, reasoningEffort: options.reasoningEffort ?? null,
-      maxTokens: options.maxTokens ?? null, startedAt: this.repo.now(), usage: null, usageStatus: 'missing',
+      maxTokens: options.maxTokens ?? null, endedAt: null, startedAt: this.repo.now(), usage: null, usageStatus: 'missing',
       usageSource: 'dsh-native-adapter', adapterUsage: null, cost: null, priceStatus: 'unknown', finish: null });
     let finish = null, usage = null, adapterUsage = null, usageStatus = 'missing', exhausted = false;
     try {
@@ -62,7 +68,7 @@ export class NativeModelRecords {
   }
   summary() {
     const records = this.repo.list('tree_invocations', row => row.nativeRequest).map(row => row.nativeRequest);
-    return { scope: 'dsh-native', requests: records.length,
+    return { scope: 'dsh-native', requests: records.length, attempts: records.reduce((sum, row) => sum + 1 + (row.attemptHistory?.length ?? 0), 0),
       complete: records.filter(row => nativeResponseComplete(row)).length,
       unknown: records.filter(row => row.status === 'unknown' || row.status === 'started').length,
       usageMissing: records.filter(row => row.usageStatus !== 'reported').length,

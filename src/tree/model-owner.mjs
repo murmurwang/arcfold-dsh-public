@@ -5,7 +5,7 @@ import { compilePrompt } from './prompts.mjs';
 import { modelView } from './model-view.mjs';
 import { nativeAgentOptions, nativeModel } from './native-models.mjs';
 import { nativeResponseComplete } from './native-model-records.mjs';
-import { LlmError } from '@deepseek-ai/dsh-llm';
+import { LlmError, lastAssistantStreamChunk } from '@deepseek-ai/dsh-llm';
 
 // The single turn carrying this job's input ended because the host disposed
 // the agent, and no assistant answer was recorded inside it.
@@ -18,10 +18,26 @@ function disposedWithoutAnswer(events, own) {
   return events.some(e => e.type === 'assistant/message' && e.seq > start.seq && e.seq < end.seq) ? null : end;
 }
 const requestHash = options =>digest({ messages: options.messages, tools: options.tools ?? [], toolHistory: options.toolHistory ?? null });
-function nativePosition(session) {
+export function nativePosition(session, allowRetry = false) {
   const events = session.snapshotEvents(), start = events.findLast(e => e.type === 'step/start'), turn = events.findLast(e => e.type === 'turn/start');
-  if (!start || !turn || !Number.isSafeInteger(start.data.turn) || !Number.isSafeInteger(start.data.step) || turn.data.turn !== start.data.turn || turn.seq >= start.seq || events.slice(start.seq + 1).some(e => ['assistant/message', 'assistant/attempt', 'step/end', 'turn/end'].includes(e.type))) fail('NATIVE_STEP', 'No live unattempted native step');
-  return { turn: start.data.turn, step: start.data.step, stepStartSeq: start.seq, events };
+  if (!start || !turn || !Number.isSafeInteger(start.data.turn) || !Number.isSafeInteger(start.data.step) || turn.data.turn !== start.data.turn || turn.seq >= start.seq) fail('NATIVE_STEP', 'No live unattempted native step');
+  const tail = events.filter(e => e.seq > start.seq);
+  if (tail.some(e => ['assistant/message', 'step/end', 'turn/end'].includes(e.type))) fail('NATIVE_STEP', 'Native step already answered or ended');
+  const attempts = tail.filter(e => e.type === 'assistant/attempt');
+  for (const [index, attempt] of attempts.entries()) {
+    const until = attempts[index + 1]?.seq ?? Infinity;
+    const finish = Array.isArray(attempt.data?.stream) && lastAssistantStreamChunk(attempt.data.stream, 'finish');
+    const output = attempt.data?.stream?.some(r => r.type !== 'chunk' || ['text-delta', 'reasoning-delta', 'tool-call-delta'].includes(r.chunk?.type));
+    const retry = tail.find(e => e.type === 'llm/retry' && e.seq > attempt.seq && e.seq < until);
+    const resumed = retry && tail.find(e => e.type === 'llm/retry-started' && e.seq > retry.seq && e.seq < until && e.data?.retryId === retry.data?.retryId);
+    if (!allowRetry || finish?.reason?.kind !== 'error' || typeof finish.reason.failure?.code !== 'string' || !finish.reason.failure.code || output || !retry || !resumed ||
+      typeof retry.data?.retryId !== 'string' || !retry.data.retryId ||
+      [attempt, retry, resumed].some(e => e.data?.turn !== start.data.turn || e.data?.step !== start.data.step) ||
+      retry.data.mode !== 'normal' || retry.data.retry !== index + 1 || resumed.data.retry !== retry.data.retry ||
+      !Number.isSafeInteger(retry.data.maxRetries) || retry.data.retry > Math.min(5, retry.data.maxRetries) ||
+      retry.data.failure?.code !== finish.reason.failure?.code) fail('NATIVE_STEP', 'No authorized native retry for this step');
+  }
+  return { turn: start.data.turn, step: start.data.step, stepStartSeq: start.seq, retryCount: attempts.length, events };
 }
 
 /** Uses DSH create/resume/followup/whenIdle. There is no second agent/tool loop. */
@@ -100,16 +116,16 @@ export class TreeModelOwner {
     return (async function* () {
       if (owner.closed) fail('OWNER_CLOSED', 'Tree model owner is closed'); options.signal?.throwIfAborted();
       await owner.prepareInput?.(options); options.signal?.throwIfAborted();
-      const job = owner.jobFor(options.sessionId), tools = owner.assertProjection(job, options), position = nativePosition(owner.host.sessions.get(options.sessionId));
+      const job = owner.jobFor(options.sessionId), tools = owner.assertProjection(job, options), position = nativePosition(owner.host.sessions.get(options.sessionId), nativeModel(job.modelConfig));
       owner.jobs.admitInvocation(job.id, { ...position, requestHash: requestHash(options), allowedTools: tools });
       yield* next();
     })();
   }
   identity(options, session = this.host.sessions.get(options.sessionId)) {
-    const job = this.jobFor(options.sessionId); this.assertProjection(job, options); const position = nativePosition(session);
+    const job = this.jobFor(options.sessionId); this.assertProjection(job, options); const position = nativePosition(session, nativeModel(job.modelConfig));
     const invocation = this.jobs.repo.list('tree_invocations', i => i.jobId === job.id && i.nativeSessionId === session.id && i.stepStartSeq === position.stepStartSeq)[0];
     if (!invocation || invocation.state !== 'admitted' || invocation.requestHash !== requestHash(options)) fail('INVOCATION_GUARD', 'Request did not pass the exact tree step guard');
-    return { requestId: invocation.ledgerRequestId, metadata: { ...(job.trigger.repairEvidence ?? {}), owner: 'arcfold-dsh-tree-v3', sessionId: session.id, turn: position.turn, step: position.step, stepStartSeq: position.stepStartSeq, nativeThroughSeq: position.events.at(-1).seq, nativePrefixHash: digest(position.events), role: job.role, treeJobId: job.id, treeInvocationId: invocation.id, treeInputHash: job.inputHash, promptHash: job.promptHash, modelConfigHash: job.modelConfigHash, modelVersion: job.modelConfig.modelVersion, treePriceVersion: job.modelConfig.priceVersion, budgetScope: job.modelConfig.budgetScope, stage: job.modelConfig.stage } };
+    return { requestId: invocation.ledgerRequestId, metadata: { ...(job.trigger.repairEvidence ?? {}), owner: 'arcfold-dsh-tree-v3', sessionId: session.id, turn: position.turn, step: position.step, stepStartSeq: position.stepStartSeq, nativeThroughSeq: position.events.at(-1).seq, nativeRetry: position.retryCount, nativePrefixHash: digest(position.events), role: job.role, treeJobId: job.id, treeInvocationId: invocation.id, treeInputHash: job.inputHash, promptHash: job.promptHash, modelConfigHash: job.modelConfigHash, modelVersion: job.modelConfig.modelVersion, treePriceVersion: job.modelConfig.priceVersion, budgetScope: job.modelConfig.budgetScope, stage: job.modelConfig.stage } };
   }
   assertRequest(options) {
     const identity = this.identity(options), job = this.jobFor(options.sessionId);

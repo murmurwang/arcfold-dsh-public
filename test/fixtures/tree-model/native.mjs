@@ -86,7 +86,7 @@ export async function nativeFixture(t, script = ({ role }) => minimal[role] ?? '
     child.on('llm/stream', (options, next) => owner.guardStream(options, fixtureOptions.nativeModels ? () => nativeRecords.stream(options, next) : next));
   } }));
   await active(await ctx.plugin(fixtureOptions.nativeModels ? NativeProvider : Provider, fixtureOptions.nativeModels
-    ? { apiKeyEnv: 'SYNTHETIC_KEY_REFERENCE', baseURL: endpoint.replace('/v1/messages', ''), maxTokens: 1024, reasoningEffort: 'off' }
+    ? { apiKeyEnv: 'SYNTHETIC_KEY_REFERENCE', baseURL: endpoint.replace('/v1/messages', ''), maxTokens: 1024, reasoningEffort: 'off', ...(fixtureOptions.retryPolicy ? { retryPolicy: fixtureOptions.retryPolicy } : {}) }
     : { apiKeyRef: 'SYNTHETIC_KEY_REFERENCE', maxTokens: 1024, reasoningEffort: 'off' }));
   let sequence = 0;
   function enqueue(role, override = {}) {
