@@ -4,7 +4,7 @@ import { validateOutput, resolveSourceIds } from './prompts.mjs';
 import { ScriptWriter } from './script-writer.mjs';
 import { learningCorrections, LearningObservations, quotedSource } from './observations.mjs';
 import { MetricsService } from './metrics.mjs';
-import { deferredLearning, interruptedLearning, movedLearning, preDispatchLearning } from './jobs.mjs';
+import { deferredLearning, interruptedLearning, movedLearning, preDispatchLearning, providerErrorLearning, LEARNING_BACKLOG_SKIPPED } from './jobs.mjs';
 import { compactLearningSource } from './experience.mjs';
 
 const program = { kind: 'program', id: 'tree-learning' };
@@ -46,8 +46,15 @@ export class LearningService {
     this.observations = new LearningObservations({ repository, metrics: new MetricsService({ repository, experience, signals }) });
   }
   existing(turn, nodeId) {
+    const skipped = this.repo.list('tree_jobs', j => !j.role && j.kind === 'learning' && j.scopeKey === nodeId && j.input.turnId === turn.id && j.input.assignmentRevision === turn.assignmentRevision && j.error?.code === LEARNING_BACKLOG_SKIPPED)[0];
+    if (skipped) return skipped;
     return this.repo.list('tree_jobs', j => j.role === 'learning' && j.trigger.turnId === turn.id && j.nodeIds[0] === nodeId && j.input.currentTurn.assignmentRevision === turn.assignmentRevision)
       .sort((a, b) => b.enqueuedOrder - a.enqueuedOrder || b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))[0];
+  }
+  providerRetryAvailable(job) {
+    if (!providerErrorLearning(job)) return false;
+    const attempts = this.repo.list('tree_jobs', j => j.role === 'learning' && j.nodeIds[0] === job.nodeIds[0] && j.trigger.turnId === job.trigger.turnId);
+    return !attempts.some(j => j.trigger.retriesProviderError) && attempts.reduce((n, j) => n + j.invocationIds.length, 0) < 2;
   }
   enqueue(turnId, nodeId) {
     const turn = this.repo.get('tree_turns', turnId);
@@ -57,14 +64,17 @@ export class LearningService {
     // Only an append stopped before submission, or one the provider refused
     // for context size without output, may be frozen again after the epoch
     // changes. A request interrupted by a host stop before it was released is
-    // frozen again at once. Paid/unknown and ordinary failures never retry.
+    // frozen again at once. A durably failed provider turn gets one persistent
+    // retry; genuinely unknown requests remain blocked.
+    const retried = this.repo.list('tree_jobs', j => j.role === 'learning' && j.nodeIds[0] === nodeId && j.trigger.turnId === turnId && j.trigger.retriesProviderError).length > 0;
+    const providerError = this.providerRetryAvailable(old);
     const deferred = deferredLearning(old), interrupted = interruptedLearning(old), refused = preDispatchLearning(old), moved = movedLearning(old);
     // A refused append cannot go back into the same native session: its
     // position is already taken. Start a new session first (once per turn).
     if (refused && !session?.paused && session?.contextEpoch === old.contextEpoch) session = this.jobs.restartEpoch(nodeId);
-    const ready = interrupted || moved ? !session?.paused : (deferred || refused) && !session?.paused && session?.contextEpoch > old.contextEpoch;
+    const ready = interrupted || moved || providerError ? !session?.paused : (deferred || refused) && !session?.paused && session?.contextEpoch > old.contextEpoch;
     if (old && !ready) return old;
-    const key = !old ? baseKey : interrupted ? digest(['interrupted-learning', baseKey, old.id]) : refused ? digest(['pre-dispatch-learning', baseKey, old.id])
+    const key = !old ? baseKey : providerError ? digest(['provider-error-learning', baseKey]) : interrupted ? digest(['interrupted-learning', baseKey, old.id]) : refused ? digest(['pre-dispatch-learning', baseKey, old.id])
       : moved ? digest(['moved-learning', baseKey, old.id]) : digest(['epoch-learning', baseKey, session.contextEpoch]);
     // Freeze after previous receipts, not eagerly while an earlier turn is still
     // producing the very constraints and acknowledgements this turn must read.
@@ -106,6 +116,7 @@ export class LearningService {
     // Node changes invalidate scope, but ordinary newer settled turns need not
     // stale this input. TreeService separately marks affected jobs invalidated.
     const trigger = { kind: 'settled_main_turn', producerRole: 'main', status: 'settled', turnId, watermark: digest([turnId, turn.assignmentRevision]),
+      ...((providerError || old?.trigger?.retriesProviderError || retried) ? { retriesProviderError: true } : {}),
       ...(old?.providerRejected ? { retriesProviderRejection: true } : {}), ...(refused ? { retriesPreDispatch: true } : {}), ...(moved ? { refreezesMove: true } : {}),
       ...(annotations.correction ? { correction: annotations.correction } : {}), ...(annotations.directRequirement ? { directRequirement: annotations.directRequirement } : {}) };
     return this.jobs.enqueue({ role: 'learning', key, nodeIds: [nodeId], input, revisionSet, config: this.config('learning', { turnId, nodeIds: [nodeId] }), trigger });

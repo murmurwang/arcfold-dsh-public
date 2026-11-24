@@ -13,7 +13,7 @@ import { registerTreeRequestAuthority, ownEvidenceDirectory } from '../native-re
 import { ScriptArtifacts, MethodScriptBroker } from './scripts.mjs';
 import { SnapshotService, ConfinedWorkspaceIO } from './snapshots.mjs';
 import { canonicalPath, processPolicy, beneath } from './host-process.mjs';
-import { TreeJobs, deferredLearning, interruptedLearning, movedLearning, preDispatchLearning, NATIVE_PRE_DISPATCH } from './jobs.mjs';
+import { TreeJobs, deferredLearning, interruptedLearning, movedLearning, preDispatchLearning, LEARNING_PROVIDER_ERROR, LEARNING_BACKLOG_SKIPPED, NATIVE_PRE_DISPATCH } from './jobs.mjs';
 import { TreeModelOwner } from './model-owner.mjs';
 import { NativeSources, ExperienceService } from './experience.mjs';
 import { ContextBuilder, mountTreeContext } from './context.mjs';
@@ -192,7 +192,11 @@ export class TreeRuntime {
           finally { await reader?.close(); } }
       }
     });
+    const backlog = this.repo.list('tree_jobs', j => !j.role && j.kind === 'learning' && j.status === 'queued');
+    const blocked = this.repo.list('tree_jobs', j => j.role === 'learning' && (j.status === 'unknown' || j.error?.code === LEARNING_PROVIDER_ERROR && backlog.some(i => i.nodeIds[0] === j.nodeIds[0] && i.input.turnId === j.trigger.turnId)));
     const recovered = await timing.step('recover-model-owner', () => this.owner.recover());
+    this.limitRecoveredLearning(blocked.filter(j => this.jobs.get(j.id).error?.code === LEARNING_PROVIDER_ERROR), backlog);
+    for (const job of this.repo.list('tree_jobs', j => j.role === 'learning' && j.error?.code === LEARNING_PROVIDER_ERROR)) this.providerErrorDiagnostic(job);
     for (const r of recovered) if (r.interrupted) this.diagnostic('learning_interrupted', r.interrupted, { jobId: r.id, nodeId: r.nodeId });
     timing.step('recover-cancel-prepared', () => {
       for (const job of this.repo.list('tree_jobs', j => j.role === 'main' && j.status === 'prepared')) {
@@ -695,6 +699,7 @@ export class TreeRuntime {
       if (job.role === 'script_writer' && [...this.workers.keys()].some(id => this.jobs.get(id).role === 'script_writer')) continue;
       try { this.jobs.prepare(job.id); }
       catch (error) { if (!busy.has(error.code)) { this.jobs.transition(job.id, 'stale', { error: { code: error.code, message: error.message } }); this.diagnostic('job_preparation', error, { jobId: job.id }); } continue; }
+      if (!this.admitRecoveredLearning(this.jobs.get(job.id))) continue;
       const promise = this.runWorker(job.id).catch(error => { if (!this.closed && !busy.has(error.code)) this.diagnostic('job_worker', error, { jobId: job.id }); })
         .finally(() => { this.workers.delete(job.id); if (!this.closed) this.kick(); });
       this.workers.set(job.id, promise);
@@ -716,11 +721,48 @@ export class TreeRuntime {
       try { this.improvement.enqueue(role); } catch (error) { if (!busy.has(error.code)) this.diagnostic('improvement_queue', error, { role }); }
     }
   }
+  providerErrorDiagnostic(job) {
+    this.diagnostic('learning_provider_error', job.error, { jobId: job.id, nodeId: job.nodeIds[0], nativeCode: job.error.nativeCode, retried: job.trigger.retriesProviderError === true });
+  }
+  // Snapshot only the queue freed by a durable unknown failure. New human
+  // turns are outside this batch. Skipped intents stay closed across restarts.
+  limitRecoveredLearning(resolved, intents) {
+    const nodes = new Set(resolved.map(j => j.nodeIds[0]));
+    this.recoveredLearning = { keys: new Set(), jobs: new Set(), perNode: new Map(), total: 0 };
+    const rows = new Map();
+    for (const j of [...resolved, ...intents.filter(i => nodes.has(i.nodeIds[0]))]) {
+      const nodeId = j.nodeIds[0], turnId = j.trigger?.turnId ?? j.input.turnId, turn = this.repo.get('tree_turns', turnId);
+      if (!turn) continue;
+      rows.set(digest([nodeId, turnId]), { nodeId, turn, intents: intents.filter(i => i.nodeIds[0] === nodeId && i.input.turnId === turnId) });
+    }
+    const perNode = new Map(); let total = 0;
+    for (const [key, row] of [...rows].sort((a, b) => a[1].turn.startedAt.localeCompare(b[1].turn.startedAt) || a[1].turn.sessionId.localeCompare(b[1].turn.sessionId) || a[1].turn.nativeTurn - b[1].turn.nativeTurn || a[0].localeCompare(b[0]))) {
+      if ((perNode.get(row.nodeId) ?? 0) >= 15 || total >= 20) this.skipRecoveredLearning(row.nodeId, row.turn.id, row.intents);
+      else { this.recoveredLearning.keys.add(key); perNode.set(row.nodeId, (perNode.get(row.nodeId) ?? 0) + 1); total++; }
+    }
+  }
+  skipRecoveredLearning(nodeId, turnId, intents = this.repo.list('tree_jobs', j => !j.role && j.kind === 'learning' && j.nodeIds[0] === nodeId && j.input.turnId === turnId && j.status === 'queued')) {
+    const error = { code: LEARNING_BACKLOG_SKIPPED, message: '历史积压超过每目标 15 次、全部目标 20 次的本次启动补学上限；不再自动补跑。' };
+    this.repo.transaction(() => {
+      for (const intent of intents) {
+        const current = this.repo.get('tree_jobs', intent.id);
+        if (current.status === 'queued') this.repo.save('tree_jobs', { ...current, status: 'failed', error }, current.revision);
+      }
+      for (const job of this.repo.list('tree_jobs', j => j.role === 'learning' && j.nodeIds[0] === nodeId && j.trigger.turnId === turnId && ['queued', 'prepared'].includes(j.status) && !j.invocationIds.length)) this.jobs.transition(job.id, 'failed', { error });
+    });
+    this.diagnostic('learning_backlog_skipped', error, { nodeId, turnId, intentIds: intents.map(i => i.id) });
+  }
+  admitRecoveredLearning(job) {
+    const batch = this.recoveredLearning, nodeId = job.nodeIds[0];
+    if (!batch || job.role !== 'learning' || !batch.keys.has(digest([nodeId, job.trigger.turnId])) || batch.jobs.has(job.id)) return true;
+    if ((batch.perNode.get(nodeId) ?? 0) >= 15 || batch.total >= 20) { this.skipRecoveredLearning(nodeId, job.trigger.turnId); return false; }
+    batch.jobs.add(job.id); batch.total++; batch.perNode.set(nodeId, (batch.perNode.get(nodeId) ?? 0) + 1); return true;
+  }
   // A turn whose learning ended for good, with nothing left to retry, stops
   // being asked for again on every scan.
   closeLearningIntent(intent, job) {
     if (!job || !['failed', 'invalid_output', 'stale', 'cancelled'].includes(job.status)) return;
-    if (deferredLearning(job) || interruptedLearning(job) || preDispatchLearning(job) || movedLearning(job)) return;
+    if (deferredLearning(job) || interruptedLearning(job) || preDispatchLearning(job) || movedLearning(job) || this.learning.providerRetryAvailable(job)) return;
     const status = job.status === 'stale' || job.status === 'cancelled' ? job.status : 'failed';
     this.repo.command('closeLearningIntent', { requestId: digest(['close-learning-intent', intent.id, job.id]), expected: { ['tree_jobs:' + intent.id]: intent.revision }, input: { intentId: intent.id, jobId: job.id, status } },
       program, () => { this.repo.save('tree_jobs', { ...intent, status, ownedJobId: job.id }, intent.revision); return { intentId: intent.id }; });
@@ -731,6 +773,7 @@ export class TreeRuntime {
       const result = await this.owner.run(id), release = await this.admissions.acquire(this.shutdown.signal);
       if (result?.role === 'learning' && result.status === 'failed' && result.error?.code === NATIVE_PRE_DISPATCH)
         this.diagnostic('learning_pre_dispatch', result.error, { jobId: result.id, nodeId: result.nodeIds[0], nativeLogRef: result.nativeLogRef ?? null, retried: result.trigger?.retriesPreDispatch === true });
+      if (result?.error?.code === LEARNING_PROVIDER_ERROR) this.providerErrorDiagnostic(result);
       try { if (!this.handlePressure(result)) this.afterCommit(result); }
       finally { release(); }
     } finally { slot(); }

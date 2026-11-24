@@ -9,6 +9,11 @@ export const ROLE_LIMITS = Object.freeze({ main: 8192, attribution: 2048, learni
 export const WRITER_TOOLS = Object.freeze(['writer_read', 'writer_list', 'writer_search', 'writer_put', 'writer_probe', 'writer_finish']);
 export const TERMINAL_JOBS = Object.freeze(['committed', 'failed', 'unknown', 'invalid_output', 'stale', 'cancelled']);
 export const CONTEXT_REJECTED = 'CONTEXT_WINDOW_EXCEEDED';
+export const LEARNING_PROVIDER_ERROR = 'LEARNING_PROVIDER_ERROR';
+export const LEARNING_BACKLOG_SKIPPED = 'LEARNING_BACKLOG_SKIPPED';
+export function providerErrorLearning(job) {
+  return job?.role === 'learning' && job.status === 'failed' && job.error?.code === LEARNING_PROVIDER_ERROR && !job.trigger?.retriesProviderError;
+}
 // A failed learning job whose turn may be frozen again in a later native
 // session: either stopped locally before submission, or refused by the
 // provider for context size with no output. Paid, unknown and ordinary
@@ -16,7 +21,7 @@ export const CONTEXT_REJECTED = 'CONTEXT_WINDOW_EXCEEDED';
 export function deferredLearning(job) {
   if (job?.role !== 'learning' || job.status !== 'failed') return false;
   if (job.error?.code === 'LEARNING_PRESSURE') return !job.submittedAt && !job.invocationIds.length;
-  return job.error?.code === CONTEXT_REJECTED && job.providerRejected === true;
+  return job.error?.code === CONTEXT_REJECTED && job.providerRejected === true && !job.trigger?.retriesProviderError;
 }
 // Recovery after the host stopped mid-learning. With no request identity the
 // guard never released a provider request, so the turn may be learned again in
@@ -159,6 +164,15 @@ export class TreeJobs {
     text(nativeLogRef, 'native failure receipt', 4096); text(eventsHash, 'native failure hash', 128); text(code, 'provider error code', 256); text(message, 'provider error message', 4096);
     this.#command('recordProviderRejection', digest(['provider-rejected', id, eventsHash]), { jobId: id, nativeLogRef, eventsHash, code }, { [recordKey('tree_jobs', id)]: job.revision }, () => {
       this.#replace(job, { status: 'failed', leaseOwner: null, nativeLogRef, eventsHash, error: { code, message }, providerRejected: true }); return { jobId: id, status: 'failed' };
+    }); return this.get(id);
+  }
+  failProviderError(id, { nativeLogRef, eventsHash, code, message }) {
+    const job = this.get(id);
+    if (job.role !== 'learning' || !['submitted', 'unknown'].includes(job.status) || !job.invocationIds.length) fail('PROVIDER_ERROR_STATE', 'An ended learning request with guarded identities is required');
+    text(nativeLogRef, 'native failure receipt', 4096); text(eventsHash, 'native failure hash', 128); text(code, 'provider error code', 256); text(message, 'provider error message', 4096);
+    this.#command('recordLearningProviderError', digest(['provider-error', id, eventsHash]), { jobId: id, nativeLogRef, eventsHash, code }, { [recordKey('tree_jobs', id)]: job.revision }, () => {
+      this.#replace(job, { status: 'failed', leaseOwner: null, nativeLogRef, eventsHash, error: { code: LEARNING_PROVIDER_ERROR, message, nativeCode: code } });
+      return { jobId: id, status: 'failed' };
     }); return this.get(id);
   }
   // Start a fresh native session for the current epoch content. Used when the
