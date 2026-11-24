@@ -258,125 +258,333 @@
           "const": null
         },
         {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
-              "enum": [
-                "collaboration",
-                "technique"
-              ]
-            },
-            "situation": {
-              "type": "string",
-              "minLength": 0,
-              "pattern": "^[^\\u0000]*$",
-              "maxLength": 200
-            },
-            "action": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "maxLength": 200
-            },
-            "basis": {
-              "type": "string",
-              "minLength": 0,
-              "pattern": "^[^\\u0000]*$",
-              "maxLength": 200
-            },
-            "notApplicable": {
-              "type": "string",
-              "minLength": 0,
-              "pattern": "^[^\\u0000]*$",
-              "maxLength": 200
-            },
-            "expectedEffect": {
+          "anyOf": [
+            {
               "type": "object",
               "properties": {
-                "category": {
+                "kind": {
                   "type": "string",
                   "enum": [
-                    "not_understood",
-                    "misread",
-                    "restart",
-                    "repeated",
-                    "overdone",
-                    "omitted",
-                    "misreported",
-                    "redo",
-                    "proceeded",
-                    "approved",
-                    "adopted_proposal",
-                    "confirmed_inference"
+                    "collaboration",
+                    "technique"
                   ]
                 },
-                "change": {
-                  "type": "string",
-                  "enum": [
-                    "gone",
-                    "less",
-                    "more"
+                "short": {
+                  "anyOf": [
+                    {
+                      "const": null
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "situation": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 200
+                        },
+                        "action": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 200
+                        },
+                        "basis": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 200
+                        },
+                        "notApplicable": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 200
+                        }
+                      },
+                      "required": [
+                        "situation",
+                        "action",
+                        "basis",
+                        "notApplicable"
+                      ],
+                      "additionalProperties": false,
+                      "x-combined-length": {
+                        "fields": [
+                          "situation",
+                          "action",
+                          "basis",
+                          "notApplicable"
+                        ],
+                        "maximum": 200
+                      }
+                    }
                   ]
                 },
-                "text": {
+                "long": {
+                  "anyOf": [
+                    {
+                      "const": null
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 80
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 60
+                        },
+                        "whenToUse": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 2000
+                        },
+                        "steps": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 2000
+                        },
+                        "pitfalls": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 2000
+                        },
+                        "verify": {
+                          "type": "string",
+                          "minLength": 0,
+                          "pattern": "^[^\\u0000]*$",
+                          "maxLength": 2000
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "description",
+                        "whenToUse",
+                        "steps",
+                        "pitfalls",
+                        "verify"
+                      ],
+                      "additionalProperties": false,
+                      "x-combined-length": {
+                        "fields": [
+                          "whenToUse",
+                          "steps",
+                          "pitfalls",
+                          "verify"
+                        ],
+                        "maximum": 2000
+                      }
+                    }
+                  ]
+                },
+                "expectedEffect": {
+                  "type": "object",
+                  "properties": {
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "not_understood",
+                        "misread",
+                        "restart",
+                        "repeated",
+                        "overdone",
+                        "omitted",
+                        "misreported",
+                        "redo",
+                        "proceeded",
+                        "approved",
+                        "adopted_proposal",
+                        "confirmed_inference"
+                      ]
+                    },
+                    "change": {
+                      "type": "string",
+                      "enum": [
+                        "gone",
+                        "less",
+                        "more"
+                      ]
+                    },
+                    "text": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[^\\u0000]*$",
+                      "maxLength": 40
+                    }
+                  },
+                  "required": [
+                    "category",
+                    "change",
+                    "text"
+                  ],
+                  "additionalProperties": false
+                },
+                "sourceIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[^\\u0000]*$",
+                    "maxLength": 512,
+                    "x-reference": "source"
+                  },
+                  "minItems": 1,
+                  "maxItems": 20
+                },
+                "goalId": {
                   "type": "string",
                   "minLength": 1,
                   "pattern": "^[^\\u0000]*$",
-                  "maxLength": 40
+                  "maxLength": 512
+                },
+                "goalReason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 200
                 }
               },
               "required": [
-                "category",
-                "change",
-                "text"
+                "kind",
+                "short",
+                "long",
+                "expectedEffect",
+                "sourceIds"
               ],
               "additionalProperties": false
             },
-            "sourceIds": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "^[^\\u0000]*$",
-                "maxLength": 512,
-                "x-reference": "source"
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "collaboration",
+                    "technique"
+                  ]
+                },
+                "situation": {
+                  "type": "string",
+                  "minLength": 0,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 200
+                },
+                "action": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 200
+                },
+                "basis": {
+                  "type": "string",
+                  "minLength": 0,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 200
+                },
+                "notApplicable": {
+                  "type": "string",
+                  "minLength": 0,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 200
+                },
+                "expectedEffect": {
+                  "type": "object",
+                  "properties": {
+                    "category": {
+                      "type": "string",
+                      "enum": [
+                        "not_understood",
+                        "misread",
+                        "restart",
+                        "repeated",
+                        "overdone",
+                        "omitted",
+                        "misreported",
+                        "redo",
+                        "proceeded",
+                        "approved",
+                        "adopted_proposal",
+                        "confirmed_inference"
+                      ]
+                    },
+                    "change": {
+                      "type": "string",
+                      "enum": [
+                        "gone",
+                        "less",
+                        "more"
+                      ]
+                    },
+                    "text": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[^\\u0000]*$",
+                      "maxLength": 40
+                    }
+                  },
+                  "required": [
+                    "category",
+                    "change",
+                    "text"
+                  ],
+                  "additionalProperties": false
+                },
+                "sourceIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[^\\u0000]*$",
+                    "maxLength": 512,
+                    "x-reference": "source"
+                  },
+                  "minItems": 1,
+                  "maxItems": 20
+                },
+                "goalId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 512
+                },
+                "goalReason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]*$",
+                  "maxLength": 200
+                }
               },
-              "minItems": 1,
-              "maxItems": 20
-            },
-            "goalId": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "maxLength": 512
-            },
-            "goalReason": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "^[^\\u0000]*$",
-              "maxLength": 200
+              "required": [
+                "kind",
+                "situation",
+                "action",
+                "basis",
+                "notApplicable",
+                "expectedEffect",
+                "sourceIds"
+              ],
+              "additionalProperties": false,
+              "x-combined-length": {
+                "fields": [
+                  "situation",
+                  "action",
+                  "basis",
+                  "notApplicable"
+                ],
+                "maximum": 200
+              }
             }
-          },
-          "required": [
-            "kind",
-            "situation",
-            "action",
-            "basis",
-            "notApplicable",
-            "expectedEffect",
-            "sourceIds"
-          ],
-          "additionalProperties": false,
-          "x-combined-length": {
-            "fields": [
-              "situation",
-              "action",
-              "basis",
-              "notApplicable"
-            ],
-            "maximum": 200
-          }
+          ]
         }
       ]
     }
