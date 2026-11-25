@@ -1,4 +1,5 @@
 import { canonicalJson, digest, fail, oneOf } from './contracts.mjs';
+import { requireClusterReactions } from './cluster-evidence.mjs';
 
 const actor = { kind: 'program', id: 'tree-clusters' };
 export class ClusterService {
@@ -46,12 +47,11 @@ export class ClusterService {
   review({ clusterId, clusterVersion, verdict, commonality, evidence }, { job, requestId, methodIds = [], recurrence = null }) {
     const cluster = this.repo.get('tree_clusters', clusterId);
     if (!cluster || cluster.revision !== clusterVersion) fail('JOB_STALE', 'Cluster version changed');
-    this.assertCurrent(cluster); oneOf(verdict, ['common', 'none'], 'cluster verdict');
+    const episodes = this.assertCurrent(cluster); oneOf(verdict, ['common', 'none'], 'cluster verdict');
     if (verdict === 'none' && (methodIds.length || recurrence) || verdict === 'common' && !commonality.trim()) fail('CLUSTER_DIAGNOSIS', 'No common cause cannot create a method or recurrence claim');
     const evidenceSources = evidence.map(id => job.input.sources.find(s => s.id === id));
     if (evidenceSources.some(s => !s)) fail('OUTPUT_REFERENCE', 'Unknown cluster evidence');
-    const episodeRefs = this.assertCurrent(cluster).map(e => e.reactionRefs);
-    if (episodeRefs.filter(refs => refs.some(ref => evidenceSources.some(s => digest(s.ref) === digest(ref)))).length < 3) fail('CLUSTER_EVIDENCE', 'Diagnosis needs three distinct original episodes');
+    requireClusterReactions(episodes, evidenceSources.map(s => s.ref));
     if (recurrence && (!cluster.previousMethodIds.includes(recurrence.methodId) || !job.input.knownItems.some(i => i.id === recurrence.methodId && i.version === recurrence.methodVersion) || !recurrence.expectation)) fail('CLUSTER_RECURRENCE', 'Recurrence requires an explicit current method and expectation binding');
     return this.repo.command('reviewCluster', { requestId, expected: { ['tree_clusters:' + cluster.id]: clusterVersion }, input: { clusterId, verdict, commonality, evidence, methodIds, recurrence } }, { kind: 'model', id: job.id, role: 'verification' }, () => {
       this.repo.save('tree_clusters', { ...cluster, status: verdict === 'none' ? 'reviewed_none' : 'common', commonality, evidenceRefs: evidenceSources.map(s => s.ref), methodIds,

@@ -1,6 +1,8 @@
 import { CONTRACT, CATEGORIES, ROLES, canonicalJson, count, digest, fail, jsonClone, validateRef } from './contracts.mjs';
 import { HOOK_RULES } from './items.mjs';
 import { learningCorrections, quotedSource, validateObservations } from './observations.mjs';
+import { CLUSTER_EVIDENCE, requireClusterReactions } from './cluster-evidence.mjs';
+import { DomainError } from '../store.mjs';
 
 export const PROMPT_VERSION = 'arcfold.tree.prompts/3.1.4';
 const str = (max = 2000, min = 0) => ({ type: 'string', minLength: min, pattern: '^[^\\u0000]*$', ...(max === null ? {} : { maxLength: max }) });
@@ -294,7 +296,12 @@ export function validateOutput(role, output, envelope) {
           !value.operations.some(o => o.targetId === method.id && o.op !== 'support') &&
           !value.formatFixes.some(f => f.target === 'method' && f.id === method.id)) fail('REPAIR_REQUIRED', 'An own unprotected failed method requires an explicit repair operation');
     }
-    for (const c of value.clusters) if (!(envelope.allowedIds.clusters ?? []).some(i => i.id === c.clusterId && i.version === c.clusterVersion)) fail('OUTPUT_VERSION', 'Cluster revision changed');
+    for (const c of value.clusters) {
+      if (!(envelope.allowedIds.clusters ?? []).some(i => i.id === c.clusterId && i.version === c.clusterVersion)) fail('OUTPUT_VERSION', 'Cluster revision changed');
+      const cluster = envelope.clusters?.find(i => i.id === c.clusterId && i.revision === c.clusterVersion);
+      if (!Array.isArray(cluster?.episodes)) fail('INPUT_CONTRACT', 'Verification requires the frozen episodes of the exact cluster revision');
+      requireClusterReactions(cluster.episodes, c.evidence.map(id => source(id).ref));
+    }
     for (const p of value.probes) item(p.itemId, p.itemVersion);
     for (const f of value.formatFixes) {
       if (['understanding', 'method'].includes(f.target)) { if (item(f.id, f.version).userProtected) fail('OUTPUT_PROTECTED', 'Format fixes cannot bypass protected content'); }
@@ -502,6 +509,12 @@ export function parseFinalOutput(role, message, envelope) {
               }
             }
           }
+        }
+        if (role === 'verification') {
+          const { proposals, ...sections } = result;
+          const issue = rejectedItems.find(i => i.code === CLUSTER_EVIDENCE);
+          if (issue && !Object.values({ ...sections, ...proposals }).some(items => items.length))
+            throw Object.assign(new DomainError(issue.code, issue.message), { rejectedItems });
         }
         if (!rejectedItems.length) reject('$', error);
         return parsedResult(raw, result, rejectedItems, envelope);

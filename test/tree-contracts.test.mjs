@@ -1,9 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validateOutput, parseFinalOutput, compilePrompt, OUTPUT_SCHEMAS, resolveSourceIds, promptOutputSchema, outputBindings } from '../src/tree/prompts.mjs';
-import { full, minimal, envelope, understanding, method, short } from './fixtures/tree-model/contracts.mjs';
+import { full as fixtureFull, minimal, envelope as fixtureEnvelope, understanding, method, short } from './fixtures/tree-model/contracts.mjs';
 import { digest } from '../src/tree/contracts.mjs';
 import { readFileSync } from 'node:fs';
+
+const feedbackIds = ['s1', 'feedback-2', 'feedback-3'];
+const full = { ...fixtureFull, verification: { ...fixtureFull.verification,
+  clusters: [{ ...fixtureFull.verification.clusters[0], evidence: feedbackIds }] } };
+function envelope(role) {
+  const input = fixtureEnvelope(role);
+  if (role === 'verification') {
+    input.sources.push(...feedbackIds.slice(1).map((id, i) => ({
+      id, role: 'user', origin: 'user', text: '另一段合成反馈', ref: { sessionId: 'fixture', seq: i + 3, sha256: digest(id) },
+    })));
+    input.clusters = [{ id: 'c1', revision: 1, episodes: feedbackIds.map((id, i) => ({
+      id: 'episode-' + i, reactionRefs: [input.sources.find(s => s.id === id).ref],
+    })) }];
+  }
+  return input;
+}
 
 test('the shorter verification instruction expands to the exact unchanged validation contract', () => {
   const schema = promptOutputSchema('verification');
