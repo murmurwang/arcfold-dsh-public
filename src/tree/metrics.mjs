@@ -11,8 +11,23 @@ export function ratio(numerator, denominator) {
 }
 
 export class MetricsService {
-  constructor({ repository, experience, signals }) { Object.assign(this, { repo: repository, experience, signals }); this.resolveSource = signals.resolveSource; }
+  constructor({ repository, experience, signals, readScope }) { Object.assign(this, { repo: repository, experience, signals, readScope }); this.resolveSource = signals.resolveSource; }
   ordinal(kind, id, { first = false } = {}) {
+    if (this.readScope?.active) {
+      return this.readScope.memo(this, () => {
+        const rows = new Map();
+        for (const event of this.repo.list('tree_change_events')) for (const [i, key] of event.entityIds.entries()) {
+          if (event.entityIds.indexOf(key) !== i) continue;
+          const row = rows.get(key) ?? { first: null, last: null };
+          row.last = Math.max(row.last ?? event.ordinal, event.ordinal);
+          if (event.beforeVersions[i] === 0) row.first = Math.min(row.first ?? event.ordinal, event.ordinal);
+          rows.set(key, row);
+        }
+        return rows;
+      }, index => {
+        return index.get(kind + ':' + id)?.[first ? 'first' : 'last'] ?? 0;
+      });
+    }
     const values = this.repo.list('tree_change_events', e => e.entityIds.includes(kind + ':' + id) && (!first || e.beforeVersions[e.entityIds.indexOf(kind + ':' + id)] === 0)).map(e => e.ordinal);
     return values.length ? (first ? Math.min(...values) : Math.max(...values)) : 0;
   }
@@ -187,14 +202,15 @@ export class MetricsService {
 }
 
 export class ReflectionTriggers {
-  constructor({ repository, metrics, clusters, verification }) { Object.assign(this, { repo: repository, metrics, clusters, verification }); }
+  constructor({ repository, metrics, clusters, verification, readScope }) { Object.assign(this, { repo: repository, metrics, clusters, verification, readScope }); }
   once(key, input, enqueue) {
     const old = this.repo.meta().reflectionTriggers?.[key]; if (old) return this.repo.get('tree_jobs', old.jobId);
     return this.repo.transaction(() => {
       const job = enqueue(); this.repo.command('recordReflectionTrigger', { requestId: key, expected: {}, input }, program, () => { const meta = this.repo.meta(); this.repo.save('tree_meta', { ...meta, reflectionTriggers: { ...meta.reflectionTriggers, [key]: { ...input, jobId: job.id } } }, meta.revision); return { jobId: job.id }; }); return job;
     });
   }
-  scan(nodeId, { summaryId = null, previousWindow = null, currentWindow = null, parentJobId = null } = {}) {
+  scan(nodeId, options = {}) { return this.readScope ? this.readScope.run(() => this.scanCurrent(nodeId, options)) : this.scanCurrent(nodeId, options); }
+  scanCurrent(nodeId, { summaryId = null, previousWindow = null, currentWindow = null, parentJobId = null } = {}) {
     const jobs = [];
     for (const category of CATEGORIES.filter(c => c !== 'proceeded')) { const cluster = this.clusters.candidate(category, signalPolarity(category)); if (cluster) jobs.push(this.once(digest(['reflect-cluster', cluster.id, cluster.revision]), { kind: 'cluster', clusterId: cluster.id }, () => this.verification.enqueue(cluster.nodeId, { reason: 'cluster', clusterIds: [cluster.id], parentJobId }))); }
     if (summaryId) jobs.push(this.once(digest(['reflect-summary', summaryId]), { kind: 'routine', summaryId }, () => this.verification.enqueue(nodeId, { reason: 'window', summaryId, parentJobId })));

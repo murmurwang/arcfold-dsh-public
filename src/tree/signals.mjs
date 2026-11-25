@@ -29,7 +29,7 @@ export function effectiveSignals(repo, resolveSource = () => true) {
 
 /** One human message is one episode even when several nodes learn from it. */
 export class EpisodeSignals {
-  constructor({ repository, resolveSource, experience }) { Object.assign(this, { repo: repository, resolveSource, experience }); }
+  constructor({ repository, resolveSource, experience, readScope }) { Object.assign(this, { repo: repository, resolveSource, experience, readScope }); }
   recordCategories(categories, { job, requestId }) {
     const actor = { kind: 'model', id: job.id, role: job.role }, nodeIds = job.nodeIds;
     const signalService = new SignalService({ repository: this.repo, resolveSource: this.resolveSource, context: () => ({ actor, nodeIds }) });
@@ -54,7 +54,8 @@ export class EpisodeSignals {
       return { ...signal, episodeId };
     }));
   }
-  episodes() {
+  episodes() { return this.readScope ? this.readScope.memo(this, () => this.readEpisodes()) : this.readEpisodes(); }
+  readEpisodes() {
     const signals = effectiveSignals(this.repo, this.resolveSource);
     return this.repo.list('tree_episodes').map(e => {
       const turn = e.turnId && this.repo.get('tree_turns', e.turnId);

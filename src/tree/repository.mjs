@@ -61,7 +61,7 @@ function durableJson(filename, data) {
 const recordsHash = db => digest(db.prepare('SELECT kind,id,revision,body FROM records ORDER BY kind,id').all().map(r => ({ ...r })));
 
 export class TreeRepository {
-  #db; #depth = 0; #changes = new Map(); #closed = false; #nodeIndexes = new Map(); #lightCaches = new Map();
+  #db; #depth = 0; #changes = new Map(); #closed = false; #nodeIndexes = new Map(); #lightCaches = new Map(); #writeVersion = 0;
   constructor({ treeFilename, userId, legacyFilename, now = () => new Date().toISOString() }) {
     text(userId, 'userId', 512); text(treeFilename, 'treeFilename', 4096);
     if (treeFilename !== ':memory:' && !treeFilename.startsWith('/')) fail('DATABASE_PATH', 'Explicit absolute treeFilename required');
@@ -145,9 +145,10 @@ export class TreeRepository {
       const result = fn();
       if (result?.then) { Promise.resolve(result).catch(() => {}); fail('ASYNC_TRANSACTION', 'No model, file-copy or network operation inside transactions'); }
       this.#db.exec(nested ? `RELEASE ${name}` : 'COMMIT'); return result;
-    } catch (e) { this.#db.exec(nested ? `ROLLBACK TO ${name}; RELEASE ${name}` : 'ROLLBACK'); this.#changes = changes; this.#nodeIndexes.clear(); this.#lightCaches.clear(); throw e; }
+    } catch (e) { this.#db.exec(nested ? `ROLLBACK TO ${name}; RELEASE ${name}` : 'ROLLBACK'); this.#changes = changes; this.#nodeIndexes.clear(); this.#lightCaches.clear(); this.#writeVersion++; throw e; }
     finally { this.#depth--; }
   }
+  readVersion() { return `${this.#writeVersion}:${this.#db.prepare('PRAGMA data_version').get().data_version}`; }
   get(kind, id) { const row = this.#db.prepare('SELECT body FROM records WHERE kind=? AND id=?').get(kind, id); return row ? JSON.parse(row.body) : null; }
   // A filtered list runs the predicate over a cached, frozen light copy of each
   // record (large fields left out, see LIGHT_OMIT) and parses full bodies only
@@ -235,6 +236,7 @@ export class TreeRepository {
     const body = canonicalJson(saved);
     this.#db.prepare('INSERT INTO records VALUES (?,?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at,body=excluded.body')
       .run(kind, saved.id, saved.revision, saved.createdAt, saved.updatedAt, body);
+    this.#writeVersion++;
     const cache = this.#lightCaches.get(kind);
     if (cache) {
       const omit = LIGHT_OMIT[kind] ?? [], parsed = JSON.parse(body);

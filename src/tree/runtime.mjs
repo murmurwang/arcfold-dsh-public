@@ -33,6 +33,7 @@ import { mountTreeTools, nativeTreeCall } from './tools.mjs';
 import { TreeTokenCounter } from './token-counter.mjs';
 import { bindNativeTurnSelection, captureNativeSelection, nativeModel, nativeModelConfig, NativeInputEstimate } from './native-models.mjs';
 import { NativeModelRecords } from './native-model-records.mjs';
+import { ReadScope } from './read-scope.mjs';
 import { StartupTiming, untimed } from '../startup-timing.mjs';
 
 const program = { kind: 'program', id: 'tree-runtime' };
@@ -102,6 +103,9 @@ export class TreeRuntime {
     this.nativeModels = nativeModels;
     this.sources = new NativeSources({ readSession: id => ({ sessionId: id, durable: this.logs.has(id), events: this.logs.get(id) }) });
     this.resolveSource = evidenceResolver(repository, ref => this.sources.resolve(ref));
+    // Host-frozen logs are replaced on refresh. Array identity also catches a
+    // rewritten middle event; length/last cover synthetic append-only hosts.
+    this.readScope = new ReadScope(repository, () => [...this.logs].flatMap(([id, events]) => [id, events, events.length, events.at(-1)]));
     const options = { repository, resolveSource: this.resolveSource, sources: this.sources, context: () => ({ actor: program }) };
     this.experience = new ExperienceService(options); this.builder = new RuntimeContextBuilder(options);
     this.jobs = jobs ?? new TreeJobs({ repository, assertSources: rows => rows.every(s => Boolean(this.resolveSource(s.ref))) });
@@ -141,7 +145,7 @@ export class TreeRuntime {
     this.backgroundModelConfig.source = sourceForBackground;
     this.writers = new WriterRouter({ repository, jobs: this.jobs, modelConfig: this.backgroundModelConfig, artifacts, createWriterOptions, defineTool });
     this.owner.mountWriterTools = (ctx, job) => this.writers.mount(ctx, job);
-    this.signals = new EpisodeSignals({ repository, resolveSource: this.resolveSource, experience: this.experience });
+    this.signals = new EpisodeSignals({ repository, resolveSource: this.resolveSource, experience: this.experience, readScope: this.readScope });
     this.clusters = new ClusterService({ repository, signals: this.signals });
     const common = { repository, jobs: this.jobs, modelConfig: this.backgroundModelConfig, experience: this.experience, contextBuilder: this.builder, writerRouter: this.writers };
     this.learning = new LearningService({ ...common, consolidation: this.consolidation, signals: this.signals, annotations });
@@ -149,8 +153,8 @@ export class TreeRuntime {
     this.reflection = new ConsolidationReflection({ repository, consolidation: this.consolidation, resolveSource: this.resolveSource, writerRouter: this.writers });
     this.reports = new LocalReports({ repository, resolveSource: this.resolveSource });
     this.improvement = new ImprovementService({ ...common, reports: this.reports });
-    this.metrics = new MetricsService({ repository, experience: this.experience, signals: this.signals });
-    this.triggers = new ReflectionTriggers({ repository, metrics: this.metrics, clusters: this.clusters, verification: this.verification });
+    this.metrics = new MetricsService({ repository, experience: this.experience, signals: this.signals, readScope: this.readScope });
+    this.triggers = new ReflectionTriggers({ repository, metrics: this.metrics, clusters: this.clusters, verification: this.verification, readScope: this.readScope });
     this.attribution = new AttributionService({ repository, sources: this.sources, contextBuilder: this.builder, jobs: this.jobs, modelOwner: this.owner,
       modelConfig: (agent, selection) => this.backgroundModelConfig('attribution', { agent, selection }), cancelJob: id => this.owner.handles.get(id)?.agent.cancel({ kind: 'user', message: 'Attribution cancelled' }, { keepInbox: false }) });
     this.ui = new TreeUIService({ repository, resolveSource: this.resolveSource, metrics: this.metrics, reports: this.reports,
@@ -214,7 +218,7 @@ export class TreeRuntime {
     });
     timing.step('recover-learning-pressure', () => { for (const job of this.repo.list('tree_jobs', j => j.role === 'learning' && j.status === 'failed')) this.handlePressure(job); });
     const replayStarted = performance.now();
-    timing.step('recover-replay-committed', () => { for (const job of this.repo.list('tree_jobs', j => j.role && j.status === 'committed')) this.afterCommit(job); });
+    timing.step('recover-replay-committed', () => this.withReadScope(() => { for (const job of this.repo.list('tree_jobs', j => j.role && j.status === 'committed')) this.afterCommit(job); }));
     this.diagnostic('recovery_timing', { code: 'RECOVERY_TIMING', message: 'Committed job recovery completed' }, { durationMs: Math.round(performance.now() - replayStarted) });
     timing.step('recover-kick', () => this.kick()); return recovered;
   }
@@ -676,7 +680,9 @@ export class TreeRuntime {
       }
     }
   }
-  async scanOne() {
+  withReadScope(read) { return this.readScope ? this.readScope.run(read) : read(); }
+  async scanOne() { return this.withReadScope(() => this.scanCurrent()); }
+  scanCurrent() {
     if (this.closed) return false;
     for (const job of this.repo.list('tree_jobs', j => j.role === 'consolidation' && j.status === 'committed' && j.input.summaryPlan?.reason === 'threshold')) {
       const session = this.repo.list('tree_learning_sessions', s => s.nodeId === job.nodeIds[0])[0];
