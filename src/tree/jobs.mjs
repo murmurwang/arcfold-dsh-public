@@ -4,10 +4,15 @@ import { compilePrompt, parseFinalOutput, outputBindings } from './prompts.mjs';
 import { recordKey } from './repository.mjs';
 import { modelView } from './model-view.mjs';
 import { MOVE_INVALIDATIONS } from './tree.mjs';
+import { CLUSTER_EVIDENCE } from './cluster-evidence.mjs';
 
 export const ROLE_LIMITS = Object.freeze({ main: 8192, attribution: 2048, learning: 8192, consolidation: 8192, verification: 8192, improvement: 8192, script_writer: 8192 });
 export const WRITER_TOOLS = Object.freeze(['writer_read', 'writer_list', 'writer_search', 'writer_put', 'writer_probe', 'writer_finish']);
 export const TERMINAL_JOBS = Object.freeze(['committed', 'failed', 'unknown', 'invalid_output', 'stale', 'cancelled']);
+export function needsClusterEvidenceRecheck(job) {
+  return job.role === 'verification' && job.status === 'validated' && job.error?.code === CLUSTER_EVIDENCE &&
+    !job.clusterEvidenceRecheck && !!(job.nativeLogRef && job.eventsHash && job.rawMessage && job.resultHash === digest(job.rawMessage));
+}
 export const CONTEXT_REJECTED = 'CONTEXT_WINDOW_EXCEEDED';
 export const LEARNING_PROVIDER_ERROR = 'LEARNING_PROVIDER_ERROR';
 export const LEARNING_BACKLOG_SKIPPED = 'LEARNING_BACKLOG_SKIPPED';
@@ -239,13 +244,33 @@ export class TreeJobs {
     return this.transition(id, 'result_received', { rawMessage: jsonClone(message), resultHash, nativeLogRef, eventsHash, resultReceivedAt: this.repo.now() });
   }
   validate(id) {
-    const job = this.get(id); if (['validated', 'committed', 'invalid_output', 'stale'].includes(job.status)) return job;
-    if (job.status !== 'result_received') fail('RESULT_REQUIRED', 'Durable received output required');
+    const job = this.get(id), recheck = needsClusterEvidenceRecheck(job);
+    if (!recheck && ['validated', 'committed', 'invalid_output', 'stale'].includes(job.status)) return job;
+    if (!recheck && job.status !== 'result_received') fail('RESULT_REQUIRED', 'Durable received output required');
+    let status, details;
     try {
       this.assertCurrent(job);
       const parsed = job.role === 'main' ? { result: { message: job.rawMessage }, rawHash: digest(job.rawMessage) } : parseFinalOutput(job.role, job.rawMessage, job.input);
-      return this.transition(id, 'validated', { validatedResult: parsed.result, outputEnvelope: { schemaVersion: CONTRACT, jobId: id, inputHash: job.inputHash, result: parsed.result }, rawHash: parsed.rawHash, rejectedItems: parsed.rejectedItems ?? [] });
-    } catch (e) { return this.transition(id, e.code === 'JOB_STALE' ? 'stale' : 'invalid_output', { error: { code: e.code ?? 'OUTPUT_JSON', message: e.message, validationErrors: e.validationErrors ?? e.errors ?? [] }, rawHash: e.rawHash ?? digest(job.rawMessage) }); }
+      status = 'validated';
+      details = { validatedResult: parsed.result, outputEnvelope: { schemaVersion: CONTRACT, jobId: id, inputHash: job.inputHash, result: parsed.result }, rawHash: parsed.rawHash, rejectedItems: parsed.rejectedItems ?? [] };
+    } catch (e) {
+      if (recheck && !['JOB_STALE', CLUSTER_EVIDENCE].includes(e.code)) throw e;
+      status = e.code === 'JOB_STALE' ? 'stale' : 'invalid_output';
+      details = { error: { code: e.code ?? 'OUTPUT_JSON', message: e.message, validationErrors: e.validationErrors ?? e.errors ?? [] }, rawHash: e.rawHash ?? digest(job.rawMessage),
+        ...(e.rejectedItems ? { rejectedItems: e.rejectedItems } : {}) };
+    }
+    if (!recheck) return this.transition(id, status, details);
+    // The old validation and apply error are durable. Recheck without
+    // reopening an invocation or permitting a generic validated -> invalid transition.
+    this.#command('recheckClusterEvidence', digest(['cluster-evidence-recheck', id]), { jobId: id, status }, { [recordKey('tree_jobs', id)]: job.revision }, () => {
+      this.#replace(job, {
+        clusterEvidenceRecheck: { previousError: job.error, previousRejectedItems: job.rejectedItems ?? [] },
+        error: null, ...details, status,
+        ...(status === 'invalid_output' ? { validatedResult: null, outputEnvelope: null } : {}),
+        ...(TERMINAL_JOBS.includes(status) ? { leaseOwner: null } : {}),
+      }); return { jobId: id, status };
+    });
+    return this.get(id);
   }
   commit(id, applyResult = () => ({})) {
     const job = this.get(id); if (job.status === 'committed') return job;

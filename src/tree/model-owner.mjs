@@ -1,5 +1,5 @@
 import { canonicalJson, digest, fail } from './contracts.mjs';
-import { WRITER_TOOLS, TERMINAL_JOBS, CONTEXT_REJECTED, RESULT_LOST, LEARNING_INTERRUPTED, LEARNING_PROVIDER_ERROR } from './jobs.mjs';
+import { WRITER_TOOLS, TERMINAL_JOBS, CONTEXT_REJECTED, RESULT_LOST, LEARNING_INTERRUPTED, LEARNING_PROVIDER_ERROR, needsClusterEvidenceRecheck } from './jobs.mjs';
 import { directoryContext, contextMatches } from '../learning-runner.mjs';
 import { compilePrompt } from './prompts.mjs';
 import { modelView } from './model-view.mjs';
@@ -190,7 +190,12 @@ export class TreeModelOwner {
     return { final, start, end, own, events };
   }
   consume(id, events) {
-    const job = this.jobs.get(id), result = events && this.#resultsFromEvents(job, events);
+    const job = this.jobs.get(id);
+    if (needsClusterEvidenceRecheck(job)) {
+      if (this.host.sessions.get(job.nativeSessionId)) fail('LIVE_SESSION', 'Cannot recover another live native owner');
+      return this.#finishReceived(id);
+    }
+    const result = events && this.#resultsFromEvents(job, events);
     if (!result && events && job.role !== 'main' && !job.invocationIds.length) {
       const own = events.filter(e => e.type === 'user/message' && e.data.source?.jobId === job.id);
       const start = own.length === 1 && events.findLast(e => e.type === 'turn/start' && e.seq < own[0].seq);
@@ -217,7 +222,11 @@ export class TreeModelOwner {
     // parse a coincidentally closed prefix or automatically request more tokens.
     if (job.role !== 'main' && result.end.data.reason?.kind === 'max-tokens')
       return this.jobs.transition(id, 'invalid_output', { error: { code: 'OUTPUT_LIMIT', message: 'Provider reached the output limit before completing the final result' }, rawHash: digest(result.final) });
-    const validated = this.jobs.validate(id); return validated.status === 'validated' ? this.jobs.commit(id, this.applyResult) : validated;
+    return this.#finishReceived(id);
+  }
+  #finishReceived(id) {
+    const validated = this.jobs.validate(id);
+    return validated.status === 'validated' ? this.jobs.commit(id, this.applyResult) : validated;
   }
   // A known failure: the native turn carrying this job ended with a provider
   // error, produced no assistant output, and every
@@ -248,6 +257,7 @@ export class TreeModelOwner {
       if (this.closed) fail('OWNER_CLOSED', 'Owner is closed'); let job = this.jobs.get(id);
       if (job.role === 'main') fail('MAIN_HOST_OWNED', 'Main stays in its existing native user Agent; use attachMain and consume');
       if (job.status === 'committed' || ['invalid_output', 'stale', 'cancelled', 'failed'].includes(job.status)) return job;
+      if (needsClusterEvidenceRecheck(job)) return this.host.sessions.get(job.nativeSessionId) ? job : this.consume(id);
       if (job.status === 'queued') job = this.jobs.prepare(id);
       if (job.status === 'prepared' && !job.nativeMessage) job = this.jobs.bindMessage(id, this.createUserMessage({ source: { kind: 'arcfold/tree-job', jobId: job.id, role: job.role, inputHash: job.inputHash, origin: 'program' }, content: [{ type: 'text', text: canonicalJson(modelView(job.input)) }] }));
       const existing = await this.readEvents(job.nativeSessionId);
@@ -301,7 +311,10 @@ export class TreeModelOwner {
     const results = [];
     for (const job of this.jobs.repo.list('tree_jobs', j => ['submitted', 'unknown', 'result_received', 'validated'].includes(j.status) && j.role)) {
       let events;
-      try { events = await this.readEvents(job.nativeSessionId); results.push(this.consume(job.id, events)); }
+      try {
+        if (!needsClusterEvidenceRecheck(job)) events = await this.readEvents(job.nativeSessionId);
+        results.push(this.consume(job.id, events));
+      }
       catch (e) {
         const current = this.jobs.get(job.id);
         if (current.status === 'submitted' && e.code !== 'LIVE_SESSION') this.jobs.transition(job.id, 'unknown', { error: { code: e.code ?? 'HOST_ERROR', message: e.message } });
