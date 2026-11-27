@@ -216,10 +216,10 @@ test('a completed goal still keeps its retrospect one level up', async t => {
 // 053 (F46): a goal the conversation moves away from is consolidated when it is
 // left, not only after a day of silence; the same turns are not done twice.
 // Each turn's own learning is run to the end, as the runtime does after a turn.
-const learnedTurn = async (f, node, text) => { const turn = await f.turn(node, text); f.complete(f.learning.enqueue(turn.id, node), emptyLearning()); return turn; };
+const learnedTurn = async (f, node, text, session) => { const turn = await f.turn(node, text, session); f.complete(f.learning.enqueue(turn.id, node), emptyLearning()); return turn; };
 
 test('leaving a goal plans one consolidation for it once its learning has settled', async t => {
-  const f = learningFixture(t), a = f.create('我写推荐信'), b = f.create('我改简历'), empty = { understandings: [], methods: [] };
+  const f = learningFixture(t), a = f.seedGoal('我写推荐信'), b = f.seedGoal('我改简历'), empty = { understandings: [], methods: [] };
   await learnedTurn(f, a, '先写推荐信'); const last = await f.turn(a, '继续写推荐信');
   assert.deepEqual(f.consolidation.departed(), [], 'still on the same goal');
   await learnedTurn(f, b, '换个事，先改简历');
@@ -238,8 +238,48 @@ test('leaving a goal plans one consolidation for it once its learning has settle
   assert.deepEqual(f.consolidation.departed().map(p => p.nodeId), [a], 'a goal left again after new turns is planned again');
 });
 
+test('a cross-session departure waits for settlement and all open turns and learning on the old goal', async t => {
+  const f = learningFixture(t), a = f.seedGoal('合成目标甲'), b = f.seedGoal('合成目标乙');
+  // Make the order independent of timestamp precision and sort the session
+  // names in the opposite order. Native turn numbers restart in each session.
+  f.repo.now = () => '2026-11-20T10:00:00.000Z';
+  const start = async (node, session, number) => {
+    f.owner.targetNodeId = node;
+    const input = f.begin(session, number, '合成对话');
+    return { id: (await f.attributed(input)).id, input };
+  };
+  const settle = ({ id, input }, node, complete = true) => {
+    f.finish(input); f.settle(id);
+    if (complete) f.complete(f.learning.enqueue(id, node), emptyLearning());
+  };
+  const a1 = await start(a, 'z-first', 1); settle(a1, a);
+  const a2 = await start(a, 'z-first', 2); settle(a2, a);
+  const a3 = await start(a, 'z-first', 3);
+  const b1 = await start(b, 'a-second', 1);
+  assert.deepEqual(f.consolidation.departed(), [], 'an open turn on B is not a departure');
+  settle(b1, b);
+  assert.deepEqual(f.consolidation.departed(), [], 'an older open turn on A still blocks its summary');
+  settle(a3, a, false);
+  assert.deepEqual(f.consolidation.departed(), [], 'A still has queued learning');
+  f.complete(f.learning.enqueue(a3.id, a), emptyLearning());
+  const plans = f.consolidation.departed();
+  assert.deepEqual(plans.map(p => [p.nodeId, p.reason, new Set(p.throughTurnIds)]), [[a, 'node_leave', new Set([a1.id, a2.id, a3.id])]]);
+  assert.equal(run(f, enqueueLikeRuntime(f, plans[0]), { summary, broaden: [], retrospect: { understandings: [], methods: [] } }).status, 'committed');
+  settle(await start(b, 'a-second', 2), b);
+  assert.deepEqual(f.consolidation.departed(), [], 'another B turn does not summarize the same A turns again');
+});
+
+test('an older turn in another session never becomes a departure just because its reply settles last', async t => {
+  const f = learningFixture(t), a = f.seedGoal('合成新目标'), b = f.seedGoal('合成旧目标');
+  const older = f.begin('old-session', 99, '先发出的一轮'); f.owner.targetNodeId = b;
+  const oldTurn = await f.attributed(older);
+  await learnedTurn(f, a, '后发出的一轮', 'new-session');
+  f.finish(older); f.settle(oldTurn.id); f.complete(f.learning.enqueue(oldTurn.id, b), emptyLearning());
+  assert.deepEqual(f.consolidation.departed().map(p => p.nodeId), [b]);
+});
+
 test('a goal main renamed hides its old one line until its summary is refreshed', async t => {
-  const f = learningFixture(t), a = f.create('打磨第一篇的核心问题'), empty = { understandings: [], methods: [] };
+  const f = learningFixture(t), a = f.seedGoal('打磨第一篇的核心问题'), empty = { understandings: [], methods: [] };
   await learnedTurn(f, a, '先打磨核心问题');
   assert.equal(run(f, enqueueLikeRuntime(f, f.consolidation.plan(a, 'leave_timeout')), { summary, broaden: [], retrospect: empty }).status, 'committed');
   assert.equal(f.builder.glance(f.repo.get('tree_nodes', a)).oneLine, '合成概况');
@@ -256,7 +296,7 @@ test('a goal main renamed hides its old one line until its summary is refreshed'
 });
 
 test('a goal that was left may be marked as possibly put down; the mark never changes its status and goes away when the goal is resumed', async t => {
-  const f = learningFixture(t), a = f.create('把申请路线图拆成每日待办'), b = f.create('盘点申请论述的依据'), empty = { understandings: [], methods: [] };
+  const f = learningFixture(t), a = f.seedGoal('把申请路线图拆成每日待办'), b = f.seedGoal('盘点申请论述的依据'), empty = { understandings: [], methods: [] };
   await learnedTurn(f, a, '每天按这个节奏推进'); await learnedTurn(f, b, '先盘点依据');
   const job = enqueueLikeRuntime(f, f.consolidation.departed()[0]);
   const setDown = { reason: '对话已转去盘点依据，每日待办没有约定的下一步', sourceIds: [userSource(job)] };

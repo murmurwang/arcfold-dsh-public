@@ -579,8 +579,18 @@ export class TreeRuntime {
     });
   }
   enqueueSummary(plan) {
-    const frozen = this.consolidation.freeze(plan), key = digest([plan.nodeId, plan.sourceWatermark, plan.reason]);
+    const key = digest([plan.nodeId, plan.sourceWatermark, plan.reason]);
     const old = this.repo.get('tree_jobs', digest(['model_job', 'consolidation', key])); if (old) return old;
+    // A cross-session departure can be discovered in the same scan as the
+    // idle timeout (or while its summary is already running). Both consolidate
+    // the same batch. Preserve the fallback if the other attempt ended badly.
+    const alternate = { node_leave: 'leave_timeout', leave_timeout: 'node_leave' }[plan.reason];
+    if (alternate) {
+      const alternateKey = digest([plan.nodeId, plan.sourceWatermark, alternate]);
+      const existing = this.repo.get('tree_jobs', digest(['model_job', 'consolidation', alternateKey]));
+      if (existing && !['failed', 'invalid_output', 'stale', 'cancelled'].includes(existing.status)) return existing;
+    }
+    const frozen = this.consolidation.freeze(plan);
     return this.jobs.enqueue({ role: 'consolidation', key, nodeIds: [plan.nodeId], input: frozen.input, revisionSet: frozen.revisions, config: this.backgroundModelConfig('consolidation', { turnId: plan.throughTurnIds.at(-1), nodeIds: [plan.nodeId] }), trigger: { kind: plan.reason === 'node_leave' ? 'leave_timeout' : plan.reason, modelSourceTurnId: plan.throughTurnIds.at(-1) } });
   }
   afterCommit(job) {

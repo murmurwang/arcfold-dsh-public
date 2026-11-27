@@ -121,7 +121,7 @@ export class ConsolidationService {
     if (limit <= 0) fail('CONTEXT_CAPACITY', 'Model leaves no safe learning capacity');
     return { tokens: reading.tokens, limit, needsSummary: reading.tokens > limit, tokenizerIdentity: reading.tokenizerIdentity, inputHash: reading.inputHash };
   }
-  // A goal the conversation has moved away from is consolidated as soon as its
+  // A goal the user has moved away from, even across sessions, is consolidated once its
   // own learning has settled, instead of waiting for the idle timeout; a goal
   // renamed by main is consolidated again so its one line matches the name.
   // plan() returns nothing when the latest summary already covers the same
@@ -131,19 +131,41 @@ export class ConsolidationService {
   departed(onError = () => {}) {
     // Runs on every worker scan, so turns, links and learning are indexed once
     // per scan instead of being listed again for every goal.
-    const turns = this.repo.list('tree_turns'), byId = new Map(turns.map(t => [t.id, t])), own = new Map(), learning = new Set();
-    for (const link of this.repo.list('tree_links', l => l.active)) { const t = byId.get(link.turnId); if (t?.status === 'settled') own.set(link.nodeId, [...(own.get(link.nodeId) ?? []), t]); }
+    const turns = this.repo.list('tree_turns'), settled = turns.filter(t => t.status === 'settled');
+    const byId = new Map(settled.map(t => [t.id, t])), lastOwn = new Map(), open = new Set(), learning = new Set();
+    for (const t of turns) if (t.status === 'open') for (const id of t.nodeIds) open.add(id);
+    // Native turn numbers only order turns within a session. If admissions
+    // across sessions share a timestamp, use the durable attribution order,
+    // not the session id or which of two concurrent replies settled first.
+    let ordinals;
+    const ordinal = id => {
+      if (!ordinals) {
+        ordinals = new Map();
+        for (const event of this.repo.list('tree_change_events', e => e.commandType === 'applyAttribution')) {
+          for (const entity of event.entityIds) if (entity.startsWith('tree_turns:')) ordinals.set(entity.slice('tree_turns:'.length), event.ordinal);
+        }
+      }
+      return ordinals.get(id);
+    };
+    const order = (a, b) => {
+      if (a.sessionId === b.sessionId) return a.nativeTurn - b.nativeTurn;
+      const start = a.startedAt.localeCompare(b.startedAt);
+      if (start) return start;
+      const first = ordinal(a.id), second = ordinal(b.id);
+      return first === undefined || second === undefined ? 0 : first - second;
+    };
+    for (const link of this.repo.list('tree_links', l => l.active)) {
+      const turn = byId.get(link.turnId), last = lastOwn.get(link.nodeId);
+      if (turn && (!last || order(turn, last) > 0)) lastOwn.set(link.nodeId, turn);
+    }
     for (const job of this.repo.list('tree_jobs', j => (j.role === 'learning' || !j.role && j.kind === 'learning') && !TERMINAL_JOBS.includes(j.status))) for (const id of job.nodeIds ?? []) learning.add(id);
-    const order = (a, b) => a.startedAt.localeCompare(b.startedAt) || a.sessionId.localeCompare(b.sessionId) || a.nativeTurn - b.nativeTurn || a.id.localeCompare(b.id);
     const result = [];
     for (const node of this.repo.list('tree_nodes', n => !n.deleted && n.status === 'active' && n.lastOwnTurnAt)) {
-      const settled = own.get(node.id); if (!settled?.length) continue;
-      const last = settled.sort(order).at(-1);
-      const left = turns.some(t => t.sessionId === last.sessionId && t.nativeTurn > last.nativeTurn && t.status === 'settled' && !t.nodeIds.includes(node.id));
-      if (!left && !node.summaryNameStale) continue;
+      const last = lastOwn.get(node.id);
       // Wait for this goal's running turn and learning: a summary frozen while
       // learning commits would go stale, and the same turns are not planned twice.
-      if (learning.has(node.id) || turns.some(t => t.status === 'open' && t.nodeIds.includes(node.id) && t.startedAt > last.startedAt)) continue;
+      if (!last || open.has(node.id) || learning.has(node.id)) continue;
+      if (!node.summaryNameStale && !settled.some(t => !t.nodeIds.includes(node.id) && order(t, last) > 0)) continue;
       try { const plan = this.plan(node.id, 'node_leave'); if (plan) result.push(plan); }
       // Learning of the last turns may still be committing: this goal waits.
       // Anything else (a missing source) is reported; the others are planned.
