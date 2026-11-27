@@ -59,11 +59,17 @@ export class AttributionService {
     if (old) fail('JOB_STALE', 'This turn was already assigned, corrected or routed by a deadline fallback');
     if (this.selection(sessionId).revision !== (input.currentTurn.selectionRevision ?? 0)) fail('JOB_STALE', '用户已改变本聊天的目标范围，本次旧判断不再采用');
     if (input.currentTurn.selectedBranchId && input.currentTurn.selectedBranchId !== this.repo.rootId() && result.actions.some(a => a.action === 'create')) fail('ATTRIBUTION_RANGE', '选定分支时只能在候选父目标下创建子目标，不能在范围外新建');
+    // Moving the branch start or adding a goal above it would leave the branch.
+    if (input.currentTurn.selectedBranchId && input.currentTurn.selectedBranchId !== this.repo.rootId() && result.actions.some(a => ['move', 'add_parent'].includes(a.action) && a.nodeId === input.currentTurn.selectedBranchId)) fail('ATTRIBUTION_RANGE', '选定分支时不能挪动分支起点，也不能在它上面加一层');
     return this.repo.transaction(() => {
       if (this.existing(sessionId, nativeTurn) || this.selection(sessionId).revision !== (input.currentTurn.selectionRevision ?? 0)) fail('JOB_STALE', 'Turn or selected branch changed while the model ran');
       const current = this.candidates(this.repo.now(), sessionId);
       const meaning = candidates => candidates.map(({ revision: _revision, ...candidate }) => candidate);
       if (canonicalJson(meaning(current)) !== canonicalJson(meaning(input.candidates))) fail('JOB_STALE', 'Attribution candidate information changed while the model ran');
+      const revisions = new Map(current.map(node => [node.id, node.revision]));
+      const frozenRevisions = new Map(input.candidates.map(node => [node.id, node.revision]));
+      const structuralTargets = result.actions.flatMap(action => action.action === 'move' ? [action.nodeId, action.parentId] : ['rename', 'add_parent'].includes(action.action) ? [action.nodeId] : []);
+      if (structuralTargets.some(nodeId => revisions.get(nodeId) !== frozenRevisions.get(nodeId))) fail('JOB_STALE', 'A goal selected for a structural change changed while the model ran');
       const expected = { ...job.inputRevisionSet, ...Object.fromEntries(current.map(n => [`tree_nodes:${n.id}`, n.revision])) };
       const resolve = id => { const source = input.sources.find(s => s.id === id); if (!source || !this.sources.resolve(source.ref)) fail('JOB_STALE', 'Attribution source changed'); return source.ref; };
       const refs = userSourceIds.map(resolve), tree = new TreeService({ repository: this.repo, resolveSource: ref => this.sources.resolve(ref), context: () => ({ actor: { kind: 'model', id: job.id, role: 'attribution' }, nodeIds: input.scope.nodeIds, candidateNodeIds: input.allowedIds.nodeIds }) });

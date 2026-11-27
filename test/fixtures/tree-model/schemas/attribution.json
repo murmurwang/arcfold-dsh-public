@@ -76,6 +76,109 @@
               "name"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "move"
+              },
+              "nodeId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "node"
+              },
+              "parentId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "node"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "action",
+              "nodeId",
+              "parentId",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "rename"
+              },
+              "nodeId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "node"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 80
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "action",
+              "nodeId",
+              "name",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "add_parent"
+              },
+              "nodeId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 512,
+                "x-reference": "node"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 80
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]*$",
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "action",
+              "nodeId",
+              "name",
+              "reason"
+            ],
+            "additionalProperties": false
           }
         ]
       },

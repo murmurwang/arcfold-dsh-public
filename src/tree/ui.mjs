@@ -55,7 +55,10 @@ export class TreeUIService {
   read(endpoint, payload, context, scope) {
     if (endpoint === 'session.current') { shape(payload, []); const turn = this.repo.list('tree_turns', t => t.sessionId === context.sessionId).sort((a, b) => b.nativeTurn - a.nativeTurn)[0];
       if (turn && turn.nodeIds.some(id => !scope.nodeIds.includes(id))) fail('BROWSE_SCOPE', 'Current turn outside scope', 403);
-      const nodeIds = turn?.nodeIds ?? [this.repo.rootId()]; return { attribution: this.attribution && scope.nodeIds.length === this.repo.list('tree_nodes', n => !n.deleted).length ? this.attribution.capacity(context.sessionId) : null, turnId: turn?.id ?? null, paths: nodeIds.map(id => this.repo.ancestors(id).filter(n => scope.nodeIds.includes(n.id))), turnIds: this.repo.list('tree_turns', t => t.sessionId === context.sessionId && t.nodeIds.every(id => scope.nodeIds.includes(id))).map(t => ({ nativeTurn: t.nativeTurn, turnId: t.id })) }; }
+      const nodeIds = turn?.nodeIds ?? [this.repo.rootId()]; return { attribution: this.attribution && scope.nodeIds.length === this.repo.list('tree_nodes', n => !n.deleted).length ? this.attribution.capacity(context.sessionId) : null, turnId: turn?.id ?? null, paths: nodeIds.map(id => this.repo.ancestors(id).filter(n => scope.nodeIds.includes(n.id))),
+        // What attribution changed in the tree before this turn's answer, and why (092).
+        goalChanges: (turn?.goalChanges ?? []).filter(c => scope.nodeIds.includes(c.nodeId)).map(({ op, name, previousName, parentId, reason }) => ({ op, name, reason,
+          ...(op === 'rename' ? { previousName } : {}), ...(op === 'move' ? { parentName: scope.nodeIds.includes(parentId) ? this.repo.get('tree_nodes', parentId)?.name ?? null : null } : {}) })), turnIds: this.repo.list('tree_turns', t => t.sessionId === context.sessionId && t.nodeIds.every(id => scope.nodeIds.includes(id))).map(t => ({ nativeTurn: t.nativeTurn, turnId: t.id })) }; }
     if (endpoint === 'tree.list') {
       shape(payload, [], ['statusFilter', 'cursor', 'limit']); const statuses = payload.statusFilter ?? STATUSES; array(statuses, 'statusFilter', 4).forEach(s => oneOf(s, STATUSES, 'status'));
       const page = this.page(this.repo.list('tree_nodes', n => !n.deleted && scope.nodeIds.includes(n.id) && statuses.includes(n.status)), payload, 'tree:' + digest(scope.nodeIds));

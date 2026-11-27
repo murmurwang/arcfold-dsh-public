@@ -76,11 +76,12 @@ class RuntimeContextBuilder extends ContextBuilder {
       const turn = this.repo.get('tree_turns', value.turnId), sources = turn.userSourceRefs.map(this.resolveSource);
       const authority = { logicalTurnId: turn.id, assignmentRevision: turn.assignmentRevision,
         // Name and root path of each current goal, so main sees every turn what
-        // the turn is filed under and can revise it, including on an ancestor.
+        // the turn is filed under. Goals are adjusted before the answer by
+        // attribution; main does not revise them.
         nodes: turn.nodeIds.map(id => { const node = this.repo.get('tree_nodes', id); return { id, name: node.name, expectedRevision: node.revision,
           path: this.repo.ancestors(id).map(n => ({ id: n.id, name: n.name, expectedRevision: n.revision })) }; }),
         evidence: sources.filter(Boolean).map(s => ({ id: s.id, messageId: s.ref.messageId })), fileRefs: [],
-        instruction: '以最后一份编号表为准，之前编号表里的版本号和证据编号已经失效。工具参数的节点版本和证据编号必须逐字使用本段当前值；此编号表不增加执行授权。nodes是本轮当前目标，path从根到当前目标。回答前对照：要做成的结果已经不是它，就用arcfold_revise_goal修改，同一结果下换步骤不算；要在path上某一层下面新建，create_child的nodeId填那一层；它或它下面的某个目标其实属于全局概貌里另一个目标，用move挪过去，挪下面的目标时expectedRevision填当前目标的版本。' };
+        instruction: '以最后一份编号表为准，之前编号表里的版本号和证据编号已经失效。工具参数的节点版本和证据编号必须逐字使用本段当前值；此编号表不增加执行授权。nodes是本轮当前目标，path从根到当前目标。目标已在回答前调整好，你不修改目标。' };
       // Keyed by the current goals, not the turn: while they stay the same, an
       // earlier table keeps its place (stable prefix) and the new one is
       // appended; a different goal set retires the earlier table as before.
@@ -527,6 +528,8 @@ export class TreeRuntime {
     }).catch(error => this.diagnostic('turn_settlement', error, { sessionId: session.id, nativeTurn: event.data.turn }));
     this.settlements.set(session.id, promise); return promise;
   }
+  // Main no longer has a goal tool (092). Turns recorded before that may still
+  // hold pending revisions; they are applied as before.
   // Applies main's structural goal revisions once its turn has ended, before
   // settlement queues learning, so this turn's learning lands on the revised
   // goal and the next attribution starts there. Also records whether the final

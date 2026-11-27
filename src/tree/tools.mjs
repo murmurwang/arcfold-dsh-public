@@ -1,5 +1,5 @@
 import { canonicalJson, digest, fail, shape, text, integer, array, oneOf } from './contracts.mjs';
-import { TreeService, currentGoalAbove } from './tree.mjs';
+import { TreeService } from './tree.mjs';
 import { ExperienceService } from './experience.mjs';
 import { bindTurnSnapshot } from './ui.mjs';
 import { HarnessError } from '@deepseek-ai/dsh-llm';
@@ -9,7 +9,6 @@ const requiredVersion = { type: 'integer', required: true };
 const strings = { type: 'array', required: true, items: { type: 'string' } };
 export const TREE_TOOLS = Object.freeze({
   arcfold_mark_complete: { nodeId: requiredString, expectedRevision: requiredVersion, reason: requiredString },
-  arcfold_revise_goal: { op: { type: 'string', enum: ['rename', 'add_parent', 'create_child', 'switch', 'move'], required: true }, nodeId: requiredString, expectedRevision: requiredVersion, name: { type: 'string' }, parentId: { type: 'string' }, reason: requiredString },
   arcfold_read_history: { nodeId: requiredString, kind: { type: 'string', enum: ['summary', 'turns'], required: true }, afterTurnId: { type: 'string' }, limit: { type: 'integer' } },
   arcfold_read_method: { methodId: requiredString, expectedVersion: { type: 'integer' } },
   arcfold_run_method_script: { methodId: requiredString, expectedVersion: requiredVersion, scriptId: requiredString, args: { type: 'object', required: true, additionalProperties: true } },
@@ -17,7 +16,6 @@ export const TREE_TOOLS = Object.freeze({
 });
 const descriptions = {
   arcfold_mark_complete: '把本轮目标标为助手判断的完成，保留理由和来源；先检查对应钩子，用户仍可重新打开。',
-  arcfold_revise_goal: '目标是这件事要做成的结果。只在本轮对话确实显出要做成的结果变了、或目标放错了位置时修改；同一结果下换做法或步骤不改。依据须是本轮用户说出的结果或用户认可的内容，只是助手对下一步的理解时不改；拿不准就先问用户。rename：同一个结果有了更准确的说法，改写当前目标名字，下一步即生效。create_child：对话进到更具体的一层，在当前目标或它路径上的某一层下新建子目标并把本轮转过去，nodeId填那一层。add_parent：讨论里出现了更上层的目标，在当前目标之上加一层，并把本轮转到新上层。switch：本轮其实在做另一个已有候选目标，nodeId填那个目标，expectedRevision填编号表里当前目标的版本，不填name。move：当前目标或它下面的某个目标其实属于全局概貌里另一个进行中目标，nodeId填要挪的那个目标，parentId填新上级，不填name；挪当前目标时expectedRevision填它自己的版本，挪它下面的目标时填编号表里当前目标的版本；挪的是原目标，经历、条目和下级跟着走。后四种在本轮回答结束时生效。name以用户为主语，写具体对象和要做成的结果，不写对齐、讨论、整理这类过程。修改后在回复里用一句话告诉用户改成了什么或挪到了哪里，用户可以当场纠正。',
   arcfold_read_history: '在当前节点的上级链或直接子节点分页读取原始经历或摘要。来源已撤回时不返回原文。',
   arcfold_read_method: '读取当前范围内一个有效方法的完整说明、准确版本和脚本逻辑编号。读取不扩大权限。',
   arcfold_run_method_script: '通过受限执行入口运行当前有效方法脚本。自动检查版本、权限和快照；参数不接受路径、命令或权限覆盖。',
@@ -55,72 +53,6 @@ export async function executeTreeTool(ctx, runtime, name, args, exec) {
     repo.command('recordCompletionReason', { requestId: digest([requestId, 'reason']), expected: {}, input: { nodeId: args.nodeId, reason: args.reason, callId: exec.callId, receiptId: receipt.id } }, actor, () => ({ receiptId: receipt.id }));
     // Final consolidation is queued after the current turn has settled.
     return { ...receipt.result, revision: repo.get('tree_nodes', args.nodeId).revision, receiptId: receipt.id };
-  }
-  if (name === 'arcfold_revise_goal') {
-    shape(args, ['op', 'nodeId', 'expectedRevision', 'reason'], ['name', 'parentId']); oneOf(args.op, ['rename', 'add_parent', 'create_child', 'switch', 'move'], 'op');
-    integer(args.expectedRevision, 'expectedRevision', 1); text(args.reason, 'reason', 2000);
-    // Some models fill the optional parentId with an empty string on every
-    // call and keep doing so after an error; outside move that means not given.
-    if (args.op !== 'move' && typeof args.parentId === 'string' && args.parentId.trim() === '') { args = { ...args }; delete args.parentId; }
-    if (args.op !== 'move' && args.parentId !== undefined) fail('INVALID_FIELD', 'parentId is only for move: omit parentId for this op');
-    // Switch quotes a current goal's revision; a move below a current goal
-    // quotes that current goal's. Other edits quote the target's own revision.
-    let guardId = args.nodeId;
-    if (args.op === 'move') {
-      // The moved goal keeps its identity and history; only its parent changes.
-      // It is a current goal or a goal below one, so tidying from an upper goal
-      // can fix a misplaced goal under it. The new parent is one of the goals
-      // main sees in the overview.
-      if (args.name !== undefined) {
-        const given = typeof args.name === 'string' ? args.name.trim() : null, own = repo.get('tree_nodes', args.nodeId)?.name.trim();
-        if (given === null || (given !== '' && given !== own)) fail('INVALID_FIELD', 'move keeps the goal name: omit name, or move first and rename in the next turn');
-        args = { ...args }; delete args.name;
-      }
-      text(args.parentId, 'parentId', 200);
-      if (args.nodeId === repo.rootId()) fail('ROOT_INVARIANT', 'The root goal cannot move');
-      const above = currentGoalAbove(repo, scope.nodeIds, args.nodeId);
-      if (!above) fail('OUT_OF_SCOPE', 'Only a current goal of this turn, or a goal below it, can be moved');
-      guardId = above;
-      const parent = repo.get('tree_nodes', args.parentId), branch = repo.meta().attributionSelections?.[agent.session.id]?.nodeId;
-      if (!parent || parent.deleted || parent.status !== 'active') fail('OUT_OF_SCOPE', 'The new parent must be an active goal in the overview');
-      if (branch && !repo.ancestors(parent.id).some(a => a.id === branch)) fail('OUT_OF_SCOPE', 'The new parent must be inside the branch selected for this chat');
-      if (repo.ancestors(parent.id).some(a => a.id === args.nodeId)) fail('TREE_CYCLE', 'A goal cannot move below itself');
-      if (repo.get('tree_nodes', args.nodeId)?.parentId === parent.id) fail('INVALID_FIELD', 'The goal is already under this parent');
-    } else if (args.op === 'switch') {
-      // Some models always fill optional fields. An empty name or the target's
-      // own name changes nothing, so it is dropped; a different name is refused.
-      if (args.name !== undefined) {
-        const target = repo.get('tree_nodes', args.nodeId), given = typeof args.name === 'string' ? args.name.trim() : null;
-        if (given === null || (given !== '' && target && given !== target.name.trim())) fail('INVALID_FIELD', 'switch keeps the existing goal name: omit name, or switch first and rename in the next turn');
-        args = { ...args }; delete args.name;
-      }
-      if (scope.nodeIds.includes(args.nodeId)) fail('INVALID_FIELD', 'This goal is already current');
-      if (!runtime.attribution.candidateNodes().some(n => n.id === args.nodeId)) fail('OUT_OF_SCOPE', 'Only an existing candidate goal can be switched to');
-      guardId = scope.nodeIds.find(id => repo.get('tree_nodes', id)?.revision === args.expectedRevision);
-      if (!guardId) fail('REVISION_CONFLICT', 'The current goal changed; use its revision from this turn\'s node table');
-    } else {
-      text(args.name, 'name', 80);
-      const onPath = args.op === 'create_child' && scope.ancestorPaths.some(path => path.includes(args.nodeId));
-      if (!scope.nodeIds.includes(args.nodeId) && !onPath) fail('OUT_OF_SCOPE', 'Only a current goal of this turn, or for create_child a goal on its path, can be revised');
-    }
-    const node = repo.get('tree_nodes', args.nodeId);
-    if (!node || node.deleted) fail('NODE_NOT_FOUND', 'Goal not found');
-    if (repo.get('tree_nodes', guardId).revision !== args.expectedRevision) fail('REVISION_CONFLICT', guardId === args.nodeId ? 'Goal changed; read it again before revising' : 'The current goal changed; use its revision from this turn');
-    const tree = new TreeService(options), sourceRefs = job.input.sources.map(s => s.ref), revisionId = digest(['goal-revision', scope.turnId, exec.callId]);
-    const record = (state, extra = {}) => {
-      const turn = repo.get('tree_turns', scope.turnId);
-      return tree.recordGoalRevision({ requestId: digest([requestId, 'record']), expected: { ['tree_turns:' + turn.id]: turn.revision },
-        input: { turnId: turn.id, revision: { id: revisionId, op: args.op, nodeId: args.nodeId, reason: args.reason, callId: exec.callId, state, ...(args.name !== undefined ? { name: args.name } : {}), ...(args.parentId !== undefined ? { parentId: args.parentId } : {}), ...extra } } });
-    };
-    if (args.op === 'rename') {
-      const before = repo.list('tree_nodes'), receipt = tree.renameGoal({ requestId, expected: { ['tree_nodes:' + node.id]: node.revision }, input: { nodeId: node.id, name: args.name, sourceRefs } });
-      runtime.metrics.observeTree(receipt, before, { logicalTurnId: scope.turnId });
-      record('applied', { previousName: node.name });
-      return { op: 'rename', nodeId: node.id, name: args.name, previousName: node.name, effective: 'next_step', revision: repo.get('tree_nodes', node.id).revision };
-    }
-    record('pending');
-    if (args.op === 'move') return { op: 'move', nodeId: node.id, name: node.name, parentId: args.parentId, parentName: repo.get('tree_nodes', args.parentId).name, effective: 'turn_end' };
-    return { op: args.op, nodeId: node.id, ...(args.name !== undefined ? { name: args.name } : { name: node.name }), effective: 'turn_end' };
   }
   if (name === 'arcfold_read_history') {
     shape(args, ['nodeId', 'kind'], ['afterTurnId', 'limit']); oneOf(args.kind, ['summary', 'turns'], 'kind');

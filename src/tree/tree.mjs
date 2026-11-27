@@ -48,9 +48,9 @@ export class TreeService extends DomainService {
       this.replace('tree_nodes', child, { status, statusOrigin: 'cascade', cascadeFromId: id, statusSourceRefs: refs, statusChangedAt: this.repo.now() }); visit(child.id);
     } }; visit(id);
   }
-  #invalidateScope(ids, reason) {
+  #invalidateScope(ids, reason, committingJobId = null) {
     for (const e of this.repo.list('tree_exposures', e => !e.revoked && e.nodeIds.some(id => ids.includes(id)))) this.replace('tree_exposures', e, { revoked: true, invalidationReason: reason });
-    for (const j of this.repo.list('tree_jobs', j => !['committed', 'failed', 'cancelled', 'unknown', 'invalid_output', 'stale'].includes(j.status) && (j.nodeIds ?? [j.scopeKey]).some(id => ids.includes(id)))) {
+    for (const j of this.repo.list('tree_jobs', job => job.id !== committingJobId && !['committed', 'failed', 'cancelled', 'unknown', 'invalid_output', 'stale'].includes(job.status) && (job.nodeIds ?? [job.scopeKey]).some(id => ids.includes(id)))) {
       if (!j.role && j.kind === 'learning' && MOVE_INVALIDATIONS.includes(reason)) continue;
       this.replace('tree_jobs', j, { status: j.status === 'submitted' ? 'submitted' : 'stale', invalidated: true, error: reason });
     }
@@ -65,16 +65,53 @@ export class TreeService extends DomainService {
       if (userRefs.some(r => !refs.some(s => canonicalJson(r) === canonicalJson(s)))) fail('INVALID_SOURCE', 'User references must be included in the turn');
       const logicalTurnId = digest(['turn', input.sessionId, input.nativeTurn]), id = logicalTurnId;
       if (this.repo.get('tree_turns', id)) fail('TURN_EXISTS', 'This native turn has already been attributed');
-      let nodeIds, createdNodeIds = [], fallback = null;
+      // Attribution also adjusts the tree before the answer (092): a move, a
+      // rename or a new parent changes the background main is given, so it has
+      // to happen before the context is built. goalChanges is what the panel shows.
+      let nodeIds, createdNodeIds = [], fallback = null, goalChanges = [], moved = [], relocated = [];
       try {
         nodeIds = this.repo.transaction(() => {
           if (input.failure) fail('ATTRIBUTION_FAILED', text(input.failure, 'failure', 2000));
           array(input.actions, 'actions', 8); if (!input.actions.length) fail('INVALID_FIELD', 'An attribution action is required', 400);
-          const selected = [];
+          let selected = [];
           for (const action of input.actions) {
-            oneOf(action.action, ['continue', 'switch', 'create', 'create_child'], 'action');
+            oneOf(action.action, ['continue', 'switch', 'create', 'create_child', 'move', 'rename', 'add_parent'], 'action');
             let target;
             if (['continue', 'switch'].includes(action.action)) { shape(action, ['action', 'nodeId']); this.candidate(action.nodeId); target = this.node(action.nodeId).id; }
+            else if (action.action === 'move') {
+              // The goal keeps its id, name, items, summaries and children; only
+              // its parent changes. It does not choose this turn's goal.
+              shape(action, ['action', 'nodeId', 'parentId', 'reason']); text(action.reason, 'reason', 200);
+              this.candidate(action.nodeId); this.candidate(action.parentId);
+              const node = this.node(action.nodeId), parent = this.node(action.parentId);
+              if (node.id === this.repo.rootId()) fail('ROOT_INVARIANT', 'The root goal cannot move');
+              if (parent.status !== 'active') fail('INVALID_FIELD', 'The new parent must be an active goal');
+              if (this.repo.ancestors(parent.id).some(a => a.id === node.id)) fail('TREE_CYCLE', 'A goal cannot move below itself');
+              if (node.parentId === parent.id) fail('INVALID_FIELD', 'The goal is already under this parent');
+              goalChanges.push({ op: 'move', nodeId: node.id, name: node.name, fromParentId: node.parentId, parentId: parent.id, reason: action.reason });
+              this.replace('tree_nodes', node, { parentId: parent.id }); relocated.push(node.id); continue;
+            } else if (action.action === 'rename') {
+              // Same goal, a more accurate name. It does not choose this turn's goal.
+              shape(action, ['action', 'nodeId', 'name', 'reason']); text(action.name, 'name', 80); text(action.reason, 'reason', 200);
+              this.candidate(action.nodeId); const node = this.node(action.nodeId);
+              if (node.id === this.repo.rootId()) fail('ROOT_INVARIANT', 'The root goal keeps its name');
+              if (node.nameUserProtected) fail('USER_PROTECTED', 'The user named this goal');
+              if (node.name === action.name) continue;
+              goalChanges.push({ op: 'rename', nodeId: node.id, name: action.name, previousName: node.name, reason: action.reason });
+              // The summary was written under the old name; it is refreshed once
+              // this turn's learning settles, and its one line is hidden until then.
+              this.replace('tree_nodes', node, { name: action.name, nameOrigin: 'model', summaryNameStale: true }); continue;
+            } else if (action.action === 'add_parent') {
+              // A new goal between the goal and its old parent; the turn moves to
+              // the new goal, as the goal stays below it.
+              shape(action, ['action', 'nodeId', 'name', 'reason']); text(action.name, 'name', 80); text(action.reason, 'reason', 200);
+              this.candidate(action.nodeId); const node = this.node(action.nodeId);
+              if (node.id === this.repo.rootId()) fail('ROOT_INVARIANT', 'The root goal has no parent');
+              target = randomUUID(); this.repo.save('tree_nodes', { id: target, parentId: node.parentId, name: action.name, status: 'active', statusOrigin: 'model', sourceRefs: userRefs, lastOwnTurnAt: null, lastSummaryWatermark: null }); createdNodeIds.push(target);
+              this.replace('tree_nodes', this.node(node.id), { parentId: target }); moved.push(node.id);
+              selected = selected.filter(id => id !== node.id);
+              goalChanges.push({ op: 'add_parent', nodeId: target, childId: node.id, name: action.name, reason: action.reason });
+            }
             else {
               shape(action, action.action === 'create' ? ['action', 'name'] : ['action', 'parentId', 'name']); text(action.name, 'name', 80);
               const parentId = action.action === 'create' ? this.repo.rootId() : this.node(action.parentId).id;
@@ -88,23 +125,26 @@ export class TreeService extends DomainService {
             this.candidate(change.nodeId);
             this.#status(change.nodeId, change.status, change.sourceRefs);
           }
+          if (!selected.length) fail('INVALID_FIELD', 'An action must choose this turn\'s goal', 400);
           return [...new Set(selected)];
         });
       } catch (error) {
         // Only invalid attribution output falls back. Database/CAS/actor failures
         // must remain explicit failures rather than masquerading as safe routing.
-        if (!['ATTRIBUTION_FAILED', 'INVALID_SHAPE', 'INVALID_FIELD', 'NODE_NOT_FOUND', 'ROOT_INVARIANT', 'INVALID_SOURCE', 'SOURCE_CHANGED', 'USER_SOURCE_REQUIRED'].includes(error.code)) throw error;
-        fallback = { code: error.code, reason: error.message, visible: true }; createdNodeIds = [];
+        if (!['ATTRIBUTION_FAILED', 'INVALID_SHAPE', 'INVALID_FIELD', 'NODE_NOT_FOUND', 'ROOT_INVARIANT', 'INVALID_SOURCE', 'SOURCE_CHANGED', 'USER_SOURCE_REQUIRED', 'TREE_CYCLE', 'USER_PROTECTED'].includes(error.code)) throw error;
+        fallback = { code: error.code, reason: error.message, visible: true }; createdNodeIds = []; goalChanges = []; moved = []; relocated = [];
         const prior = this.repo.list('tree_turns', t => t.sessionId === input.sessionId && t.nativeTurn < input.nativeTurn).sort((a, b) => b.nativeTurn - a.nativeTurn)[0];
         nodeIds = (prior?.nodeIds ?? []).filter(id => { const n = this.repo.get('tree_nodes', id); return n && !n.deleted; });
         if (!nodeIds.length) nodeIds = [this.repo.rootId()];
       }
-      const turn = this.repo.save('tree_turns', { id, sessionId: input.sessionId, nativeTurn: input.nativeTurn, logicalTurnId, userSourceRefs: userRefs, sourceRefs: refs, nodeIds, createdNodeIds, assignmentRevision: 1, status: 'open', startedAt: this.repo.now(), attributionRunId: input.attributionRunId ?? null, fallback });
+      const turn = this.repo.save('tree_turns', { id, sessionId: input.sessionId, nativeTurn: input.nativeTurn, logicalTurnId, userSourceRefs: userRefs, sourceRefs: refs, nodeIds, createdNodeIds, ...(goalChanges.length ? { goalChanges } : {}), assignmentRevision: 1, status: 'open', startedAt: this.repo.now(), attributionRunId: input.attributionRunId ?? null, fallback });
       for (const nodeId of nodeIds) {
         this.repo.save('tree_links', { id: digest(['link', id, 1, nodeId]), turnId: id, nodeId, assignmentRevision: 1, active: true, sourceRefs: refs });
         this.replace('tree_nodes', this.node(nodeId), { lastOwnTurnAt: turn.startedAt });
       }
-      this.#touchStructure(); return { turnId: id, logicalTurnId, nodeIds, createdNodeIds, fallback };
+      for (const [ids, reason] of [[moved, 'goal_parent_added'], [relocated, 'goal_moved']]) if (ids.length)
+        this.#invalidateScope(this.repo.list('tree_nodes', n => !n.deleted && this.repo.ancestors(n.id).some(a => ids.includes(a.id))).map(n => n.id), reason, actor.kind === 'model' ? actor.id : null);
+      this.#touchStructure(); return { turnId: id, logicalTurnId, nodeIds, createdNodeIds, goalChanges, fallback };
     });
   }
   moveNode(command) {
