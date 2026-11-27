@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { setup } from '../tree-context/helpers.mjs';
 import { EpisodeSignals } from '../../../src/tree/signals.mjs';
 import { ClusterService } from '../../../src/tree/clusters.mjs';
@@ -11,6 +12,14 @@ export function learningFixture(t, options = {}) {
   const clusters = new ClusterService({ repository: f.repo, signals });
   const learning = new LearningService({ repository: f.repo, experience: f.experience, contextBuilder: f.builder, consolidation: f.consolidation, jobs: f.jobs, modelConfig: f.config, signals, outputProtocol: 'legacy-v3', ...options });
   let sequence = 0;
+  // Unlike the generic fixture's create(), this seeds only a goal, without
+  // an artificial attribution that would leave a permanently open turn.
+  function seedGoal(name, parentId = f.repo.rootId()) {
+    const id = randomUUID();
+    f.repo.transaction(() => f.repo.save('tree_nodes', { id, parentId, name, status: 'active', statusOrigin: 'user',
+      sourceRefs: [f.ref], lastOwnTurnAt: null, lastSummaryWatermark: null }));
+    return id;
+  }
   async function turn(nodeId, text = '合成用户反馈', sessionId = 'native-main', extraNodes = []) {
     const input = f.begin(sessionId, ++sequence, text); f.owner.targetNodeId = nodeId;
     const result = await f.attributed(input), id = result.id;
@@ -29,5 +38,5 @@ export function learningFixture(t, options = {}) {
     const output = { ...emptyLearning(), categories: [{ category, note: '合成分类，非真实语义判分', sourceId: source.id, subjectIds: [] }] };
     return { turn: experience, job: complete(job, output), source, output };
   }
-  return { ...f, signals, clusters, learning, turn, complete, feedback };
+  return { ...f, signals, clusters, learning, seedGoal, turn, complete, feedback };
 }
