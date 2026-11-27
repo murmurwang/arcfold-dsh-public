@@ -222,7 +222,7 @@ test('R05 real model owner starts a new native learning session with summary, re
 test('the turn table stays in place while the goals stay the same, and is retired when they change', async t => {
   const { integratedFixture } = await import('./fixtures/tree-integration/native.mjs');
   const tables = body => body.messages.flatMap(m => m.content ?? []).flatMap(b => { if (b.type !== 'text') return []; try { const v = JSON.parse(b.text); return v.logicalTurnId ? [v] : []; } catch { return []; } });
-  let phase = 'one', firstTable, staleResult;
+  let phase = 'one';
   const mains = [];
   const f = await integratedFixture(t, (row, { repo }) => {
     if (row.role === 'attribution') return phase === 'three' ? { actions: [{ action: 'create', name: '目标乙' }], statusChanges: [] }
@@ -230,12 +230,7 @@ test('the turn table stays in place while the goals stay the same, and is retire
     if (row.role === 'learning') return { understandings: [], revisions: [], methods: [], supplements: [], categories: [] };
     if (row.role !== 'main') return minimal[row.role] ?? '合成答复。';
     mains.push({ phase, body: row.body });
-    if (phase === 'one') { firstTable ??= tables(row.body).at(-1); return '合成答复一。'; }
-    if (phase === 'two' && mains.filter(m => m.phase === 'two').length === 1) {
-      const node = firstTable.nodes[0];
-      return { tool: { id: 'stale-rename', name: 'arcfold_revise_goal', args: { op: 'rename', nodeId: node.id, expectedRevision: node.expectedRevision, name: '目标甲改名', reason: '合成：用旧编号表的版本号' } } };
-    }
-    if (phase === 'two') staleResult = JSON.stringify(row.body);
+    if (phase === 'one') return '合成答复一。';
     return '合成答复。';
   });
   f.runtime.attribution.timers = { setTimeout: fn => setTimeout(fn, 30000), clearTimeout };
@@ -247,8 +242,8 @@ test('the turn table stays in place while the goals stay the same, and is retire
   const lastOfOne = mains.filter(m => m.phase === 'one').at(-1).body.messages, firstOfTwo = mains.find(m => m.phase === 'two').body.messages;
   assert.equal(canonicalJson(firstOfTwo.slice(0, lastOfOne.length)), canonicalJson(lastOfOne), 'the second turn extends the first turn unchanged');
   assert.equal(tables({ messages: firstOfTwo }).length, 2); assert.match(tables({ messages: firstOfTwo }).at(-1).instruction, /^以最后一份编号表为准/);
-  assert.equal(f.repo.get('tree_nodes', goal).name, '目标甲', 'a stale revision from the earlier table cannot rename the goal');
-  assert.match(staleResult, /REVISION_CONFLICT|Goal changed/);
+  assert.doesNotMatch(tables({ messages: firstOfTwo }).at(-1).instruction, /arcfold_revise_goal/, 'main is not told to revise goals');
+  assert.equal(f.repo.get('tree_nodes', goal).name, '目标甲');
   phase = 'three'; await f.turn(agent, '换个事：目标乙。');
   assert.ok(replaced().length >= 1, 'a different goal set retires the earlier table');
   assert.equal(tables({ messages: mains.at(-1).body.messages }).length, 1);

@@ -17,7 +17,8 @@ export function setup(t) {
   const owner = { calls: 0, async run(id) {
     this.calls++; jobs.prepare(id); jobs.submit(id);
     const job = jobs.get(id), nodeId = this.targetNodeId ?? job.input.allowedIds.nodeIds.find(id => id !== f.repo.rootId()) ?? f.repo.rootId();
-    jobs.receive(id, { message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify({ actions: [{ action: 'continue', nodeId }], statusChanges: [] }) }] }, nativeLogRef: 'synthetic-model-log#1', eventsHash: digest('synthetic-model-log') });
+    const output = this.output ? this.output(job) : { actions: [{ action: 'continue', nodeId }], statusChanges: [] };
+    jobs.receive(id, { message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(output) }] }, nativeLogRef: 'synthetic-model-log#1', eventsHash: digest('synthetic-model-log') });
     jobs.validate(id); return jobs.commit(id, (result, context) => attribution.applyResult(result, context));
   } };
   const config = () => ({ provider: 'offline', model: 'fixture', reasoningEffort: 'off', maxTokens: 2048, preset: 'fixture', cwd: f.dir, modelVersion: 'synthetic', priceVersion: 'synthetic', budgetScope: 'offline-no-http', stage: 'offline' });

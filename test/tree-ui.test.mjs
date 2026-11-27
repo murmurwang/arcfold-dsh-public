@@ -407,3 +407,26 @@ test('a verification result for a learned method is shown on its card', async t 
   await act(async () => document.querySelector('.tree-item>summary').click());
   assert.match(document.body.textContent, /达到预期 · 本轮按做法核对了已有决定/);
 });
+
+test('goal panel shows what the judgment before the answer changed in the tree this turn, and why', async t => {
+  const f = uiFixture(t), app = f.create('我办好社区开放日'), article = f.create('我完成展览导览图'), turn = await f.turn(article, '导览图是给开放日访客用的');
+  const row = f.repo.get('tree_turns', turn.id);
+  f.repo.transaction(() => f.repo.save('tree_turns', { ...row, goalChanges: [
+    { op: 'move', nodeId: article, name: '我完成展览导览图', fromParentId: f.repo.rootId(), parentId: app, reason: '用户确认导览图属于开放日筹备' },
+    { op: 'rename', nodeId: app, name: '我办好博物馆开放日', previousName: '我办好社区开放日', reason: '用户明确了举办地点' }] }, row.revision));
+  const current = await f.call('session.current');
+  assert.deepEqual(current.goalChanges.map(c => [c.op, c.name, c.parentName ?? c.previousName, c.reason]), [
+    ['move', '我完成展览导览图', '我办好社区开放日', '用户确认导览图属于开放日筹备'], ['rename', '我办好博物馆开放日', '我办好社区开放日', '用户明确了举办地点']]);
+  f.restrict([f.repo.rootId(), article]);
+  const limited = await f.call('session.current');
+  assert.deepEqual(limited.goalChanges.map(c => [c.op, c.parentName]), [['move', null]], 'a change outside the browse scope and a parent name outside it are not shown');
+  f.restrict(null);
+  const dom = await domFixture(t, f); await dom.render(React.createElement(TreeDock, { source: dom.source }));
+  assert.equal(document.querySelector('.tree-goal-changes'), null, 'folded, the panel stays one line');
+  await act(async () => goalHeader().click()); await dom.flush();
+  const changes = document.querySelector('.tree-goal-changes'); assert.ok(changes);
+  assert.match(changes.textContent, /这一轮回答前调整了目标/);
+  assert.match(changes.textContent, /挪到「我办好社区开放日」下面：我完成展览导览图/);
+  assert.match(changes.textContent, /用户确认导览图属于开放日筹备/);
+  assert.match(changes.textContent, /改名：我办好社区开放日 → 我办好博物馆开放日/);
+});

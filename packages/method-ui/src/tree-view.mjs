@@ -55,6 +55,12 @@ function GoalChain({ paths, source }) {
     button(h(React.Fragment, null, h(StatusDot, { status: node.status }), h('span', { className: 'tree-node-name' }, node.name), h('small', null, nodeStatus(node))), () => source.openDetails(node.id),
       { className: 'tree-goal-row' + (current ? ' current' : ''), 'data-depth': depth, 'aria-current': current ? 'true' : undefined, style: { paddingInlineStart: 12 + Math.min(depth, 5) * 14 }, title: node.name + ' · ' + nodeStatus(node) }))));
 }
+// What the judgment before the answer changed in the tree this turn, and why.
+function GoalChanges({ changes }) {
+  const what = c => c.op === 'move' ? `挪到「${c.parentName ?? '其他目标'}」下面：${c.name}` : c.op === 'rename' ? `改名：${c.previousName} → ${c.name}` : `加了上层：${c.name}`;
+  return h('section', { className: 'tree-goal-changes', 'aria-label': '这一轮的目标调整' }, h('p', null, '这一轮回答前调整了目标'),
+    h('ul', null, changes.map((c, i) => h('li', { key: i }, h('span', null, what(c)), c.reason && h('small', null, c.reason)))));
+}
 function AttributionRange({ source, state }) {
   const range = state.current.attribution, [editing, setEditing] = useState(false), [branch, setBranch] = useState('');
   useEffect(() => setBranch(range?.selection.nodeId ?? ''), [range?.selection.revision]);
@@ -85,7 +91,7 @@ export function TreeDock({ source }) {
       h('button', { type: 'button', className: 'tree-goal-header', 'aria-expanded': expanded, onClick: () => setOpen(!expanded) },
         h('span', { className: 'tree-goal-icon', 'aria-hidden': true }, h(TargetIcon)), h('span', { className: 'tree-goal-title' }, '目标'),
         h('span', { className: 'tree-goal-summary' + (needsRange ? ' alert' : '') }, goalSummary(state, needsRange)), h('span', { className: 'tree-goal-chevron', 'aria-hidden': true }, h(Chevron, { open: expanded }))),
-      expanded && h('div', { className: 'tree-goal-body' }, h(AttributionRange, { source, state }), state.current.paths.some(p => p.length) && h(GoalChain, { paths: state.current.paths, source }))),
+      expanded && h('div', { className: 'tree-goal-body' }, h(AttributionRange, { source, state }), state.current.paths.some(p => p.length) && h(GoalChain, { paths: state.current.paths, source }), state.current.goalChanges?.length > 0 && h(GoalChanges, { changes: state.current.goalChanges }))),
     state.error && h('small', { role: 'alert' }, state.error),
     state.detailsNodeId && h('div', { role: 'dialog', 'aria-modal': true, 'aria-label': '事项详情', className: 'tree-detail-dialog' }, button('关闭详情', () => source.closeDetails()), h(ReadState, { value: detail }, data => h(NodeDetail, { key: data.node.id, source, detail: data, navigate: id => source.openDetails(id), onDone: () => { setRevision(v => v + 1); void source.refresh(); } }))));
 }
